@@ -1,0 +1,70 @@
+# =============================================================================
+# MUSIC INTELLIGENCE ENGINE — .gitignore
+# Goal: secrets, local data, and artist assets must never reach source control.
+# =============================================================================
+
+# ---- Secrets & environment ---------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*credentials*.json
+*secret*
+secrets/
+
+# ---- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ---- Node / frontend ---------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.next/
+npm-debug.log*
+yarn-error.log*
+
+# ---- Logs & temporary files ---------------------------------------------------
+logs/
+*.log
+tmp/
+temp/
+.cache/
+
+# ---- Local databases (never commit data) --------------------------------------
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+pgdata/
+
+# ---- Uploaded music / media assets (never commit artist files) -----------------
+media/
+uploads/
+*.mp3
+*.wav
+*.aiff
+*.flac
+*.m4a
+
+# ---- n8n local runtime data ----------------------------------------------------
+n8n/data/
+n8n/.workflow-state/
+
+# ---- OS & editor noise ----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

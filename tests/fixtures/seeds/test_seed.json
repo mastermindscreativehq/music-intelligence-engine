@@ -1,0 +1,40 @@
+{
+  "stations": [
+    {
+      "name": "KQXR 101.5 FM",
+      "url": "https://kqxr.example/",
+      "country": "United States",
+      "state_or_region": "Cedar State"
+    },
+    {
+      "name": "KQXR 101.5 FM (www alias)",
+      "url": "http://www.kqxr.example:80/",
+      "country": "United States",
+      "state_or_region": "Cedar State"
+    },
+    {
+      "name": "WXYZ 88.3",
+      "url": "https://wxyz.example/",
+      "country": "United States",
+      "state_or_region": "Alder State"
+    },
+    {
+      "name": "WLDG Freeform Radio",
+      "url": "https://wldg.example/home.html",
+      "country": "United States",
+      "state_or_region": "Alder State"
+    },
+    {
+      "name": "Broken Signal Radio",
+      "url": "https://brokensignal.example/",
+      "country": "United States",
+      "state_or_region": "Nevada State"
+    },
+    {
+      "name": "Wrong Region Station",
+      "url": "https://wrongregion.example/",
+      "country": "Canada",
+      "state_or_region": "Ontario"
+    }
+  ]
+}
