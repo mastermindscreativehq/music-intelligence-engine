@@ -45,7 +45,10 @@ re-enrichment never destroys history.
 
 ### Verification Result
 Verification attempts per claim/method: status (`unverified`, `verified`,
-`failed`, `stale`), method used, evidence reference, verifier (code/human), timestamp.
+`failed`, `stale`, `conflicting`, `unsupported`; the last two are Phase 5
+extensions — sources disagree with both sides preserved, and a stored value
+without provenance respectively), method used, evidence reference, verifier
+(code/human), timestamp.
 
 ### Campaign
 An outreach campaign: purpose, template reference, music/submission links, status

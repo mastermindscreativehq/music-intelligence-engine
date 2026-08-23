@@ -135,7 +135,8 @@ The system preserves, for every extracted fact:
 - `source` (URL + source type)
 - `extraction method` (rule/parser/LLM/manual)
 - `confidence` (0–1)
-- `verification status` (unverified / verified / failed)
+- `verification status` (unverified / verified / failed / stale /
+  conflicting / unsupported)
 - `timestamps` (discovered, last verified)
 
 An email found on a webpage is not assumed to belong to the right organization, the right
