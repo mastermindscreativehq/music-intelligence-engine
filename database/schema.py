@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -139,6 +139,38 @@ CREATE TABLE IF NOT EXISTS ingestion_failures (
     message    TEXT,
     url        TEXT
 );
+"""),
+
+    # Phase 6: append-only persistence for Phase 5 verification output.
+    # Status vocabulary is the reconciled six-value contract
+    # (docs/data-model.md): unverified|verified|failed|stale|
+    # conflicting|unsupported. Results are INSERT-only history; a repeated
+    # verification run appends new rows and never rewrites old ones.
+    (2, """
+CREATE TABLE IF NOT EXISTS verification_runs (
+    run_id       TEXT PRIMARY KEY,
+    started_at   TEXT NOT NULL,
+    completed_at TEXT,
+    summary      TEXT,               -- JSON object: counts per status
+    source       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS verification_results (
+    result_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       TEXT NOT NULL REFERENCES verification_runs(run_id) ON DELETE CASCADE,
+    identity_key TEXT NOT NULL REFERENCES stations(identity_key) ON DELETE CASCADE,
+    claim        TEXT NOT NULL,      -- verbatim from enrichment.verify output
+    status       TEXT NOT NULL CHECK (status IN (
+                     'unverified', 'verified', 'failed', 'stale',
+                     'conflicting', 'unsupported')),
+    method       TEXT,
+    verifier     TEXT,
+    evidence     TEXT,               -- JSON array (provenance preserved)
+    reasons      TEXT,               -- JSON array
+    checked_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_verification_station
+    ON verification_results(identity_key);
 """),
 ]
 

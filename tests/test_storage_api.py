@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 from backend.api import create_server
+from database.schema import SCHEMA_VERSION
 from database.service import (
     PersistenceService,
     contact_uid,
@@ -416,7 +417,7 @@ class Test09ApiStationListing(ApiTestCase):
     def test_health_endpoint(self):
         status, body = self.get("/api/v1/health")
         self.assertEqual(status, 200)
-        self.assertEqual(body["data"]["schema_version"], 1)
+        self.assertEqual(body["data"]["schema_version"], SCHEMA_VERSION)
 
     def test_bad_params_rejected(self):
         for query in ("limit=abc", "limit=0", "limit=5000", "offset=-1"):

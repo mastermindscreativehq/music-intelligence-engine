@@ -494,7 +494,12 @@ class PersistenceService:
 
     def list_stations(self, limit: int = 50, offset: int = 0,
                       q: str | None = None,
-                      status: str | None = None) -> tuple[list[dict], int]:
+                      status: str | None = None,
+                      genre: str | None = None,
+                      format_filter: str | None = None,
+                      country: str | None = None,
+                      min_confidence: float | None = None
+                      ) -> tuple[list[dict], int]:
         clauses, params = [], []
         if q:
             clauses.append("name LIKE ? ESCAPE '\\'")
@@ -502,6 +507,20 @@ class PersistenceService:
         if status:
             clauses.append("status = ?")
             params.append(status)
+        # Phase 6 additive filters (Phase 7 preview). JSON-array columns are
+        # matched as text substrings — portable across SQLite and PostgreSQL.
+        if genre:
+            clauses.append("genres LIKE ? ESCAPE '\\'")
+            params.append("%" + _like_escape(genre) + "%")
+        if format_filter:
+            clauses.append("formats LIKE ? ESCAPE '\\'")
+            params.append("%" + _like_escape(format_filter) + "%")
+        if country:
+            clauses.append("country = ?")
+            params.append(country)
+        if min_confidence is not None:
+            clauses.append("confidence_score >= ?")
+            params.append(float(min_confidence))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             total = self._conn.execute(
@@ -560,6 +579,111 @@ class PersistenceService:
             "url": r["url"], "ok": bool(r["ok"]), "status": r["status"],
             "error_kind": r["error_kind"], "fetched_at": r["fetched_at"],
         } for r in rows]
+
+    # -- verification persistence (Phase 6, append-only) ----------------------
+
+    def persist_verification(self, records: list[dict], report: dict, *,
+                             source: str = "api") -> dict:
+        """Persist a ``verify_records()`` report next to its source records.
+
+        Append-only: every run inserts new history rows; nothing is
+        updated or deleted. Results whose station is unknown to storage
+        are skipped and counted — verification never creates stations.
+        """
+        if not isinstance(report, dict) \
+                or not isinstance(report.get("records"), list):
+            raise TypeError("report must be a verify_records() report dict")
+        run_id = str(uuid.uuid4())
+        stored = skipped = 0
+        dict_records = [r for r in records if isinstance(r, dict)]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO verification_runs(run_id, started_at, "
+                "completed_at, summary, source) VALUES (?, ?, ?, ?, ?)",
+                (run_id, str(report.get("started_at") or utc_now_iso()),
+                 str(report.get("completed_at") or ""),
+                 _dumps(report.get("summary") or {}), str(source)))
+            for entry, record in zip(report["records"], dict_records):
+                try:
+                    _, stable_id, _ = normalize_intelligence_record(record)
+                except Exception:
+                    skipped += len(entry.get("results") or [])
+                    continue
+                known = self._conn.execute(
+                    "SELECT 1 FROM stations WHERE identity_key=?",
+                    (stable_id,)).fetchone()
+                if not known:
+                    skipped += len(entry.get("results") or [])
+                    continue
+                for result in entry.get("results") or []:
+                    self._conn.execute(
+                        "INSERT INTO verification_results(run_id, "
+                        "identity_key, claim, status, method, verifier, "
+                        "evidence, reasons, checked_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, stable_id, str(result.get("claim")),
+                         str(result.get("status")), result.get("method"),
+                         result.get("verifier"),
+                         _dumps(result.get("evidence") or []),
+                         _dumps(result.get("reasons") or []),
+                         str(result.get("checked_at") or "")))
+                    stored += 1
+            self._conn.execute(
+                "UPDATE verification_runs SET completed_at=? WHERE run_id=?",
+                (str(report.get("completed_at") or utc_now_iso()), run_id))
+        return {"run_id": run_id, "stored": stored, "skipped": skipped}
+
+    def get_verification(self, identity_key: str) -> dict | None:
+        """Append-only verification history for one station."""
+        with self._lock:
+            run_rows = self._conn.execute(
+                "SELECT * FROM verification_runs WHERE run_id IN "
+                "(SELECT DISTINCT run_id FROM verification_results "
+                "WHERE identity_key=?) ORDER BY started_at DESC",
+                (identity_key,)).fetchall()
+            result_rows = self._conn.execute(
+                "SELECT * FROM verification_results WHERE identity_key=? "
+                "ORDER BY checked_at DESC, result_id DESC",
+                (identity_key,)).fetchall()
+        if not run_rows:
+            return None
+        return {
+            "runs": [{
+                "run_id": r["run_id"],
+                "started_at": r["started_at"],
+                "completed_at": r["completed_at"],
+                "summary": _loads(r["summary"], default={}),
+                "source": r["source"],
+            } for r in run_rows],
+            "results": [{
+                "claim": r["claim"], "status": r["status"],
+                "method": r["method"], "verifier": r["verifier"],
+                "evidence": _loads(r["evidence"], default=[]),
+                "reasons": _loads(r["reasons"], default=[]),
+                "checked_at": r["checked_at"], "run_id": r["run_id"],
+            } for r in result_rows],
+        }
+
+    def get_ingestion_run(self, run_id: str) -> dict | None:
+        """One ingestion run with its failure ledger (or None)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ingestion_runs WHERE run_id=?",
+                (run_id,)).fetchone()
+            if not row:
+                return None
+            failures = self._conn.execute(
+                "SELECT stage, error_kind, message, url FROM "
+                "ingestion_failures WHERE run_id=? ORDER BY failure_id",
+                (run_id,)).fetchall()
+        return {
+            "run_id": row["run_id"], "source": row["source"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "records_accepted": row["records_accepted"],
+            "records_failed": row["records_failed"],
+            "failures": [dict(f) for f in failures],
+        }
 
     # -- row shaping -------------------------------------------------------------
 
