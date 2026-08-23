@@ -1,22 +1,28 @@
 # backend/
 
-Application/API layer (Phase 6).
+Application/API layer (Phases 4–7).
 
 **Owns:** serving stored organizations, contacts, intelligence records,
-search and filtering, verification exposure, ingestion API.
+search and filtering, verification exposure, ingestion API, and the
+single-origin operator server for the `frontend/` console.
 
 **Does not own:** crawler-specific logic (→ `crawler/`), classification
 rules (→ `enrichment/`), message generation or delivery (→ `outreach/`),
 orchestration (→ `n8n/`).
 
-## Two servers, one contract
+## Three servers, one contract
+
+All servers delegate to the same framework-free dispatcher in
+`routes.py`, which owns the route table (`ROUTE_TABLE`) and returns
+identical envelopes — the frontend contract tests pin this coupling.
 
 | Server | Module | Stack | Use |
 | --- | --- | --- | --- |
 | Stdlib reference server | `api.py` (`python -m backend.api`) | stdlib only | offline/tests, zero dependencies |
 | FastAPI application | `app.py` (`python -m backend.app`) | FastAPI + Uvicorn over an injected storage backend (`--db` SQLite / `--dsn` PostgreSQL) | Phase 6 primary per `docs/architecture.md` |
+| Operator console server | `webapp.py` (`python -m backend.webapp`) | stdlib; serves `frontend/` static + API on one origin (`--db/--host/--port/--static`) | Phase 7 operator UI |
 
-Both serve the identical envelope and payload shapes; response builders
+All serve the identical envelope and payload shapes; response builders
 live in `contracts.py` and are shared verbatim.
 
 ## Envelope

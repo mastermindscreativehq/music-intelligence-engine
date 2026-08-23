@@ -4,15 +4,16 @@ A production-oriented **music industry intelligence & outreach platform**, desig
 discover, enrich, verify, and score legitimate music-industry contacts — starting with
 **radio stations** — and to support careful, human-approved music outreach.
 
-> **Current phase: PHASE 6 — DATABASE / API.**
-> Phases 1–5 are complete (foundation; radio discovery; website intelligence
+> **Current phase: PHASE 7 — FRONTEND (complete).**
+> Phases 1–6 are complete (foundation; radio discovery; website intelligence
 > with bounded opt-in fetching; contact extraction; SQLite storage + API;
-> cross-source comparison, verification workflow, optional Ollama layer).
-> Phase 6 adds dual-backend persistence (SQLite reference + PostgreSQL
-> migrations/storage), append-only verification history, and the FastAPI
-> application serving the same envelope contract plus ingestion/verification
-> endpoints — see [`backend/README.md`](backend/README.md) and
-> [`database/README.md`](database/README.md).
+> cross-source comparison, verification workflow, optional Ollama layer;
+> dual-backend persistence + FastAPI application).
+> Phase 7 adds the **zero-dependency operator console** (`frontend/`),
+> served same-origin by `backend.webapp` against the real Phase 4–6 API:
+> search & filter stations, inspect intelligence with confidence and
+> source attribution, review verification history, and select recipients
+> (selection only — the console never sends anything).
 > No crawling of live sites has been performed by this repo yet; no outreach
 > exists.
 
@@ -49,8 +50,8 @@ DISCOVER → CRAWL → EXTRACT → NORMALIZE → ENRICH → VERIFY → SCORE
 | `discovery/radio/` | Radio pipeline + enrichment engine + normalized intelligence schema | Phase 2–3 ✓ |
 | `crawler/`    | Deterministic HTTP retrieval, URL handling, focused page discovery    | Phase 2 ✓   |
 | `enrichment/` | Contact extraction/normalization, classification, dedup, confidence, formats/submissions intelligence | Phase 2–3 ✓ |
-| `backend/`    | Application/API layer: organizations, contacts, search, ingestion API | Phase 6 ✓   |
-| `frontend/`   | UI: search, filter, inspect, select, approve, track                   | Phase 7     |
+| `backend/`    | Application/API layer: organizations, contacts, search, ingestion API, shared route table, operator server | Phase 6–7 ✓ |
+| `frontend/`   | Operator console: search, filter, inspect intelligence, select recipients | Phase 7 ✓   |
 | `outreach/`   | Campaign preparation, personalized messages, approval-gated sending   | Phase 8–10  |
 | `database/`   | Dual-backend persistence (SQLite + PostgreSQL migrations)             | Phase 6 ✓   |
 | `n8n/`        | Workflow orchestration (small logical workflows, never one monolith)  | Phase 2+    |
@@ -71,7 +72,7 @@ PHASE 6 — DATABASE / API (current).
 | Local AI       | Ollama `0.32.14`, model `qwen2.5-coder:7b` @ `http://localhost:11434` | configured |
 | Backend API    | FastAPI 0.135 + Uvicorn (installed); stdlib reference server retained | Phase 6 ✓   |
 | Database       | SQLite reference backend; PostgreSQL / Supabase via psycopg (optional)| Phase 6 ✓   |
-| Frontend       | Node.js / npm based SPA (framework TBD)      | Phase 7     |
+| Frontend       | Zero-dependency vanilla ES modules; stdlib `backend.webapp`; strict CSP; no build step | Phase 7 ✓   |
 | Orchestration  | n8n                                          | Phase 2+    |
 
 ## Local development
@@ -79,7 +80,7 @@ PHASE 6 — DATABASE / API (current).
 Verified environment (Windows 11, PowerShell):
 
 - Python 3.14.0 — `C:\Python314\python.exe`
-- Node.js v24.10.0 / npm 11.6.1
+- Node.js v24.10.0 / npm 11.6.1 (not required for Phases 1–7; the frontend is dependency-free)
 - Git 2.53.0 · Docker 29.6.2
 - Ollama 0.32.14 listening on `localhost:11434`
 
@@ -98,11 +99,11 @@ See [`docs/roadmap.md`](docs/roadmap.md). Summary:
 
 1. Foundation ✓
 2. Radio Discovery ✓
-3. Radio Website Intelligence ← current
-4. Contact Extraction
-5. Enrichment & Verification
-6. Database/API
-7. Frontend
+3. Radio Website Intelligence ✓
+4. Contact Extraction ✓
+5. Enrichment & Verification ✓
+6. Database/API ✓
+7. Frontend ✓ (current)
 8. Music Submission
 9. Personalized Outreach
 10. Outreach Tracking
@@ -144,3 +145,18 @@ per-station URL budget, rate limiting). Output adds genres, formats, market
 area, enriched contacts with explainable confidence, and an evidenced
 submission path (instructions, restrictions, inferred methods labeled as
 inference). See `docs/radio-enrichment.md`.
+
+## Running the operator console (Phase 7)
+
+Single-origin UI + API over a stored database — no build step:
+
+```powershell
+python -m backend.webapp --db path\to\db.sqlite --port 8000
+```
+
+Browse `http://127.0.0.1:8000/#/`: search & filter stations
+(genre/format/country/status/confidence), inspect intelligence with
+confidence and source attribution, review verification history, stage
+recipients in the basket and export the selection as JSON. The console
+renders live API responses only (no mocks) and never sends anything;
+see [`frontend/README.md`](frontend/README.md).

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Music Intelligence Engine — Operator Console</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<header id="app-header">
+  <a class="brand" href="#/">Music Intelligence Engine <span class="brand-sub">operator console</span></a>
+  <span id="schema-badge" class="badge badge-muted" title="storage schema version reported by /api/v1/health">connecting…</span>
+  <span class="spacer"></span>
+  <span id="basket-count" class="badge badge-accent" title="selected recipients">recipients: 0</span>
+</header>
+
+<p class="epistemics-note">
+  Found ≠ verified ≠ relevant. Every value shown carries the provenance,
+  confidence, and verification status recorded by the engine. Unknown means
+  no evidence was observed — never a guess. Interpretation lives in the
+  backend; this console only displays it.
+</p>
+
+<div id="layout">
+  <main id="view" aria-live="polite"></main>
+  <aside id="basket-panel" aria-label="Selected recipients"></aside>
+</div>
+
+<noscript>This operator console requires JavaScript (served same-origin, no third-party scripts).</noscript>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
