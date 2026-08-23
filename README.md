@@ -4,12 +4,15 @@ A production-oriented **music industry intelligence & outreach platform**, desig
 discover, enrich, verify, and score legitimate music-industry contacts — starting with
 **radio stations** — and to support careful, human-approved music outreach.
 
-> **Current phase: PHASE 3 — RADIO INTELLIGENCE / ENRICHMENT.**
-> Phases 1–2 are complete (foundation; radio discovery engine). Phase 3 turns
-> discovered station records into enriched intelligence records — genres,
-> formats, market, submission paths, contact-level confidence — offline by
-> default with bounded opt-in fetching. No crawling of live sites has been
-> performed by this repo yet; no outreach exists.
+> **Current phase: PHASE 5 — ENRICHMENT & VERIFICATION.**
+> Phases 1–4 are complete (foundation; radio discovery; website intelligence
+> with bounded opt-in fetching; contact extraction; SQLite storage + API).
+> Phase 5 adds cross-source comparison, an explicit verification workflow,
+> and the optional Ollama-backed enrichment layer with versioned prompts —
+> fully deterministic offline; see
+> [`docs/enrichment-verification.md`](docs/enrichment-verification.md).
+> No crawling of live sites has been performed by this repo yet; no outreach
+> exists.
 
 ---
 

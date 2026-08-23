@@ -36,6 +36,7 @@ from discovery.events import (
 from discovery.models import EnrichmentResult, Failure, utc_now_iso
 from discovery.radio.intelligence import build_intelligence_record
 from discovery.radio.schema import SourceFetchRecord
+from enrichment.confidence import score_contact
 
 
 class EngineConfig:
@@ -65,8 +66,13 @@ class EnrichmentEngine:
         self,
         config: EngineConfig | None = None,
         fetcher=None,
+        role_advisor=None,
     ) -> None:
         self.config = config or EngineConfig()
+        # Optional Phase 5 AI hook: callable(context_text) ->
+        # (role, metadata | None). Default None keeps enrichment fully
+        # deterministic and offline; see enrichment.llm.suggest_contact_role.
+        self._role_advisor = role_advisor
         if fetcher is not None:
             self._fetcher = fetcher          # injectable (tests / offline)
             self._owns_fetcher = False
@@ -149,7 +155,49 @@ class EnrichmentEngine:
         if self.live and targets:
             pages, fetch_records = self._fetch_pages(targets)
 
-        return build_intelligence_record(record, pages, fetch_records)
+        enriched = build_intelligence_record(record, pages, fetch_records)
+        if self._role_advisor is not None:
+            self._apply_role_advisor(enriched)
+        return enriched
+
+    def _apply_role_advisor(self, enriched) -> None:
+        """Opt-in Phase 5 hook: AI-hint roles ONLY for unknown contacts.
+
+        Deterministic rules already ran inside build_intelligence_record;
+        the advisor is consulted strictly as a fallback. A validated hint
+        flips the role and appends an inference provenance entry carrying
+        method/model/prompt version (docs/ai-architecture.md). Anything
+        ambiguous stays "unknown" — the honest default.
+        """
+        site_domains = {enriched.domain} if enriched.domain else set()
+        for contact in enriched.contacts or []:
+            if contact.role != "unknown":
+                continue
+            context = "\n".join(
+                part for part in (contact.name, contact.email,
+                                  contact.phone, contact.source_url)
+                if part)
+            if not context.strip():
+                continue
+            try:
+                role, meta = self._role_advisor(context)
+            except Exception:
+                continue  # advisor failure never kills enrichment
+            if role == "unknown" or not isinstance(meta, dict):
+                continue
+            contact.role = role
+            contact.provenance.append({
+                "kind": "inference",
+                "method": str(meta.get("method") or "llm"),
+                "model": meta.get("model"),
+                "prompt_version": meta.get("prompt_version"),
+                "value": f"role:{role}",
+                "observed_at": utc_now_iso(),
+            })
+            score, reasons = score_contact(contact.to_dict(), site_domains)
+            contact.confidence_score = score
+            contact.confidence_reasons = reasons + [
+                "role inferred by local model (see provenance)"]
 
     def _collect_fetch_targets(self, record: dict) -> list[str]:
         """Known URLs worth re-reading, priority ordered, deduplicated.
@@ -236,10 +284,22 @@ def main(argv: list[str] | None = None) -> int:
                         help="output path (default stdout)")
     parser.add_argument("--fetch", action="store_true",
                         help="enable bounded live fetching (default: offline)")
+    parser.add_argument("--ai-roles", action="store_true",
+                        help="opt-in: consult the local Ollama model for "
+                             "unknown contact roles (falls back to "
+                             "'unknown' when unavailable; no network "
+                             "without it)")
     args = parser.parse_args(argv)
 
     records = _load_records(args.input)
     engine = EnrichmentEngine()
+    if args.ai_roles:
+        from functools import partial
+        from enrichment.llm import (OllamaClient, OllamaConfig,
+                                    suggest_contact_role)
+        engine._role_advisor = partial(
+            suggest_contact_role,
+            client=OllamaClient(OllamaConfig.from_env()))
     if args.fetch:
         engine.set_live()
     result = engine.enrich_records(records)
