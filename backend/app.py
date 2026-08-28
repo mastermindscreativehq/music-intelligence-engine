@@ -37,6 +37,12 @@ dependency resolution). Configuration uses env var NAMES only
 SUBMISSION_STORAGE_ROOT); values are never logged or echoed into
 responses, and asset responses never contain storage locations. No
 crawling logic, no secrets.
+
+The ASGI entrypoint for hosting platforms (e.g. Railway) is
+``backend.app:app`` (``uvicorn backend.app:app``). ``app`` is served
+lazily via PEP 562 so importing only ``create_app``/``build_storage``
+(tests, ``main``) never forces a database connection at import time;
+construction happens exactly when uvicorn resolves the ``app`` attribute.
 """
 
 from __future__ import annotations
@@ -343,6 +349,39 @@ def main(argv: list[str] | None = None) -> int:
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     storage.close()
     return 0
+
+
+# ---------------------------------------------------------------------------
+# ASGI entrypoint (``backend.app:app``) for uvicorn / hosting platforms
+# ---------------------------------------------------------------------------
+#
+# Railway-family platforms start the server with ``uvicorn backend.app:app``.
+# Uvicorn imports the module then does ``getattr(module, "app")``. There is no
+# module-level ``app`` because the FastAPI application requires an injected
+# storage backend (factory pattern). PEP 562 ``__getattr__`` serves ``app``
+# lazily: construction happens only when uvicorn resolves the attribute, so a
+# plain ``from backend.app import create_app`` (tests, ``main``) never touches
+# the database at import time. The app is built once and cached.
+#
+# Storage for the hosted entrypoint resolves from MIE_PG_DSN (preferred),
+# then DATABASE_URL (the variable Railway's PostgreSQL plugin injects), then
+# MIE_DATABASE_PATH (SQLite) — matching build_storage's env-driven behavior.
+
+_APP: dict = {}
+
+
+def _resolve_uvicorn_storage():
+    pg_dsn = os.environ.get("MIE_PG_DSN") or os.environ.get("DATABASE_URL")
+    db_path = os.environ.get("MIE_DATABASE_PATH")
+    return build_storage(db_path=db_path, pg_dsn=pg_dsn)
+
+
+def __getattr__(name: str):
+    if name == "app":
+        if "app" not in _APP:
+            _APP["app"] = create_app(_resolve_uvicorn_storage())
+        return _APP["app"]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":
