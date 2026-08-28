@@ -57,4 +57,5 @@ def apply_pg_migrations(conn) -> int:
     cur.execute("SELECT COALESCE(MAX(version), 0) AS v "
                 "FROM schema_migrations")
     row = cur.fetchone()
+    conn.rollback()
     return int(row["v"] if isinstance(row, dict) else row[0])

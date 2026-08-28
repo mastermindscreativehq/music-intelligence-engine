@@ -51,4 +51,30 @@ class IntelligenceRepository(Protocol):
 
     def get_verification(self, identity_key: str) -> dict | None: ...
     def get_ingestion_run(self, run_id: str) -> dict | None: ...
+
+    # -- Phase 8: submission assets + link accessibility ----------------------
+
+    def save_track(self, track: dict) -> dict:
+        """Insert or update a track row; returns the stored projection.
+
+        ``track_id`` ('sha256:<hex>') is the only asset identifier; no
+        filesystem paths cross this boundary.
+        """
+        ...
+
+    def get_track(self, track_id: str) -> dict | None: ...
+    def list_tracks(self, limit: int = ..., offset: int = ...,
+                    status: str | None = ...) -> tuple[list[dict], int]:
+        """Listing; returns (rows, total), newest first."""
+        ...
+
+    def record_link_check(self, identity_key: str, entry: dict) -> None:
+        """Append one accessibility check row (never rewrites history)."""
+        ...
+
+    def get_link_checks(self, identity_key: str,
+                        limit: int = ...) -> list[dict]:
+        """Most recent checks first."""
+        ...
+
     def close(self) -> None: ...

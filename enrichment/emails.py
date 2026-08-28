@@ -17,6 +17,16 @@ EMAIL_CORE = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 EMAIL_RE = re.compile(EMAIL_CORE)
 EMAIL_FULL_RE = re.compile(rf"^{EMAIL_CORE}$")
 
+# Obfuscation patterns: "user [at] domain [dot] com", "user (at) domain (dot) com"
+_OBFUSCATED_RE = re.compile(
+    r"[A-Za-z0-9._%+-]+\s*[\[(]?\s*at\s*[\])]?\s*"
+    r"[A-Za-z0-9.-]+\s*[\[(]?\s*dot\s*[\])]?\s*"
+    r"[A-Za-z]{2,}",
+    re.I,
+)
+_AT_VARIANTS = re.compile(r"\s*[\[(]?\s*\bat\b\s*[\])]?\s*", re.I)
+_DOT_VARIANTS = re.compile(r"\s*[\[(]?\s*\bdot\b\s*[\])]?\s*", re.I)
+
 # Zero-width / formatting characters stripped before matching.
 _INVISIBLES = re.compile(r"[\u200b\u200c\u200d\ufeff\xa0]")
 
@@ -41,16 +51,39 @@ _SURROUNDING_PUNCT = " \t\r\n,:;!?\"'`()[]<>{}\u201c\u201d\u2018\u2019"
 
 
 def extract_emails_from_text(text: str) -> list[str]:
-    """Ordered unique raw email candidates found in plain text."""
+    """Ordered unique raw email candidates found in plain text.
+
+    Handles standard ``user@host`` addresses and common obfuscation
+    patterns (``user [at] host [dot] com``) that站点operators use to
+    deter scrapers.  Obfuscated patterns are decoded deterministically —
+    no addresses are invented.
+    """
     if not isinstance(text, str) or not text:
         return []
     cleaned = _INVISIBLES.sub("", text)
     seen: list[str] = []
+
+    # Standard emails first.
     for match in EMAIL_RE.findall(cleaned):
         normalized = normalize_email(match)
         if normalized and normalized not in seen:
             seen.append(normalized)
+
+    # Obfuscated patterns: "user [at] domain [dot] com" etc.
+    for match in _OBFUSCATED_RE.findall(cleaned):
+        decoded = _decode_obfuscated(match)
+        if decoded and decoded not in seen:
+            seen.append(decoded)
+
     return seen
+
+
+def _decode_obfuscated(raw: str) -> str | None:
+    """Decode an obfuscated email like ``user [at] domain [dot] com``."""
+    value = _AT_VARIANTS.sub("@", raw.strip())
+    value = _DOT_VARIANTS.sub(".", value)
+    value = re.sub(r"\s+", "", value)
+    return normalize_email(value)
 
 
 def extract_mailto_addresses(mailto_values: list[str]) -> list[str]:

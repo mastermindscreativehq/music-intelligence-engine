@@ -18,9 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from urllib.parse import urlparse
 
 from crawler.http import StdlibHttpFetcher
+from crawler.page_finder import score_link, select_priority_pages
 from crawler.pages import ParsedPage, parse_html
+from crawler.urls import canonical_domain, normalize_url
 
 from discovery.events import (
     EVENT_ENRICHMENT_COMPLETED,
@@ -151,9 +154,21 @@ class EnrichmentEngine:
         pages: list[ParsedPage] = []
         fetch_records: list[SourceFetchRecord] = []
 
-        targets = self._collect_fetch_targets(record)[:self.config.max_pages_per_station]
+        targets = self._collect_fetch_targets(record)
+        budget = self.config.max_pages_per_station
+
         if self.live and targets:
-            pages, fetch_records = self._fetch_pages(targets)
+            initial_targets = targets[:budget]
+            pages, fetch_records = self._fetch_pages(initial_targets)
+            fetched_count = len(initial_targets)
+
+            # Discover high-value internal links from the pages we just read.
+            extra_urls = self._discover_internal_pages(
+                pages, targets, budget - fetched_count)
+            if extra_urls:
+                extra_pages, extra_records = self._fetch_pages(extra_urls)
+                pages.extend(extra_pages)
+                fetch_records.extend(extra_records)
 
         enriched = build_intelligence_record(record, pages, fetch_records)
         if self._role_advisor is not None:
@@ -223,6 +238,101 @@ class EnrichmentEngine:
             add(url)
         return targets
 
+    def _discover_internal_pages(
+        self,
+        fetched_pages: list[ParsedPage],
+        already_fetched: list[str],
+        remaining_budget: int,
+    ) -> list[str]:
+        """Discover high-value internal links from pages we just read.
+
+        Uses ``crawler.page_finder.select_priority_pages`` for the first
+        (homepage) page to get keyword-ranked links *and* conventional
+        fallback paths.  Additional pages are scored with
+        ``score_link``.  Only same-site links are considered;
+        already-fetched URLs are excluded.  Returns at most
+        *remaining_budget* URLs, best-scored first.
+        """
+        if remaining_budget <= 0 or not fetched_pages:
+            return []
+
+        seen: set[str] = set(already_fetched)
+        result: list[str] = []
+
+        # --- Phase 1: use select_priority_pages for the first page
+        # (typically the homepage) to get keyword-ranked same-site links.
+        # Guessed conventional fallback paths (GUESSED_PATHS) are excluded
+        # because the enrichment engine already fetches dedicated URLs
+        # (submission_url, contact_url, etc.) in _collect_fetch_targets.
+        first_page = fetched_pages[0]
+        try:
+            first_site = canonical_domain(first_page.url)
+        except ValueError:
+            first_site = None
+        if first_site is not None:
+            try:
+                hp_normalized = normalize_url(first_page.url)
+                seen.add(hp_normalized)
+            except ValueError:
+                pass
+            # Paths actually present as links on the page; used to
+            # filter out guessed fallback paths from select_priority_pages.
+            link_paths: set[str] = set()
+            for link in first_page.links:
+                link_paths.add(urlparse(link.href_absolute).path.rstrip("/"))
+            ranked = select_priority_pages(
+                first_page.url, first_page, remaining_budget)
+            for url in ranked:
+                if url in seen:
+                    continue
+                # Only keep pages whose path was an actual link on the
+                # page; skip guessed conventional fallback paths.
+                url_path = urlparse(url).path.rstrip("/")
+                if url_path not in link_paths:
+                    continue
+                seen.add(url)
+                result.append(url)
+            remaining_budget -= len(result)
+
+        if remaining_budget <= 0:
+            return result
+
+        # --- Phase 2: score links from remaining pages (if any) and
+        # any first-page links not already selected.
+        sites: set[str] = set()
+        for page in fetched_pages:
+            try:
+                sites.add(canonical_domain(page.url))
+            except ValueError:
+                pass
+        if not sites:
+            return result
+
+        scored: list[tuple[int, int, str]] = []
+        order = 0
+        for page in fetched_pages:
+            for link in page.links:
+                url = link.href_absolute
+                if not url.lower().startswith(("http://", "https://")):
+                    continue
+                try:
+                    if canonical_domain(url) not in sites:
+                        continue
+                    normalized = normalize_url(url)
+                except ValueError:
+                    continue
+                if normalized in seen:
+                    continue
+                weight = score_link(normalized, link.anchor_text)
+                if weight <= 0:
+                    continue
+                seen.add(normalized)
+                scored.append((-weight, order, normalized))
+                order += 1
+
+        scored.sort()
+        return result + [url for _, _, url in scored[:remaining_budget]]
+
     def _fetch_pages(self, urls: list[str]):
         pages: list[ParsedPage] = []
         records: list[SourceFetchRecord] = []
@@ -262,14 +372,30 @@ def _load_records(path: str) -> list[dict]:
     with open(path, "r", encoding="utf-8") as handle:
         data = json.load(handle)
     if isinstance(data, list):
-        return [r for r in data if isinstance(r, dict)]
-    if isinstance(data, dict):
-        records = data.get("records")
-        if isinstance(records, list):
-            return [r for r in records if isinstance(r, dict)]
-    raise ValueError(
-        "input must be a JSON array of records or a DiscoveryResult object "
-        "with a 'records' array")
+        records = data
+    elif isinstance(data, dict):
+        records = None
+        for key in ("records", "stations"):
+            candidate = data.get(key)
+            if isinstance(candidate, list):
+                records = candidate
+                break
+        if records is None:
+            raise ValueError(
+                "input must be a JSON array of records or a DiscoveryResult "
+                "object with a 'records' or 'stations' array")
+    else:
+        raise ValueError(
+            "input must be a JSON array of records or a DiscoveryResult "
+            "object with a 'records' or 'stations' array")
+    out: list[dict] = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        if "website" not in r and "url" in r:
+            r["website"] = r["url"]
+        out.append(r)
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

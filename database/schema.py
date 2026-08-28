@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -171,6 +171,45 @@ CREATE TABLE IF NOT EXISTS verification_results (
 );
 CREATE INDEX IF NOT EXISTS idx_verification_station
     ON verification_results(identity_key);
+"""),
+
+    # Phase 8: music submission assets + submission-link accessibility.
+    # tracks: content-addressed library entries. track_id is the OPAQUE
+    # public asset identifier ('sha256:<hex>'); no filesystem paths are
+    # ever persisted — the storage backend owns the key->location mapping.
+    # Blobs themselves live outside the database and are immutable.
+    (3, """
+CREATE TABLE IF NOT EXISTS tracks (
+    track_id          TEXT PRIMARY KEY,   -- 'sha256:<hex>' (opaque)
+    sha256            TEXT NOT NULL UNIQUE,
+    original_filename TEXT,
+    size_bytes        INTEGER NOT NULL CHECK (size_bytes > 0),
+    content_type      TEXT NOT NULL DEFAULT 'audio/mpeg',
+    status            TEXT NOT NULL CHECK (status IN
+                         ('ready', 'quarantined', 'archived')),
+    reject_reason     TEXT,
+    notes             TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
+-- Append-only accessibility history per checked URL; mirrors the
+-- SourceFetchRecord vocabulary so failure kinds stay comparable.
+CREATE TABLE IF NOT EXISTS submission_link_checks (
+    check_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_key TEXT NOT NULL REFERENCES stations(identity_key)
+                 ON DELETE CASCADE,
+    url          TEXT NOT NULL,
+    target_kind  TEXT NOT NULL CHECK (target_kind IN
+                    ('submission_url', 'instructions_page')),
+    ok           INTEGER NOT NULL,
+    status       INTEGER,
+    error_kind   TEXT,
+    latency_ms   INTEGER,
+    checked_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_link_checks_station
+    ON submission_link_checks(identity_key);
 """),
 ]
 

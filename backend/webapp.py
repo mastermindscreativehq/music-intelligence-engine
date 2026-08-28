@@ -32,6 +32,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from backend.routes import dispatch
 
+from database.service import PersistenceService
+from submissions import service as submission_service
+
 DEFAULT_STATIC_ROOT = Path(__file__).resolve().parents[1] / "frontend"
 
 _ALLOWED_SUFFIXES = {
@@ -47,8 +50,17 @@ _ALLOWED_SUFFIXES = {
 }
 
 
-def build_handler(service, static_root: Path):
-    """Create a request handler bound to *service* + *static_root*."""
+def build_handler(service, static_root: Path, track_store=None,
+                  link_fetcher=None, allow_private: bool = False):
+    """Create a request handler bound to *service* + *static_root*.
+
+    ``track_store``/``link_fetcher`` inject the Phase 8 submission
+    dependencies; process defaults are constructed when omitted.
+    """
+    if track_store is None:
+        track_store = submission_service.default_track_store()
+    if link_fetcher is None:
+        link_fetcher = submission_service.default_link_fetcher()
 
     class OperatorWebappHandler(BaseHTTPRequestHandler):
         server_version = "MIE-WEB/0.7"
@@ -109,7 +121,9 @@ def build_handler(service, static_root: Path):
         def _api(self, method: str, path: str, params: dict) -> None:
             try:
                 status, body = dispatch(
-                    service, method, path, params, self._read_body())
+                    service, method, path, params, self._read_body(),
+                    track_store=track_store, link_fetcher=link_fetcher,
+                    allow_private=allow_private)
                 self._send_json(status, body)
             except Exception:
                 self._send_json(500, {
@@ -149,11 +163,16 @@ def build_handler(service, static_root: Path):
 
 
 def create_server(db_path: str, host: str, port: int,
-                  static_root: Path | None = None) -> ThreadingHTTPServer:
+                  static_root: Path | None = None, *,
+                  track_store=None, link_fetcher=None,
+                  allow_private: bool = False) -> ThreadingHTTPServer:
     service = PersistenceService(db_path) if isinstance(db_path, str) \
         else db_path
     handler = build_handler(service,
-                            Path(static_root or DEFAULT_STATIC_ROOT))
+                            Path(static_root or DEFAULT_STATIC_ROOT),
+                            track_store=track_store,
+                            link_fetcher=link_fetcher,
+                            allow_private=allow_private)
     server = ThreadingHTTPServer((host, port), handler)
     server.service = service      # type: ignore[attr-defined]
     return server

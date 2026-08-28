@@ -51,6 +51,79 @@ def classify_role(text: str | None) -> str:
     return "unknown"
 
 
+def find_role_evidence_near(text: str | None, anchor_index: int) -> dict | None:
+    """Locate explicit role-label evidence near *anchor_index* in *text*.
+
+    Phase 4A (evidence-based role attribution): identical search strategy
+    as :func:`classify_role_near` (which delegates here), but instead of
+    collapsing the result to a bare role token it preserves the traceable
+    evidence: the EXACT matched label substring as it appears in the source,
+    its absolute character span, and which line (relative to the anchor's
+    line) carried it.
+
+    Returns ``None`` when no ROLE_RULES pattern matches any scanned line —
+    absence of evidence must never produce attribution.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if not 0 <= anchor_index < len(text):
+        return None
+    lines: list[tuple[str, int]] = []
+    pos = 0
+    for raw in text.split("\n"):
+        lines.append((raw, pos))
+        pos += len(raw) + 1
+    target = len(lines) - 1
+    for index, (raw, start) in enumerate(lines):
+        if start <= anchor_index < start + len(raw) + 1:
+            target = index
+            break
+
+    def scan(line_no: int):
+        if 0 <= line_no < len(lines):
+            raw = lines[line_no][0]
+            for pattern, role in _COMPILED:
+                match = pattern.search(raw)
+                if match:
+                    return role, match, line_no
+        return None
+
+    # Same line first, then labels ABOVE the address (station pages place
+    # the label before its contact), then below-the-address labels as the
+    # last resort — precedence is asymmetric ON PURPOSE.
+    for offset in (0, -1, -2, -3, 1, 2, 3):
+        hit = scan(target + offset)
+        if hit is None:
+            continue
+        role, match, line_no = hit
+        _, line_start = lines[line_no]
+        return {
+            "role": role,
+            "matched_label": match.group(0),
+            "line_index": line_no,
+            "line_offset": offset,
+            "char_start": line_start + match.start(),
+            "char_end": line_start + match.end(),
+        }
+    return None
+
+
+def classify_role_near_with_evidence(
+        text: str | None, anchor_index: int) -> tuple[str, dict | None]:
+    """Return ``(role, evidence_dict_or_None)`` for the contact at
+    *anchor_index*.
+
+    The role token is exactly what :func:`classify_role_near` returns; the
+    second element carries the traceable evidence (see
+    :func:`find_role_evidence_near`) or ``None`` when the role is
+    ``unknown``.
+    """
+    evidence = find_role_evidence_near(text, anchor_index)
+    if evidence is None:
+        return "unknown", None
+    return evidence["role"], evidence
+
+
 def classify_role_near(text: str | None, anchor_index: int) -> str:
     """Role evidence for the contact at *anchor_index*, searched line-wise.
 
@@ -67,39 +140,12 @@ def classify_role_near(text: str | None, anchor_index: int) -> str:
     place a role label BEFORE its address, while text AFTER an address
     usually belongs to the NEXT contact. No evidence within the window
     → 'unknown', the honest default.
+
+    Implemented by delegating to :func:`classify_role_near_with_evidence`
+    so both entry points can never disagree about attribution.
     """
-    if not isinstance(text, str) or not text.strip():
-        return "unknown"
-    if not 0 <= anchor_index < len(text):
-        return "unknown"
-    lines: list[tuple[str, int]] = []
-    pos = 0
-    for raw in text.split("\n"):
-        lines.append((raw, pos))
-        pos += len(raw) + 1
-    target = len(lines) - 1
-    for index, (raw, start) in enumerate(lines):
-        if start <= anchor_index < start + len(raw) + 1:
-            target = index
-            break
-
-    def first_role_on(line_no: int) -> str | None:
-        if 0 <= line_no < len(lines):
-            raw = lines[line_no][0]
-            for pattern, role in _COMPILED:
-                if pattern.search(raw):
-                    return role
-        return None
-
-    if (hit := first_role_on(target)) is not None:
-        return hit
-    for offset in (1, 2, 3):          # labels live ABOVE the address
-        if (hit := first_role_on(target - offset)) is not None:
-            return hit
-    for offset in (1, 2, 3):          # below-the-address labels: last resort
-        if (hit := first_role_on(target + offset)) is not None:
-            return hit
-    return "unknown"
+    role, _ = classify_role_near_with_evidence(text, anchor_index)
+    return role
 
 
 # Context window scanned around an email occurrence when classifying.

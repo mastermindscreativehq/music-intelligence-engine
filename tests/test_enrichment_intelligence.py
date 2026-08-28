@@ -592,5 +592,129 @@ class TestTCliMain(unittest.TestCase):
                              ["submission_url"]["value"], SUBMIT_URL)
 
 
+# ---------------------------------------------------------------------------
+# Contact quality gate + dedup (WFMU-style false positives)
+# ---------------------------------------------------------------------------
+
+def _wfmu_staff_page(url: str, body: str):
+    title = "Staff"
+    return parse_html(url, f"<html><head><title>{title}</title></head>"
+                          f"<body>{body}</body></html>")
+
+
+def _bare_station(**overrides) -> dict:
+    rec = dict(kzow_station())
+    rec["contacts"] = []
+    rec["emails"] = []
+    rec["phone_numbers"] = []
+    rec.update(overrides)
+    return rec
+
+
+class TestContactQualityGate(unittest.TestCase):
+    """Navigation/UI/promotional labels must not become contacts,
+    while legitimate named persons with role evidence are preserved."""
+
+    def test_advanced_search_not_becomes_contact(self):
+        # Advanced Search near a DJ role must NOT become a person/contact.
+        pages = [_wfmu_staff_page(
+            "https://wfmu.org/staff.html",
+            "DJ<br>Advanced Search<br>Music Director: Jessica Romoff")]
+        record = build_intelligence_record(_bare_station(), pages)
+        names = {c.name for c in record.contacts if c.name}
+        self.assertNotIn("Advanced Search", names)
+        self.assertNotIn("Record Fair", names)
+
+    def test_record_fair_not_becomes_contact(self):
+        pages = [_wfmu_staff_page(
+            "https://wfmu.org/staff.html",
+            "Advertising<br>Record Fair")]
+        record = build_intelligence_record(_bare_station(), pages)
+        names = {c.name for c in record.contacts if c.name}
+        self.assertNotIn("Record Fair", names)
+
+    def test_ken_freedman_program_director_preserved(self):
+        pages = [_wfmu_staff_page(
+            "https://wfmu.org/staff.html",
+            "Program Director: Ken Freedman")]
+        record = build_intelligence_record(_bare_station(), pages)
+        by_name = {c.name: c for c in record.contacts if c.name}
+        self.assertIn("Ken Freedman", by_name)
+        self.assertEqual(by_name["Ken Freedman"].role, "program_director")
+
+    def test_jessica_romoff_music_director_preserved(self):
+        pages = [_wfmu_staff_page(
+            "https://wfmu.org/staff.html",
+            "Music Director: Jessica Romoff")]
+        record = build_intelligence_record(_bare_station(), pages)
+        by_name = {c.name: c for c in record.contacts if c.name}
+        self.assertIn("Jessica Romoff", by_name)
+        self.assertEqual(by_name["Jessica Romoff"].role, "music_director")
+
+    def test_role_label_alone_not_sufficient_for_non_person(self):
+        # A role adjacency does NOT make a nav label a person name.
+        pages = [_wfmu_staff_page(
+            "https://wfmu.org/staff.html",
+            "DJ: Advanced Search")]
+        record = build_intelligence_record(_bare_station(), pages)
+        self.assertFalse(any(c.name == "Advanced Search" for c in record.contacts))
+
+    def test_named_person_with_role_evidence_keeps_provenance(self):
+        pages = [_wfmu_staff_page(
+            "https://wfmu.org/staff.html",
+            "Program Director: Ken Freedman")]
+        record = build_intelligence_record(_bare_station(), pages)
+        c = next(c for c in record.contacts if c.name == "Ken Freedman")
+        methods = {p.get("method") for p in c.provenance}
+        self.assertIn("staff_directory_extraction", methods)
+        self.assertIn("role_label_rule", methods)
+
+    def test_music_decision_makers_outrank_advertising(self):
+        # advertising (rank 12) should not outrank music/program directors.
+        pages = [_wfmu_staff_page(
+            "https://wfmu.org/staff.html",
+            "Advertising<br>Record Fair<br>"
+            "Music Director: Jessica Romoff<br>"
+            "Program Director: Ken Freedman")]
+        record = build_intelligence_record(_bare_station(), pages)
+        roles_in_order = [c.role for c in record.contacts]
+        self.assertIn("music_director", roles_in_order)
+        self.assertIn("program_director", roles_in_order)
+        mi = roles_in_order.index("music_director")
+        pi = roles_in_order.index("program_director")
+        # Both decision-makers must come before any advertising contact.
+        adv = [i for i, r in enumerate(roles_in_order) if r == "advertising"]
+        if adv:
+            self.assertLess(mi, adv[0])
+            self.assertLess(pi, adv[0])
+
+    def test_duplicate_person_deduplicated_across_pages(self):
+        pages = [
+            _wfmu_staff_page(
+                "https://wfmu.org/reachout.html",
+                "Program Director: Ken Freedman"),
+            _wfmu_staff_page(
+                "https://wfmu.org/team.html",
+                "Ken Freedman | Program Director"),
+        ]
+        record = build_intelligence_record(_bare_station(), pages)
+        kens = [c for c in record.contacts if c.name == "Ken Freedman"]
+        self.assertEqual(len(kens), 1, "Ken Freedman should be deduplicated")
+        k = kens[0]
+        methods = {p.get("method") for p in k.provenance}
+        # Provenance from BOTH pages merged.
+        self.assertIn("staff_directory_extraction", methods)
+
+    def test_email_contacts_still_dedup_by_email(self):
+        pages = [
+            _wfmu_staff_page(
+                "https://wfmu.org/staff.html",
+                "Music Director: Jessica Romoff — md@wfmu.org"),
+        ]
+        record = build_intelligence_record(_bare_station(), pages)
+        by_email = {c.email: c for c in record.contacts if c.email}
+        self.assertIn("md@wfmu.org", by_email)
+
+
 if __name__ == "__main__":
     unittest.main()

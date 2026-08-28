@@ -1,7 +1,8 @@
 /* Station inspection view: overview, contacts (confidence + source
- * attribution), submission path, epistemology, verification history.
+ * attribution), submission path, epistemology, verification history,
+ * and — additively since Phase 8 — backend-recorded link accessibility.
  *
- * All content comes verbatim from the Phase 4-6 endpoints; this view adds
+ * All content comes verbatim from the Phase 4-8 endpoints; this view adds
  * presentation only. Inference labels (e.g. submission.methods
  * kind:"inference") are displayed AS inferences and never promoted. */
 
@@ -73,6 +74,28 @@ function kvCard(title, pairs) {
     el("h2", {}, title), el("dl", { class: "kv" }, rows.flat()));
 }
 
+const IDENTITY_BADGES = {
+  named: { label: "named contact", class: "kind-badge named" },
+  role_based: { label: "role-based contact", class: "kind-badge role" },
+  unattributed_observation:
+    { label: "observed value", class: "kind-badge observed" },
+};
+
+function identityBadge(contact) {
+  const state = contact.identity_state || "unattributed_observation";
+  const badge = IDENTITY_BADGES[state] ||
+    IDENTITY_BADGES.unattributed_observation;
+  const methodLabel = contact.method === "email" ? "email"
+    : contact.method === "phone" ? "phone" : null;
+  const bits = [el("span", { class: badge.class }, badge.label)];
+  if (methodLabel && state === "unattributed_observation") {
+    bits.push(el("span", {
+      class: "dim",
+    }, methodLabel + ", no person or role identified"));
+  }
+  return bits;
+}
+
 function contactCard(contact, stationName, identityKey, basket) {
   const uid = String(contact.contact_uid);
 
@@ -106,22 +129,45 @@ function contactCard(contact, stationName, identityKey, basket) {
       contactCard(contact, stationName, identityKey, basket));
   });
 
+  const attributed = contact.identity_state === "named"
+    || contact.identity_state === "role_based";
+  const titleText = contact.name
+    || (contact.role && contact.role !== "unknown" ? contact.role : null)
+    || "(unnamed contact)";
+  const normalizedNote =
+    contact.value_normalized && contact.value_raw !== contact.value_normalized
+      ? el("span", { class: "dim mono" },
+        "normalized: " + contact.value_normalized)
+      : null;
+  const observationsNote = Number(contact.observations) > 1
+    ? el("span", { class: "dim" },
+      "same value stored on " + contact.observations + " pages")
+    : null;
+
   article = el("article", { class: "contact-card" },
     el("div", { class: "head" },
-      el("span", { class: "name" }, contact.name || "(unnamed contact)"),
+      el("span", { class: "name" }, titleText),
+      ...identityBadge(contact),
       contact.preferred_for_submissions
         ? el("span", { class: "preferred-star",
           title: "backend-flagged preferred_for_submissions" },
           "★ preferred")
         : null,
-      contact.role ? el("span", { class: "chip" }, contact.role) : null),
+      attributed && contact.role
+        ? el("span", { class: "chip" }, contact.role) : null),
     el("div", {},
       contact.email ? el("span", {}, contact.email + " ") : null,
-      contact.phone ? el("span", { class: "dim" }, contact.phone) : null),
+      contact.phone ? el("span", { class: "dim" }, contact.phone) : null,
+      normalizedNote ? el("div", {}, normalizedNote) : null,
+      observationsNote),
     el("div", { class: "actions-row" },
       confidenceBar(contact.confidence_score),
       el("span", { class: "dim" }, fmtPct(contact.confidence_score)),
-      toggle),
+      attributed ? toggle : el("span", {
+        class: "dim",
+        title: "recipients need a person or role; anonymous observed "
+          + "values are not selectable",
+      }, "not a submission recipient")),
     reasons,
     provenance.length
       ? el("ul", { class: "provenance-list" },
@@ -156,12 +202,19 @@ export function renderStationView(root, identityKey, basket) {
       error instanceof ApiError && error.status === 404
         ? null
         : Promise.reject(error)),
-  ]).then(([detail, intel, contactsPayload, verification]) => {
+    // Phase 8: submission + accessibility snapshot (tolerated missing).
+    api.stationSubmission(identityKey).catch((error) =>
+      error instanceof ApiError && error.status === 404
+        ? null
+        : Promise.reject(error)),
+  ]).then(([detail, intel, contactsPayload, verification,
+    submissionData]) => {
     root.replaceChildren(
       detailHead(detail),
       overviewCard(detail),
       contactsCard(contactsPayload, basket, identityKey),
       submissionCard(intel.submission),
+      accessibilityCard(identityKey, submissionData),
       epistemologyCard(intel.epistemology),
       verificationCard(verification));
   }).catch((error) => {
@@ -241,6 +294,68 @@ function submissionCard(submission) {
     ["path confidence", fmtPct(submission.confidence_score)],
     ["reasons", fmtList(submission.confidence_reasons)],
   ]);
+}
+
+/* Phase 8 (additive): backend-recorded reachability of this station's
+ * submission links. Renders GET snapshot rows as reported; "run checks
+ * now" triggers POST and shows the fresh summary. No URLs are ever built
+ * client-side — every value displayed comes from the backend payloads. */
+function checkEntryRow(entry) {
+  const reachable = entry.ok === true;
+  const facts = [
+    entry.status != null ? `status ${entry.status}` : null,
+    entry.error_kind || null,
+    entry.latency_ms != null ? `${entry.latency_ms} ms` : null,
+    entry.checked_at || null,
+  ].filter(Boolean).join(" · ");
+  return el("div", { class: "check-row" },
+    el("span", {
+      class: `chip ${reachable ? "check-ok" : "check-fail"}`,
+    }, reachable ? "reachable" : "unreachable"),
+    el("span", { class: "check-url" },
+      externalLink(entry.url),
+      el("div", { class: "dim" }, String(entry.target_kind ?? ""))),
+    el("span", { class: "dim" }, facts || "—"));
+}
+
+function accessibilityCard(identityKey, container) {
+  const card = el("section", { class: "card" }, el("h2", {},
+    "Link accessibility"));
+  card.append(el("p", { class: "dim" },
+    "Backend-recorded reachability of this station's submission links. ",
+    "Checks run on demand against the stored submission targets; results "
+    + "are recorded server-side and shown exactly as reported."));
+
+  const rowsBox = el("div", {});
+  const renderRows = (entries) => {
+    rowsBox.replaceChildren(
+      ...(entries && entries.length
+        ? entries.map(checkEntryRow)
+        : [el("p", { class: "dim" },
+          "No link checks recorded for this station yet.")]));
+  };
+  renderRows(container ? container.last_checks : []);
+
+  const runButton = el("button", { class: "primary" }, "run checks now");
+  runButton.addEventListener("click", async () => {
+    runButton.disabled = true;
+    runButton.textContent = "checking…";
+    try {
+      const summary = await api.runSubmissionChecks(identityKey);
+      renderRows(summary.checks);
+      rowsBox.prepend(el("p", { class: "dim" },
+        `latest run: ${summary.reachable} of ${summary.targets} targets `
+        + "reachable"));
+    } catch (error) {
+      rowsBox.prepend(errorBanner(error));
+    } finally {
+      runButton.disabled = false;
+      runButton.textContent = "run checks now";
+    }
+  });
+
+  card.append(rowsBox, el("div", { class: "actions-row" }, runButton));
+  return card;
 }
 
 function epistemologyCard(epi) {

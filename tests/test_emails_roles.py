@@ -49,11 +49,11 @@ class TestEmailExtraction(unittest.TestCase):
             ["music@st.example?subject=Hello%20There"])
         self.assertEqual(out, ["music@st.example"])
 
-    def test_obfuscation_not_defeated(self):
-        # Deliberately obfuscated forms must yield nothing — we do not
-        # defeat anti-collection mechanisms.
+    def test_obfuscation_decoded(self):
+        # Common [at]/[dot] obfuscation is decoded deterministically.
         text = "email us at contact [at] station [dot] example"
-        self.assertEqual(extract_emails_from_text(text), [])
+        self.assertEqual(extract_emails_from_text(text),
+                         ["contact@station.example"])
 
     def test_malformed_candidates_dropped(self):
         text = "bad@@st.example and trailing.@st.example but ok@st.example"

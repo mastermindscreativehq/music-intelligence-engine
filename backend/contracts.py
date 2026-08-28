@@ -129,7 +129,7 @@ def contacts_payload(station: dict, contacts: list[dict],
     payload = {
         "station_identity_key": station["identity_key"],
         "station_name": station["name"],
-        "contacts": [dict(c) for c in contacts],
+        "contacts": _contact_views(contacts),
         "submission": dict(submission) if submission else None,
         "preferred_submission_contacts": [
             {"contact_uid": c["contact_uid"], "role": c.get("role"),
@@ -138,6 +138,151 @@ def contacts_payload(station: dict, contacts: list[dict],
         ],
     }
     return payload
+
+
+# -- Contact observation views (Contact Intelligence, Phase 9) ----------------
+#
+# Read-path derivation only: storage rows are never rewritten. Each contact
+# is annotated with the method it was observed through, its raw and
+# normalized value, and a strictly presence-derived identity state so the
+# console can distinguish an anonymous observed value (e.g. a bare station
+# phone number) from an attributed person or role-based contact without
+# ever inventing names or roles.
+
+_UNATTRIBUTED = "unattributed_observation"
+
+
+def _normalized_phone(raw: str) -> str:
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return f"+1{digits}" if len(digits) == 10 else raw
+
+
+def _contact_method(contact: dict) -> str | None:
+    if contact.get("email"):
+        return "email"
+    if contact.get("phone"):
+        return "phone"
+    return None
+
+
+def _identity_state(contact: dict) -> str:
+    """Presence-derived only: no inference about who the contact is."""
+    if str(contact.get("name") or "").strip():
+        return "named"
+    role = str(contact.get("role") or "").strip().lower()
+    if role and role != "unknown":
+        return "role_based"
+    return _UNATTRIBUTED
+
+
+def _annotate_contact(contact: dict) -> dict:
+    view = dict(contact)
+    method = _contact_method(contact)
+    view["method"] = method
+    if method == "email":
+        raw = str(contact["email"])
+        view["value_raw"] = raw
+        view["value_normalized"] = raw.strip().lower()
+    elif method == "phone":
+        raw = str(contact["phone"])
+        view["value_raw"] = raw
+        view["value_normalized"] = _normalized_phone(raw)
+    else:
+        view["value_raw"] = None
+        view["value_normalized"] = None
+    view["identity_state"] = _identity_state(contact)
+    view["observations"] = 1
+    return view
+
+
+def _merge_unattributed(views: list[dict]) -> list[dict]:
+    """Collapse repeat observations of the same anonymous value.
+
+    Applies ONLY to identity_state == unattributed_observation entries that
+    share method + normalized value. Evidence is never dropped: provenance
+    lists are unioned in first-seen order and ``observations`` records how
+    many stored rows agree.
+    """
+    merged_by_key: dict[tuple[str, str], dict] = {}
+    seen_by_key: dict[tuple[str, str], set] = {}
+    output: list[dict] = []
+    for view in views:
+        if view.get("identity_state") != _UNATTRIBUTED \
+                or view.get("method") is None:
+            output.append(view)
+            continue
+        key = (view["method"], view["value_normalized"])
+        existing = merged_by_key.get(key)
+        if existing is None:
+            merged_view = dict(view)
+            merged_view["observations"] = 1
+            seen = {
+                _prov_token(prov)
+                for prov in merged_view.get("provenance") or []}
+            merged_by_key[key] = merged_view
+            seen_by_key[key] = seen
+            output.append(merged_view)
+            continue
+        existing["observations"] = existing.get("observations", 1) + 1
+        for prov in view.get("provenance") or []:
+            token = _prov_token(prov)
+            if token not in seen_by_key[key]:
+                seen_by_key[key].add(token)
+                existing.setdefault("provenance", []).append(prov)
+        if not existing.get("source_url") and view.get("source_url"):
+            existing["source_url"] = view["source_url"]
+    return output
+
+
+def _prov_token(prov: object) -> str:
+    if not isinstance(prov, dict):
+        return repr(prov)
+    return "\x1f".join((
+        str(prov.get("value") or ""),
+        str(prov.get("source_url") or ""),
+        str(prov.get("method") or ""),
+    ))
+
+
+def _contact_views(contacts: list[dict]) -> list[dict]:
+    return _merge_unattributed(
+        [_annotate_contact(c) for c in contacts])
+
+
+# -- Phase 8: submission assets + link accessibility --------------------------
+#
+# Contract rule (approved boundary correction): asset responses carry the
+# opaque track_id and business metadata ONLY — never storage locations.
+
+TRACK_FIELDS = (
+    "track_id", "sha256", "original_filename", "size_bytes", "content_type",
+    "status", "reject_reason", "notes", "created_at", "updated_at",
+)
+
+
+def track_projection(row: dict) -> dict:
+    projection = {key: row.get(key) for key in TRACK_FIELDS}
+    projection["links"] = {"self": f"/api/v1/tracks/{row['track_id']}"}
+    return projection
+
+
+def tracks_payload(rows: list[dict], total: int, limit: int,
+                   offset: int) -> dict:
+    return {
+        "tracks": [track_projection(r) for r in rows],
+        "total": total, "limit": limit, "offset": offset,
+    }
+
+
+def submission_view(identity_key: str, submission: dict | None,
+                    last_checks: list[dict] | None = None) -> dict:
+    return {
+        "identity_key": identity_key,
+        "submission": dict(submission) if submission else None,
+        "last_checks": [dict(c) for c in (last_checks or [])],
+    }
 
 
 def error_body(code: str, message: str) -> dict:

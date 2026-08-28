@@ -21,7 +21,10 @@ structurally offline.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
+import sys
 import threading
 import uuid
 
@@ -39,6 +42,7 @@ from database.service import (
     ValidationError,
     _merge_provenance,
     contact_uid,
+    load_records_file,
     normalize_intelligence_record,
     validate_intelligence_record,
 )
@@ -47,6 +51,16 @@ _JSON = frozenset({
     "classification_evidence", "formats", "genres", "genre_evidence",
     "social_urls", "source_urls", "confidence_reasons", "raw_metadata",
 })
+
+_ORG_COLUMNS = (
+    "identity_kind", "name", "organization_type", "website", "domain",
+    "country", "state_or_region", "city", "market_area", "station_type",
+    "classification_confidence", "classification_evidence", "formats",
+    "genres", "genre_evidence", "language", "description", "social_urls",
+    "source_urls", "discovered_at", "last_verified_at", "last_observed_at",
+    "confidence_score", "confidence_reasons", "status", "raw_metadata",
+    "first_stored_at", "last_stored_at",
+)
 
 
 def _j(value, default):
@@ -146,31 +160,31 @@ class PostgresStorage:
                   run_id=report.run_id, count=len(records), source=source)
         with self._lock:
             with self._conn:
-                self._conn.cursor().execute(
+                cur = self._conn.cursor()
+                cur.execute(
                     "INSERT INTO ingestion_runs(run_id, source, started_at) "
                     "VALUES (%s, %s, %s)",
                     (report.run_id, report.source, report.started_at))
-            for position, raw in enumerate(records):
-                try:
-                    self._ingest_one(validate_intelligence_record(raw),
-                                     report)
-                    report.records_accepted += 1
-                except Exception as exc:
-                    report.records_failed += 1
-                    report.failures.append({
-                        "stage": "validation"
-                        if isinstance(exc, ValidationError) else "storage",
-                        "error_kind": type(exc).__name__,
-                        "message": str(exc),
-                        "url": (raw.get("website")
-                                if isinstance(raw, dict) else None),
-                        "position": position,
-                    })
-                    log_event(self.logger, EVENT_RECORD_REJECTED,
-                              run_id=report.run_id,
-                              reason=f"{type(exc).__name__}: {exc}")
-            with self._conn:
-                self._conn.cursor().execute(
+                for position, raw in enumerate(records):
+                    try:
+                        self._ingest_one(cur, validate_intelligence_record(raw),
+                                         report)
+                        report.records_accepted += 1
+                    except Exception as exc:
+                        report.records_failed += 1
+                        report.failures.append({
+                            "stage": "validation"
+                            if isinstance(exc, ValidationError) else "storage",
+                            "error_kind": type(exc).__name__,
+                            "message": str(exc),
+                            "url": (raw.get("website")
+                                    if isinstance(raw, dict) else None),
+                            "position": position,
+                        })
+                        log_event(self.logger, EVENT_RECORD_REJECTED,
+                                  run_id=report.run_id,
+                                  reason=f"{type(exc).__name__}: {exc}")
+                cur.execute(
                     "UPDATE ingestion_runs SET completed_at=%s, "
                     "records_accepted=%s, records_failed=%s WHERE run_id=%s",
                     (utc_now_iso(), report.records_accepted,
@@ -181,32 +195,25 @@ class PostgresStorage:
                   failed=report.records_failed)
         return report
 
-    def _ingest_one(self, record: dict, report: IngestionReport) -> None:
+    def _ingest_one(self, cur, record: dict, report: IngestionReport) -> None:
         clean, stable_id, kind = normalize_intelligence_record(record)
         now = utc_now_iso()
-        cur = self._conn.cursor()
-        with self._conn:
-            cur.execute("SELECT * FROM organizations WHERE identity_key=%s",
-                        (stable_id,))
-            row = cur.fetchone()
-            existing = _org_from_row(row) if row else None
-            # Identical merge policy as SQLite (shared staticmethod).
-            merged = PersistenceService._merge_station_row(existing, clean,
-                                                           now)
-            self._upsert_org(cur, stable_id, kind, merged)
-            self._sync_facts(cur, stable_id, clean.get("emails") or [],
-                             table="organization_emails")
-            self._sync_facts(cur, stable_id,
-                             clean.get("phone_numbers") or [],
-                             table="organization_phones")
-            report.contacts_upserted += self._upsert_contacts(
-                cur, stable_id, clean.get("contacts") or [], now)
-            if clean.get("submission") is not None:
-                self._upsert_submission(cur, stable_id,
-                                        clean["submission"], now)
-                report.submissions_stored += 1
-            self._replace_fetches(cur, stable_id,
-                                  clean.get("fetches") or [])
+        cur.execute("SELECT * FROM organizations WHERE identity_key=%s",
+                    (stable_id,))
+        row = cur.fetchone()
+        existing = _org_from_row(row) if row else None
+        merged = PersistenceService._merge_station_row(existing, clean, now)
+        self._upsert_org(cur, stable_id, kind, merged)
+        self._sync_facts(cur, stable_id, clean.get("emails") or [],
+                         table="organization_emails")
+        self._sync_facts(cur, stable_id, clean.get("phone_numbers") or [],
+                         table="organization_phones")
+        report.contacts_upserted += self._upsert_contacts(
+            cur, stable_id, clean.get("contacts") or [], now)
+        if clean.get("submission") is not None:
+            self._upsert_submission(cur, stable_id, clean["submission"], now)
+            report.submissions_stored += 1
+        self._replace_fetches(cur, stable_id, clean.get("fetches") or [])
         report.stations_upserted += 1
         log_event(self.logger, EVENT_RECORD_STORED, run_id=report.run_id,
                   station=stable_id,
@@ -216,10 +223,14 @@ class PostgresStorage:
         """Column-for-column mirror of PersistenceService._upsert_station.
 
         On conflict every column is overwritten from the merged row except
-        identity_key and first_stored_at — exactly like SQLite.
+        identity_key and first_stored_at — exactly like SQLite. ``kind``
+        is authoritative for identity_kind (mirrors the SQLite param
+        order stable_id, kind, row...).
         """
-        columns = ["identity_key", "identity_kind", *_ORG_COLUMNS]
-        params: list = [stable_id, kind]
+        row = dict(row)
+        row["identity_kind"] = kind
+        columns = ["identity_key", *_ORG_COLUMNS]
+        params: list = [stable_id]
         for col in _ORG_COLUMNS:
             value = row.get(col)
             params.append(_dumps(value) if col in _JSON else value)
@@ -431,26 +442,25 @@ class PostgresStorage:
         dict_records = [r for r in records if isinstance(r, dict)]
         with self._lock:
             with self._conn:
-                self._conn.cursor().execute(
+                cur = self._conn.cursor()
+                cur.execute(
                     "INSERT INTO verification_runs(run_id, started_at, "
                     "completed_at, summary, source) VALUES (%s, %s, %s, "
                     "%s::jsonb, %s)",
                     (run_id, str(report.get("started_at") or utc_now_iso()),
                      str(report.get("completed_at") or ""),
                      _dumps(report.get("summary") or {}), str(source)))
-            cur = self._conn.cursor()
-            for entry, record in zip(report["records"], dict_records):
-                try:
-                    _, stable_id, _ = normalize_intelligence_record(record)
-                except Exception:
-                    skipped += len(entry.get("results") or [])
-                    continue
-                cur.execute("SELECT 1 FROM organizations "
-                            "WHERE identity_key=%s", (stable_id,))
-                if not cur.fetchone():
-                    skipped += len(entry.get("results") or [])
-                    continue
-                with self._conn:
+                for entry, record in zip(report["records"], dict_records):
+                    try:
+                        _, stable_id, _ = normalize_intelligence_record(record)
+                    except Exception:
+                        skipped += len(entry.get("results") or [])
+                        continue
+                    cur.execute("SELECT 1 FROM organizations "
+                                "WHERE identity_key=%s", (stable_id,))
+                    if not cur.fetchone():
+                        skipped += len(entry.get("results") or [])
+                        continue
                     for result in entry.get("results") or []:
                         cur.execute(
                             "INSERT INTO verification_results(run_id, "
@@ -465,8 +475,7 @@ class PostgresStorage:
                              _dumps(result.get("reasons") or []),
                              str(result.get("checked_at") or "")))
                         stored += 1
-            with self._conn:
-                self._conn.cursor().execute(
+                cur.execute(
                     "UPDATE verification_runs SET completed_at=%s "
                     "WHERE run_id=%s",
                     (str(report.get("completed_at") or utc_now_iso()),
@@ -525,6 +534,115 @@ class PostgresStorage:
             "failures": [dict(f) for f in failures],
         }
 
+    # -- submission assets + link accessibility (Phase 8) -----------------------
+
+    @staticmethod
+    def _track_from_row(row: dict) -> dict:
+        return {
+            "track_id": row["track_id"],
+            "sha256": row["sha256"],
+            "original_filename": row["original_filename"],
+            "size_bytes": int(row["size_bytes"]),
+            "content_type": row["content_type"],
+            "status": row["status"],
+            "reject_reason": row["reject_reason"],
+            "notes": row["notes"],
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def save_track(self, track: dict) -> dict:
+        now = utc_now_iso()
+        with self._lock:
+            with self._conn:
+                cur = self._conn.cursor()
+                cur.execute(
+                    "SELECT created_at FROM tracks WHERE track_id=%s",
+                    (track["track_id"],))
+                existing = cur.fetchone()
+                created = existing["created_at"] if existing \
+                    else str(track.get("created_at") or now)
+                cur.execute(
+                    """
+                    INSERT INTO tracks(track_id, sha256, original_filename,
+                                       size_bytes, content_type, status,
+                                       reject_reason, notes,
+                                       created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(track_id) DO UPDATE SET
+                        original_filename=EXCLUDED.original_filename,
+                        content_type=EXCLUDED.content_type,
+                        status=EXCLUDED.status,
+                        reject_reason=EXCLUDED.reject_reason,
+                        notes=EXCLUDED.notes,
+                        updated_at=EXCLUDED.updated_at
+                    """,
+                    (track["track_id"], track["sha256"],
+                     track.get("original_filename"),
+                     int(track["size_bytes"]),
+                     track.get("content_type") or "audio/mpeg",
+                     track["status"], track.get("reject_reason"),
+                     track.get("notes"), created,
+                     str(track.get("updated_at") or now)))
+        return self.get_track(track["track_id"])
+
+    def get_track(self, track_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT * FROM tracks WHERE track_id=%s",
+                        (track_id,))
+            row = cur.fetchone()
+        return self._track_from_row(row) if row else None
+
+    def list_tracks(self, limit: int = 50, offset: int = 0,
+                    status: str | None = None) -> tuple[list[dict], int]:
+        clauses, params = [], []
+        if status:
+            clauses.append("status = %s")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(f"SELECT COUNT(*) AS n FROM tracks {where}", params)
+            total = int(cur.fetchone()["n"])
+            cur.execute(
+                f"SELECT * FROM tracks {where} "
+                "ORDER BY created_at DESC, track_id LIMIT %s OFFSET %s",
+                [*params, int(limit), int(offset)])
+            rows = [self._track_from_row(r) for r in cur.fetchall()]
+        return rows, total
+
+    def record_link_check(self, identity_key: str, entry: dict) -> None:
+        with self._lock:
+            with self._conn:
+                cur = self._conn.cursor()
+                cur.execute(
+                    "INSERT INTO submission_link_checks(identity_key, url, "
+                    "target_kind, ok, status, error_kind, latency_ms, "
+                    "checked_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (identity_key, entry["url"], entry["target_kind"],
+                     bool(entry.get("ok")), entry.get("status"),
+                     entry.get("error_kind"), entry.get("latency_ms"),
+                     str(entry.get("checked_at") or utc_now_iso())))
+
+    def get_link_checks(self, identity_key: str,
+                        limit: int = 50) -> list[dict]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT url, target_kind, ok, status, error_kind, "
+                "latency_ms, checked_at FROM submission_link_checks "
+                "WHERE identity_key=%s ORDER BY check_id DESC LIMIT %s",
+                (identity_key, int(limit)))
+            return [{
+                "url": r["url"], "target_kind": r["target_kind"],
+                "ok": bool(r["ok"]), "status": r["status"],
+                "error_kind": r["error_kind"],
+                "latency_ms": r["latency_ms"],
+                "checked_at": r["checked_at"],
+            } for r in cur.fetchall()]
+
+
     def close(self) -> None:
         with self._lock:
             try:
@@ -534,12 +652,65 @@ class PostgresStorage:
             self._conn.close()
 
 
-_ORG_COLUMNS = (
-    "identity_kind", "name", "organization_type", "website", "domain",
-    "country", "state_or_region", "city", "market_area", "station_type",
-    "classification_confidence", "classification_evidence", "formats",
-    "genres", "genre_evidence", "language", "description", "social_urls",
-    "source_urls", "discovered_at", "last_verified_at", "last_observed_at",
-    "confidence_score", "confidence_reasons", "status", "raw_metadata",
-    "first_stored_at", "last_stored_at",
-)
+def main(argv: list[str] | None = None,
+         storage: "PostgresStorage | None" = None) -> int:
+    """CLI twin of ``python -m database.service`` for PostgreSQL/Supabase.
+
+    The DSN comes from --dsn or the MIE_PG_DSN environment variable. The
+    optional *storage* parameter is an injection seam for offline tests
+    (mirrors PostgresStorage(conn=...)); production callers never pass it.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m database.pg_store",
+        description="Initialize the PostgreSQL/Supabase schema and/or "
+                    "ingest produced intelligence JSON.")
+    parser.add_argument(
+        "--dsn", default=os.environ.get("MIE_PG_DSN"),
+        help="PostgreSQL DSN (defaults to MIE_PG_DSN)")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("init", help="apply pending migrations, then exit")
+    ingest = sub.add_parser("ingest", help="ingest intelligence JSON")
+    ingest.add_argument("input", help="path to enrichment output JSON")
+    ingest.add_argument("--source", default="cli")
+    ls = sub.add_parser("list", help="list stored organizations and contacts")
+    ls.add_argument("--limit", type=int, default=50,
+                    help="max organizations to show (default 50)")
+    ls.add_argument("--contacts", action="store_true", default=False,
+                    help="also list contacts per organization")
+    args = parser.parse_args(argv)
+
+    if storage is None:
+        if not args.dsn:
+            parser.error("--dsn or MIE_PG_DSN is required")
+        storage = PostgresStorage(dsn=args.dsn)
+    try:
+        if args.command == "init":
+            print(json.dumps({"database": "ready",
+                              "schema_version": storage.version}))
+            return 0
+        if args.command == "list":
+            rows, total = storage.list_stations(limit=args.limit)
+            result = {"total": total, "stations": []}
+            for row in rows:
+                entry = {
+                    "identity_key": row["identity_key"],
+                    "name": row.get("name"),
+                    "status": row.get("status"),
+                    "country": row.get("country"),
+                }
+                if args.contacts:
+                    entry["contacts"] = storage.get_station_contacts(
+                        row["identity_key"])
+                result["stations"].append(entry)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        records = load_records_file(args.input)
+        report = storage.ingest_intelligence(records, source=args.source)
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+        return 0 if report.records_failed == 0 else 1
+    finally:
+        storage.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -47,8 +47,19 @@ from database.service import PersistenceService
 LOGGER = logging.getLogger("mie.api")
 
 
-def build_handler(service: PersistenceService):
-    """Create a request handler class bound to *service*."""
+def build_handler(service: PersistenceService, track_store=None,
+                  link_fetcher=None, allow_private: bool = False):
+    """Create a request handler class bound to *service*.
+
+    ``track_store``/``link_fetcher`` inject the Phase 8 submission
+    dependencies; process defaults are constructed when omitted.
+    """
+    if track_store is None:
+        from submissions import service as submission_service
+        track_store = submission_service.default_track_store()
+    if link_fetcher is None:
+        from submissions import service as submission_service
+        link_fetcher = submission_service.default_link_fetcher()
 
     class RadioIntelligenceAPIHandler(BaseHTTPRequestHandler):
         server_version = "MIE-API/0.6"
@@ -76,7 +87,9 @@ def build_handler(service: PersistenceService):
             try:
                 status, body = dispatch(
                     service, method, unquote(parts.path),
-                    parse_qs(parts.query), self._read_body())
+                    parse_qs(parts.query), self._read_body(),
+                    track_store=track_store, link_fetcher=link_fetcher,
+                    allow_private=allow_private)
                 self._send_json(status, body)
             except Exception:
                 LOGGER.exception("handler failure")
@@ -103,10 +116,13 @@ def build_handler(service: PersistenceService):
     return RadioIntelligenceAPIHandler
 
 
-def create_server(db_path: str, host: str,
-                  port: int) -> ThreadingHTTPServer:
+def create_server(db_path: str, host: str, port: int, *,
+                  track_store=None, link_fetcher=None,
+                  allow_private: bool = False) -> ThreadingHTTPServer:
     service = PersistenceService(db_path)
-    handler = build_handler(service)
+    handler = build_handler(service, track_store=track_store,
+                            link_fetcher=link_fetcher,
+                            allow_private=allow_private)
     server = ThreadingHTTPServer((host, port), handler)
     server.service = service      # type: ignore[attr-defined]
     return server

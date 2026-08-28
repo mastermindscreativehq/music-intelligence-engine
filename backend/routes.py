@@ -1,4 +1,4 @@
-"""Framework-free API routing shared by the stdlib servers (Phases 4-7).
+"""Framework-free API routing shared by the stdlib servers (Phases 4-8).
 
 Single source of truth for the stdlib HTTP surface so ``backend.api``
 (read-only reference server) and ``backend.webapp`` (single-origin
@@ -12,10 +12,15 @@ Envelope contract (unchanged since Phase 4):
     failure -> {"ok": false, "data": null,
                 "error": {"code": <str>, "message": <str>}}
 
-Error codes: station_not_found | run_not_found | bad_request |
-route_not_found | method_not_allowed | internal_error. Contract failures
-become envelopes here; unexpected exceptions PROPAGATE so the server
-layer logs them and answers internal_error.
+Error codes: station_not_found | run_not_found | track_not_found |
+bad_request | payload_too_large | track_rejected | route_not_found |
+method_not_allowed | internal_error. Contract failures become envelopes
+here; unexpected exceptions PROPAGATE so the server layer logs them and
+answers internal_error.
+
+Phase 8 note: submission orchestration is injected via ``track_store``
+and ``link_fetcher`` so all servers and tests share one code path; asset
+responses carry opaque ids only — never storage locations.
 """
 
 from __future__ import annotations
@@ -29,14 +34,21 @@ from backend.contracts import (
     intelligence_payload,
     station_detail,
     station_summary,
+    submission_view,
     success_body,
+    track_projection,
+    tracks_payload,
 )
+
+from submissions import service as submission_service
+from submissions.service import TrackRejected, TrackTooLarge
 
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
 
 LIST_PARAMS = ("limit", "offset", "q", "status", "genre", "format",
                "country", "min_confidence")
+TRACK_LIST_PARAMS = ("limit", "offset", "status")
 
 
 class StationNotFound(Exception):
@@ -45,6 +57,10 @@ class StationNotFound(Exception):
 
 class RunNotFound(Exception):
     """Unknown ingestion run id; converted to a 404 envelope."""
+
+
+class TrackNotFound(Exception):
+    """Unknown opaque asset id; converted to a 404 envelope."""
 
 
 # (method, pattern, path_template, query_params)
@@ -61,8 +77,22 @@ ROUTE_TABLE = (
      "/api/v1/stations/{key}/contacts", ()),
     ("GET", re.compile(r"^/api/v1/stations/(?P<key>[^/]+)/verification$"),
      "/api/v1/stations/{key}/verification", ()),
+    ("POST",
+     re.compile(r"^/api/v1/stations/(?P<key>[^/]+)/submission/checks$"),
+     "/api/v1/stations/{key}/submission/checks", ()),
+    ("GET",
+     re.compile(r"^/api/v1/stations/(?P<key>[^/]+)/submission/checks$"),
+     "/api/v1/stations/{key}/submission/checks", ("limit",)),
+    ("GET", re.compile(r"^/api/v1/stations/(?P<key>[^/]+)/submission$"),
+     "/api/v1/stations/{key}/submission", ()),
     ("GET", re.compile(r"^/api/v1/stations/(?P<key>[^/]+)$"),
      "/api/v1/stations/{key}", ()),
+    ("POST", re.compile(r"^/api/v1/tracks$"), "/api/v1/tracks", ("filename",)),
+    ("GET", re.compile(r"^/api/v1/tracks$"), "/api/v1/tracks",
+     TRACK_LIST_PARAMS),
+    ("GET",
+     re.compile(r"^/api/v1/tracks/(?P<track_id>sha256:[0-9a-f]{64})$"),
+     "/api/v1/tracks/{track_id}", ()),
 )
 
 
@@ -102,8 +132,13 @@ def _parse_ingest_body(body: bytes | None) -> tuple[list, str]:
 
 
 def dispatch(service, method: str, path: str, params: dict,
-             body: bytes | None = None) -> tuple[int, dict]:
-    """Route one request against *service*; returns (status, envelope)."""
+             body: bytes | None = None, *, track_store=None,
+             link_fetcher=None, allow_private=False) -> tuple[int, dict]:
+    """Route one request against *service*; returns (status, envelope).
+
+    ``track_store`` / ``link_fetcher`` inject the Phase 8 submission
+    dependencies; adapters construct process defaults when omitted.
+    """
     matched_route = False
     for route_method, pattern, _template, _qparams in ROUTE_TABLE:
         match = pattern.match(path)
@@ -111,13 +146,28 @@ def dispatch(service, method: str, path: str, params: dict,
             continue
         matched_route = True
         if route_method != method.upper():
-            break                      # right path, wrong verb -> 405
+            # another ROUTE_TABLE row may carry this verb for the same
+            # path (e.g. POST + GET on /tracks) — keep scanning; if none
+            # matches we fall through to 405 below.
+            continue
         try:
-            return _handle(service, method.upper(), match, params, body)
+            return _handle(service, method.upper(), match, params, body,
+                           track_store=track_store,
+                           link_fetcher=link_fetcher,
+                           allow_private=allow_private)
         except StationNotFound as exc:
             return 404, error_body("station_not_found", str(exc))
         except RunNotFound as exc:
             return 404, error_body("run_not_found", str(exc))
+        except TrackNotFound as exc:
+            return 404, error_body("track_not_found", str(exc))
+        except TrackTooLarge as exc:
+            return 413, error_body("payload_too_large", str(exc))
+        except TrackRejected as exc:
+            return 422, error_body("track_rejected", str(exc))
+        except LookupError as exc:
+            # submissions.service signals unknown stations this way
+            return 404, error_body("station_not_found", str(exc))
         except (ValueError, TypeError) as exc:
             return 400, error_body("bad_request", str(exc))
     if matched_route:
@@ -127,13 +177,20 @@ def dispatch(service, method: str, path: str, params: dict,
 
 
 def _handle(service, method: str, match: re.Match, params: dict,
-            body: bytes | None) -> tuple[int, dict]:
+            body: bytes | None, *, track_store=None, link_fetcher=None,
+            allow_private=False) -> tuple[int, dict]:
     path = match.group(0)
 
     def require_station(key: str) -> dict:
         row = service.get_station(key)
         if row is None:
             raise StationNotFound(f"unknown station {key!r}")
+        return row
+
+    def require_track(track_id: str) -> dict:
+        row = service.get_track(track_id)
+        if row is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
         return row
 
     if path == "/api/v1/health":
@@ -166,7 +223,41 @@ def _handle(service, method: str, match: re.Match, params: dict,
             raise RunNotFound(f"unknown run {match.group('run_id')!r}")
         return 200, success_body(run)
 
+    # -- Phase 8: submission assets -------------------------------------------
+    if path == "/api/v1/tracks":
+        if method == "POST":
+            row = submission_service.upload_track(
+                service, track_store, body,
+                filename=_first(params, "filename"))
+            return 201, success_body(track_projection(row))
+        limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
+        offset = _int_param(params, "offset", 0, 0, None)
+        rows, total = submission_service.list_tracks(
+            service, limit=limit, offset=offset,
+            status=_first(params, "status"))
+        return 200, success_body(tracks_payload(rows, total, limit, offset))
+
+    if path.startswith("/api/v1/tracks/"):
+        return 200, success_body(
+            track_projection(require_track(match.group("track_id"))))
+
     key = match.group("key")
+    if path.endswith("/submission/checks"):
+        require_station(key)
+        if method == "POST":
+            view = submission_service.run_link_checks(
+                service, link_fetcher, key,
+                allow_private=allow_private)
+            return 200, success_body(view)
+        limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
+        history = submission_service.link_history(service, key, limit=limit)
+        return 200, success_body(history)
+    if path.endswith("/submission"):
+        require_station(key)
+        last_checks = submission_service.last_checks_by_target(
+            service.get_link_checks(key, limit=50))
+        return 200, success_body(
+            submission_view(key, service.get_submission(key), last_checks))
     if path.endswith("/intelligence"):
         row = require_station(key)
         return 200, success_body(intelligence_payload(

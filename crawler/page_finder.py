@@ -20,9 +20,11 @@ KEYWORD_HINTS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"program[-_]?director", re.I), 8),
     (re.compile(r"contact([-_]?us)?", re.I), 8),
     (re.compile(r"\bcontact\b", re.I), 7),
+    (re.compile(r"playlist|airplay", re.I), 6),
     (re.compile(r"programming", re.I), 6),
+    (re.compile(r"\bmusic\b", re.I), 5),
     (re.compile(r"\bstaff\b|\bteam\b|\bpeople\b", re.I), 5),
-    (re.compile(r"\bdj?s?\b|on[-_]?air personalities", re.I), 4),
+    (re.compile(r"\bdj?s?\b|on[-_]?air personalities|hosts?", re.I), 4),
     (re.compile(r"advert(ise|ising)", re.I), 3),
     (re.compile(r"\babout\b", re.I), 2),
     (re.compile(r"\bshows?\b|\bschedule\b", re.I), 1),
@@ -80,6 +82,22 @@ def select_priority_pages(
         order += 1
     scored.sort()
     ranked = [url for _, _, url in scored]
+
+    # Ensure at least one staff/team/people page is included when any
+    # exist on the site — these are high-value for person/email enrichment
+    # and may rank below submission/contact pages in the weight sort.
+    _STAFF_RE = re.compile(r"\bstaff\b|\bteam\b|\bpeople\b", re.I)
+    has_staff = any(_STAFF_RE.search(u) for u in ranked)
+    if not has_staff and scored:
+        # Find the highest-weight staff page that didn't make the cut.
+        for _, _, url in scored:
+            if _STAFF_RE.search(url):
+                # Insert it as the last entry (lowest priority within budget).
+                if len(ranked) >= budget:
+                    ranked[-1] = url  # replace the lowest-priority entry
+                else:
+                    ranked.append(url)
+                break
 
     remaining = budget - len(ranked)
     if remaining > 0:

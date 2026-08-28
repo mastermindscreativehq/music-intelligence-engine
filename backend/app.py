@@ -1,18 +1,24 @@
-"""FastAPI application over stored radio intelligence (Phase 6).
+"""FastAPI application over stored radio intelligence (Phases 6-8).
 
-Primary Phase 6 API server per docs/architecture.md ("backend owns
-persistence and business queries"). Serves the SAME envelope contract,
-routes, and payload shapes as the Phase 4 stdlib server
-(``backend.api``), plus the Phase 6 additions:
+Primary API server per docs/architecture.md ("backend owns persistence
+and business queries"). Serves the SAME envelope contract, routes, and
+payload shapes as the Phase 4 stdlib server (``backend.api``), plus the
+Phase 6-8 additions:
 
     GET  /api/v1/health
     GET  /api/v1/stations?limit&offset&q&status[&genre&format&country&min_confidence]
     GET  /api/v1/stations/{identity_key}
     GET  /api/v1/stations/{identity_key}/intelligence
     GET  /api/v1/stations/{identity_key}/contacts
-    GET  /api/v1/stations/{identity_key}/verification      (NEW)
-    POST /api/v1/ingest                                    (NEW)
-    GET  /api/v1/runs/{run_id}                             (NEW)
+    GET  /api/v1/stations/{identity_key}/verification      (Phase 6)
+    POST /api/v1/ingest                                    (Phase 6)
+    GET  /api/v1/runs/{run_id}                             (Phase 6)
+    POST /api/v1/tracks                                    (Phase 8)
+    GET  /api/v1/tracks[?limit&offset&status]              (Phase 8)
+    GET  /api/v1/tracks/{track_id}                         (Phase 8)
+    GET  /api/v1/stations/{identity_key}/submission        (Phase 8)
+    POST /api/v1/stations/{identity_key}/submission/checks (Phase 8)
+    GET  /api/v1/stations/{identity_key}/submission/checks (Phase 8)
 
 Envelope contract (unchanged):
     success -> {"ok": true,  "data": <payload>, "error": null}
@@ -21,13 +27,16 @@ Envelope contract (unchanged):
 
 The storage backend is injected (``create_app(storage)``): SQLite
 ``PersistenceService`` offline/tests, ``PostgresStorage`` against a live
-PostgreSQL/Supabase instance. FastAPI/Starlette are imported at module
-level — Phases 1-5 suites simply never import this module, so they never
-require the dependency. Annotations must stay resolvable at module scope
-(PEP 563 + FastAPI dependency resolution). Configuration uses env var
-NAMES only (MIE_DATABASE_PATH / MIE_PG_DSN / MIE_API_HOST / MIE_API_PORT);
-values are never logged or echoed into responses. No crawling logic, no
-secrets.
+PostgreSQL/Supabase instance. Phase 8 submission dependencies
+(``track_store``, ``link_fetcher``) are injectable the same way.
+FastAPI/Starlette are imported at module level — Phases 1-5 suites simply
+never import this module, so they never require the dependency.
+Annotations must stay resolvable at module scope (PEP 563 + FastAPI
+dependency resolution). Configuration uses env var NAMES only
+(MIE_DATABASE_PATH / MIE_PG_DSN / MIE_API_HOST / MIE_API_PORT /
+SUBMISSION_STORAGE_ROOT); values are never logged or echoed into
+responses, and asset responses never contain storage locations. No
+crawling logic, no secrets.
 """
 
 from __future__ import annotations
@@ -46,8 +55,14 @@ from backend.contracts import (
     intelligence_payload,
     station_detail,
     station_summary,
+    submission_view,
     success_body,
+    track_projection,
+    tracks_payload,
 )
+
+from submissions import service as submission_service
+from submissions.service import TrackRejected, TrackTooLarge
 
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
@@ -57,14 +72,23 @@ class StationNotFound(Exception):
     """Unknown identity key; converted to a 404 envelope."""
 
 
-def create_app(storage):
+class TrackNotFound(Exception):
+    """Unknown opaque asset id; converted to a 404 envelope."""
+
+
+def create_app(storage, *, track_store=None, link_fetcher=None,
+               allow_private=False):
     """Build the FastAPI application bound to *storage*.
 
     Imported lazily as a whole so importing ``backend.app`` stays optional
     for environments without FastAPI installed.
     """
+    if track_store is None:
+        track_store = submission_service.default_track_store()
+    if link_fetcher is None:
+        link_fetcher = submission_service.default_link_fetcher()
     app = FastAPI(title="Music Intelligence Engine API",
-                  version="0.6",
+                  version="0.8",
                   docs_url="/api/v1/docs", openapi_url="/api/v1/openapi.json")
 
     def _json(status: int, body: dict) -> JSONResponse:
@@ -73,6 +97,35 @@ def create_app(storage):
     @app.exception_handler(StationNotFound)
     async def _station_not_found(request: Request, exc: StationNotFound):
         return _json(404, error_body("station_not_found", str(exc)))
+
+    @app.exception_handler(LookupError)
+    async def _lookup_error(request: Request, exc: LookupError):
+        # submissions.service signals unknown stations this way
+        return _json(404, error_body("station_not_found", str(exc)))
+
+    @app.exception_handler(TrackTooLarge)
+    async def _too_large(request: Request, exc: TrackTooLarge):
+        return _json(413, error_body("payload_too_large", str(exc)))
+
+    @app.exception_handler(TrackRejected)
+    async def _rejected(request: Request, exc: TrackRejected):
+        return _json(422, error_body("track_rejected", str(exc)))
+
+    @app.exception_handler(TrackNotFound)
+    async def _track_not_found(request: Request, exc: TrackNotFound):
+        return _json(404, error_body("track_not_found", str(exc)))
+
+    async def _bad_value(request: Request, exc: Exception):
+        # mirrors the stdlib dispatcher's contract-failure mapping
+        # (e.g. submissions.service rejects unknown track statuses here);
+        # registered per-class because Starlette handlers take single
+        # exception classes only
+        return _json(400, error_body("bad_request", str(exc)))
+
+    # MRO resolution keeps the specific TrackTooLarge/TrackRejected
+    # handlers winning over this generic ValueError mapping.
+    app.add_exception_handler(ValueError, _bad_value)
+    app.add_exception_handler(TypeError, _bad_value)
 
     @app.exception_handler(RequestValidationError)
     async def _bad_request(request: Request,
@@ -190,6 +243,57 @@ def create_app(storage):
                                          f"unknown run {run_id!r}"))
         return success_body(run)
 
+    # -- Phase 8: submission assets + link accessibility -----------------------
+    #
+    # Pure delegation: validation/storage/orchestration live in the
+    # submissions domain and the injected track_store; handlers here only
+    # translate HTTP into service calls and contract payloads.
+
+    @app.post("/api/v1/tracks", status_code=201)
+    async def upload_track(request: Request, filename: str | None = None):
+        data = await request.body()
+        row = submission_service.upload_track(
+            storage, track_store, data, filename=filename)
+        return success_body(track_projection(row))
+
+    @app.get("/api/v1/tracks")
+    def list_tracks(limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+                    offset: int = Query(0, ge=0),
+                    status: str | None = None):
+        rows, total = submission_service.list_tracks(
+            storage, limit=limit, offset=offset, status=status)
+        return success_body(tracks_payload(rows, total, limit, offset))
+
+    @app.get("/api/v1/tracks/{track_id}")
+    def get_track(track_id: str):
+        row = submission_service.get_track(storage, track_id)
+        if row is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
+        return success_body(track_projection(row))
+
+    @app.get("/api/v1/stations/{key}/submission")
+    def get_submission(key: str):
+        view = submission_service.station_submission(storage, key)
+        last_checks = submission_service.last_checks_by_target(
+            storage.get_link_checks(key, limit=50))
+        return success_body(submission_view(
+            view["identity_key"], view["submission"], last_checks))
+
+    @app.post("/api/v1/stations/{key}/submission/checks")
+    def run_submission_checks(key: str):
+        _require_station(key)
+        summary = submission_service.run_link_checks(
+            storage, link_fetcher, key, allow_private=allow_private)
+        return success_body(summary)
+
+    @app.get("/api/v1/stations/{key}/submission/checks")
+    def submission_check_history(
+            key: str,
+            limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT)):
+        history = submission_service.link_history(storage, key,
+                                                  limit=limit)
+        return success_body(history)
+
     return app
 
 
@@ -209,6 +313,16 @@ def build_storage(db_path: str | None = None,
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
+    # Railway-style hosting: a PG DSN marks production. Bind to 0.0.0.0 by
+    # default there so the platform's ingress can reach the server, and
+    # honor the standard PORT var the platform supplies. MIE_API_HOST /
+    # MIE_API_PORT always take precedence when explicitly set. Local
+    # development (no DSN) keeps the historical 127.0.0.1:8788 defaults.
+    production = bool(os.environ.get("MIE_PG_DSN"))
+    default_host = "0.0.0.0" if production else "127.0.0.1"
+    default_port = int(os.environ.get("MIE_API_PORT")
+                       or os.environ.get("PORT") or "8788")
+
     parser = argparse.ArgumentParser(
         prog="python -m backend.app",
         description="Serve stored radio intelligence (FastAPI).")
@@ -219,9 +333,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=os.environ.get("MIE_PG_DSN"),
                         help="PostgreSQL DSN (env: MIE_PG_DSN)")
     parser.add_argument("--host",
-                        default=os.environ.get("MIE_API_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int,
-                        default=int(os.environ.get("MIE_API_PORT", "8788")))
+                        default=os.environ.get("MIE_API_HOST", default_host))
+    parser.add_argument("--port", type=int, default=default_port)
     args = parser.parse_args(argv)
 
     storage = build_storage(args.db, args.dsn)

@@ -77,4 +77,70 @@ export const api = {
     request(`/api/v1/stations/${encodeURIComponent(key)}/contacts`),
   verification: (key) =>
     request(`/api/v1/stations/${encodeURIComponent(key)}/verification`),
+  // Phase 8: submission assets + link accessibility. Per-track paths are
+  // never constructed here; they come from each stored projection's
+  // links.self value supplied by the backend.
+  tracks: (params) => request("/api/v1/tracks", params),
+  trackDetail: (selfPath) => request(selfPath),
+  stationSubmission: (key) =>
+    request(`/api/v1/stations/${encodeURIComponent(key)}/submission`),
+  runSubmissionChecks: (key) =>
+    send(`/api/v1/stations/${encodeURIComponent(key)}/submission/checks`,
+      { method: "POST" }),
+  submissionCheckHistory: (key, params) =>
+    request(`/api/v1/stations/${encodeURIComponent(key)}/submission/checks`,
+      params),
+  uploadTrack: (data, filename) =>
+    send("/api/v1/tracks",
+      {
+        method: "POST",
+        body: data,
+        headers: { "Content-Type": "audio/mpeg" },
+      },
+      { filename }),
 };
+
+/* Phase 8 addition: POST-capable companion to request(), sharing the same
+ * envelope conventions and typed errors. request() above is intentionally
+ * left untouched. */
+export async function send(path, init, params) {
+  let response;
+  try {
+    const headers = { Accept: "application/json" };
+    if (init && init.headers) Object.assign(headers, init.headers);
+    response = await fetch(path + searchParams(params), {
+      credentials: "same-origin",
+      ...init,
+      headers,
+    });
+  } catch (error) {
+    throw new ApiError("network", "API server unreachable", 0);
+  }
+
+  let envelope;
+  try {
+    envelope = await response.json();
+  } catch (error) {
+    throw new ApiError(
+      "internal_error",
+      `non-JSON response (HTTP ${response.status})`,
+      response.status,
+    );
+  }
+
+  if (!envelope || typeof envelope.ok !== "boolean") {
+    throw new ApiError(
+      "internal_error",
+      "malformed envelope from API",
+      response.status,
+    );
+  }
+  if (envelope.ok) return envelope.data;
+
+  const detail = envelope.error || {};
+  throw new ApiError(
+    detail.code || "internal_error",
+    detail.message || "unknown error",
+    response.status,
+  );
+}

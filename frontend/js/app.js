@@ -10,6 +10,7 @@ import { createDownload, el } from "./dom.js";
 import { startRouter } from "./router.js";
 import { renderListView } from "./views/list.js";
 import { renderStationView, teardownStationView } from "./views/station.js";
+import { renderTracksView } from "./views/tracks.js";
 
 const viewRoot = document.getElementById("view");
 const basketPanel = document.getElementById("basket-panel");
@@ -85,5 +86,9 @@ startRouter(viewRoot, {
   },
   station(root, identityKey) {
     renderStationView(root, identityKey, basket);
+  },
+  tracks(root) {
+    teardownStationView();
+    renderTracksView(root);
   },
 });

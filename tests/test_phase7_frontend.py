@@ -27,6 +27,7 @@ from pathlib import Path
 
 from backend.routes import LIST_PARAMS, ROUTE_TABLE, dispatch
 from backend.webapp import DEFAULT_STATIC_ROOT, create_server
+from database.schema import SCHEMA_VERSION
 from database.service import (
     PersistenceService,
     normalize_intelligence_record,
@@ -187,7 +188,7 @@ class TestRoutesDispatcher(unittest.TestCase):
     def test_health_reports_schema_version(self):
         status, body = dispatch(self.storage, "GET", "/api/v1/health", {})
         self.assertEqual(status, 200)
-        self.assertEqual(body["data"]["schema_version"], 2)
+        self.assertEqual(body["data"]["schema_version"], SCHEMA_VERSION)
 
     def test_listing_supports_phase6_filters(self):
         status, body = dispatch(self.storage, "GET", "/api/v1/stations",

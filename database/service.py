@@ -685,6 +685,116 @@ class PersistenceService:
             "failures": [dict(f) for f in failures],
         }
 
+    # -- submission assets + link accessibility (Phase 8) ----------------------
+    # track_id ('sha256:<hex>') is the only asset identifier at this
+    # boundary; storage locations are owned by the submissions storage
+    # backend and NEVER persisted or returned here.
+
+    @staticmethod
+    def _track_from_row(row) -> dict:
+        return {
+            "track_id": row["track_id"],
+            "sha256": row["sha256"],
+            "original_filename": row["original_filename"],
+            "size_bytes": int(row["size_bytes"]),
+            "content_type": row["content_type"],
+            "status": row["status"],
+            "reject_reason": row["reject_reason"],
+            "notes": row["notes"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_track(self, track: dict) -> dict:
+        """Insert or update one track row; returns the stored projection.
+
+        Mutable fields are status/reject_reason/notes/updated_at;
+        created_at survives updates. Unknown statuses are rejected by the
+        schema CHECK; callers validate before reaching this layer.
+        """
+        now = utc_now_iso()
+        with self._lock, self._conn:      # commit-on-exit: durable rows
+            existing = self._conn.execute(
+                "SELECT created_at FROM tracks WHERE track_id=?",
+                (track["track_id"],)).fetchone()
+            created = existing["created_at"] if existing \
+                else str(track.get("created_at") or now)
+            self._conn.execute(
+                """
+                INSERT INTO tracks(track_id, sha256, original_filename,
+                                   size_bytes, content_type, status,
+                                   reject_reason, notes,
+                                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(track_id) DO UPDATE SET
+                    original_filename=excluded.original_filename,
+                    content_type=excluded.content_type,
+                    status=excluded.status,
+                    reject_reason=excluded.reject_reason,
+                    notes=excluded.notes,
+                    updated_at=excluded.updated_at
+                """,
+                (track["track_id"], track["sha256"],
+                 track.get("original_filename"), int(track["size_bytes"]),
+                 track.get("content_type") or "audio/mpeg",
+                 track["status"], track.get("reject_reason"),
+                 track.get("notes"), created,
+                 str(track.get("updated_at") or now)))
+        return self.get_track(track["track_id"])
+
+    def get_track(self, track_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tracks WHERE track_id=?",
+                (track_id,)).fetchone()
+        return self._track_from_row(row) if row else None
+
+    def list_tracks(self, limit: int = 50, offset: int = 0,
+                    status: str | None = None) -> tuple[list[dict], int]:
+        clauses, params = [], []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM tracks {where}",
+                params).fetchone()["n"]
+            rows = self._conn.execute(
+                f"SELECT * FROM tracks {where} "
+                "ORDER BY created_at DESC, track_id LIMIT ? OFFSET ?",
+                [*params, int(limit), int(offset)]).fetchall()
+        return [self._track_from_row(r) for r in rows], int(total)
+
+    def record_link_check(self, identity_key: str, entry: dict) -> None:
+        """Append one accessibility check row; history is never rewritten."""
+        with self._lock, self._conn:      # commit-on-exit: durable history
+
+            self._conn.execute(
+                "INSERT INTO submission_link_checks(identity_key, url, "
+                "target_kind, ok, status, error_kind, latency_ms, "
+                "checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (identity_key, entry["url"], entry["target_kind"],
+                 1 if entry.get("ok") else 0, entry.get("status"),
+                 entry.get("error_kind"), entry.get("latency_ms"),
+                 str(entry.get("checked_at") or utc_now_iso())))
+
+    def get_link_checks(self, identity_key: str,
+                        limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT url, target_kind, ok, status, error_kind, "
+                "latency_ms, checked_at FROM submission_link_checks "
+                "WHERE identity_key=? ORDER BY check_id DESC LIMIT ?",
+                (identity_key, int(limit))).fetchall()
+        return [{
+            "url": r["url"], "target_kind": r["target_kind"],
+            "ok": bool(r["ok"]), "status": r["status"],
+            "error_kind": r["error_kind"], "latency_ms": r["latency_ms"],
+            "checked_at": r["checked_at"],
+        } for r in rows]
+
+
     # -- row shaping -------------------------------------------------------------
 
     @staticmethod

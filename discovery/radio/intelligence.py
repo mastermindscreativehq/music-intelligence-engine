@@ -32,6 +32,7 @@ from enrichment.confidence import score_contact
 from enrichment.contacts import build_contacts_from_page
 from enrichment.emails import email_quality, extract_emails_from_text, normalize_email
 from enrichment.formats import detect_formats, detect_genres, extract_market
+from enrichment.staff_directory import _looks_like_person_name
 from enrichment.stations import classify_station, detect_social_urls
 
 # Preference order for choosing the station's primary music-submission
@@ -44,6 +45,68 @@ _SUBMISSION_ROLE_RANK = {
     "music_programmer": 3,
     "program_director": 4,
 }
+
+# Roles that justify keeping a name-only contact (no email) — these are
+# music-programming-relevant positions worth preserving for later enrichment.
+_CONTACT_MUSIC_ROLES = {
+    "music_director", "program_director", "music_programmer",
+    "music_submission", "programming", "music_scheduler",
+    "music_coordinator", "host", "dj",
+}
+
+# Relevance ordering for presentation: music-submission decision-makers
+# first, then progressively less submission-relevant roles.  Keeps
+# advertising / generic roles from outranking music decision-makers in
+# the surfaced contact list while preserving all qualified contacts.
+_CONTACT_RELEVANCE = {
+    "music_director": 0,
+    "program_director": 1,
+    "music_programmer": 2,
+    "music_submission": 3,
+    "programming": 4,
+    "music_scheduler": 5,
+    "music_coordinator": 6,
+    "host": 7,
+    "dj": 8,
+    "media": 9,
+    "booking": 10,
+    "producer": 11,
+    "advertising": 12,
+    "general": 13,
+}
+_RELEVANCE_DEFAULT = 20
+
+
+def _is_qualified_contact(raw: dict) -> bool:
+    """Return True when a raw contact dict has intelligence value.
+
+    Three tiers:
+    - actionable: has email (highest priority — submission channel).
+    - intelligence-only: named person with music-relevant role (useful
+      context for later enrichment even without email).
+    - rejected: name-only without email and without music role, or
+      navigation/UI false positive with no intelligence value.
+
+    A contact name, when present, must plausibly look like a human
+    person's name.  A role label match is NEVER sufficient evidence that
+    nearby text is a person's name — the name itself must pass the
+    structural person-name validator (``_looks_like_person_name``).  This
+    blocks navigation/UI/search/promotional labels (e.g. "Record Fair",
+    "Advanced Search") from entering the intelligence data even when a
+    role keyword happens to appear nearby.
+    """
+    name = raw.get("name")
+    if name:
+        # Structural person-name gate: reject navigation/UI/org labels
+        # that slipped through role-adjacency extraction.
+        if not _looks_like_person_name(str(name)):
+            return False
+    if raw.get("email"):
+        return True
+    role = raw.get("role") or "unknown"
+    if role in _CONTACT_MUSIC_ROLES:
+        return True
+    return False
 
 _INSTRUCTION_PAGE_RE = re.compile(r"submi", re.I)
 _SUBMISSION_LOCALPARTS = {"music", "submissions", "submit", "md",
@@ -147,6 +210,7 @@ def build_intelligence_record(
 
     # --- contacts: preserve existing, rebuild from pages -------------------------
     contacts_by_email: dict[str, EnrichedContact] = {}
+    contacts_by_person_role: dict[tuple[str, str], EnrichedContact] = {}
     ordered: list[EnrichedContact] = []
     for existing in station.get("contacts") or []:
         contact = EnrichedContact(
@@ -161,13 +225,29 @@ def build_intelligence_record(
             verified_at=existing.get("verified_at"),
             provenance=list(existing.get("provenance") or []),
         )
+        if contact.name and not _looks_like_person_name(str(contact.name)):
+            continue  # navigation/UI label already in legacy data: drop
         ordered.append(contact)
         if contact.email:
             contacts_by_email[contact.email] = contact
+        if contact.name:
+            contacts_by_person_role[(contact.name.strip().lower(),
+                                     contact.role)] = contact
     for page in pages:
         for raw in build_contacts_from_page(page):
+            if not _is_qualified_contact(raw):
+                continue
             email = raw.get("email")
+            name = (raw.get("name") or "").strip()
             match = contacts_by_email.get(email) if email else None
+            # Deduplicate the same person+role discovered on multiple
+            # pages (e.g. the same staffer listed on several pages), even
+            # when they have no email.  Prevents duplicate contacts and
+            # merges useful provenance from each source.
+            if match is None and name:
+                match = contacts_by_person_role.get((name.lower(),
+                                                     str(raw.get("role")
+                                                         or "unknown")))
             if match is None:
                 fresh = EnrichedContact(
                     station_id=record.station_id,
@@ -181,16 +261,30 @@ def build_intelligence_record(
                 ordered.append(fresh)
                 if email:
                     contacts_by_email[email] = fresh
+                if fresh.name:
+                    contacts_by_person_role[(fresh.name.strip().lower(),
+                                             fresh.role)] = fresh
             else:
                 for prov in raw.get("provenance") or []:
-                    match.provenance.append(prov)
+                    if prov not in match.provenance:
+                        match.provenance.append(prov)
                 if match.name is None and raw.get("name"):
                     match.name = raw["name"]
+                if match.phone is None and raw.get("phone"):
+                    match.phone = raw["phone"]
+                if raw.get("email") and not match.email:
+                    match.email = raw["email"]
+                    contacts_by_email[match.email] = match
 
     for contact in ordered:
         score, reasons = score_contact(contact.to_dict(), site_domains)
         contact.confidence_score = score
         contact.confidence_reasons = reasons
+    # Surface music-submission decision-makers before lower-priority roles.
+    ordered.sort(key=lambda c: (
+        _CONTACT_RELEVANCE.get(c.role, _RELEVANCE_DEFAULT),
+        -c.confidence_score,
+    ))
     record.contacts = ordered
 
     # --- socials --------------------------------------------------------------

@@ -206,6 +206,17 @@ tr.station-row:hover { background: var(--panel-2); }
 .preferred-star { color: var(--warn); }
 .provenance-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-dim); font-size: 12px; }
 
+.kind-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.kind-badge.named { color: var(--ok); border-color: var(--ok); }
+.kind-badge.role { color: var(--accent); border-color: var(--accent); }
+.kind-badge.observed { color: var(--text-dim); border-style: dashed; }
+.mono { font-family: monospace; font-size: 12px; }
+
 .result-row {
   display: grid;
   grid-template-columns: 130px minmax(0, 1fr) auto;
@@ -233,3 +244,42 @@ footer.page-foot {
   font-size: 11.5px;
   padding: 8px 18px 24px;
 }
+
+/* Phase 8: submission assets + link accessibility */
+.nav-link {
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 13px;
+}
+.nav-link:hover { color: var(--accent); }
+
+.chip.ready { color: var(--ok); border-color: var(--ok); }
+.chip.quarantined { color: var(--warn); border-color: var(--warn); }
+.chip.archived { color: var(--text-dim); }
+
+.track-id {
+  color: var(--text-dim);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.upload-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.upload-form .field { flex: 1 1 220px; }
+.upload-result { margin-top: 10px; font-size: 12.5px; }
+
+.track-detail { margin-top: 12px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.track-detail h3 { margin: 0 0 8px; font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+
+.check-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.check-row:last-child { border-bottom: none; }
+.check-url { word-break: break-all; }
+.chip.check-ok { color: var(--ok); border-color: var(--ok); }
+.chip.check-fail { color: var(--bad); border-color: var(--bad); }
