@@ -8,6 +8,8 @@
  *          "error": {"code": str, "message": str}}
  */
 
+import { API_BASE_URL } from "./config.js";
+
 export class ApiError extends Error {
   constructor(code, message, status) {
     super(message);
@@ -67,31 +69,36 @@ export async function request(path, params) {
 }
 
 export const api = {
-  health: () => request("/api/v1/health"),
-  stations: (params) => request("/api/v1/stations", params),
+  health: () => request(API_BASE_URL + "/api/v1/health"),
+  stations: (params) => request(API_BASE_URL + "/api/v1/stations", params),
   station: (key) =>
-    request(`/api/v1/stations/${encodeURIComponent(key)}`),
+    request(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}`),
   intelligence: (key) =>
-    request(`/api/v1/stations/${encodeURIComponent(key)}/intelligence`),
+    request(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}/intelligence`),
   contacts: (key) =>
-    request(`/api/v1/stations/${encodeURIComponent(key)}/contacts`),
+    request(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}/contacts`),
   verification: (key) =>
-    request(`/api/v1/stations/${encodeURIComponent(key)}/verification`),
+    request(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}/verification`),
   // Phase 8: submission assets + link accessibility. Per-track paths are
   // never constructed here; they come from each stored projection's
   // links.self value supplied by the backend.
-  tracks: (params) => request("/api/v1/tracks", params),
-  trackDetail: (selfPath) => request(selfPath),
+  tracks: (params) => request(API_BASE_URL + "/api/v1/tracks", params),
+  // links.self is a relative path from the backend; resolve it against the
+  // configured base so a separate-origin deployment still reaches Railway.
+  trackDetail: (selfPath) =>
+    request(/^https?:\/\//.test(selfPath) || selfPath.startsWith("/")
+      ? selfPath
+      : API_BASE_URL + "/" + selfPath),
   stationSubmission: (key) =>
-    request(`/api/v1/stations/${encodeURIComponent(key)}/submission`),
+    request(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}/submission`),
   runSubmissionChecks: (key) =>
-    send(`/api/v1/stations/${encodeURIComponent(key)}/submission/checks`,
+    send(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}/submission/checks`,
       { method: "POST" }),
   submissionCheckHistory: (key, params) =>
-    request(`/api/v1/stations/${encodeURIComponent(key)}/submission/checks`,
+    request(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}/submission/checks`,
       params),
   uploadTrack: (data, filename) =>
-    send("/api/v1/tracks",
+    send(API_BASE_URL + "/api/v1/tracks",
       {
         method: "POST",
         body: data,

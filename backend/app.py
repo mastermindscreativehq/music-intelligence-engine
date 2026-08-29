@@ -52,6 +52,7 @@ import os
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -96,6 +97,25 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     app = FastAPI(title="Music Intelligence Engine API",
                   version="0.8",
                   docs_url="/api/v1/docs", openapi_url="/api/v1/openapi.json")
+
+    # Cross-origin support for separately-hosted frontends (e.g. a static
+    # Vercel console against this Railway backend). Origins come from the
+    # MIE_CORS_ORIGINS env var (comma-separated absolute origins). Unset or
+    # empty means no cross-origin is allowed, preserving the historical
+    # same-origin behavior. Credentials stay off: the API is unauthenticated
+    # and same-origin cookies are never needed across hosts.
+    cors_origins = [
+        o.strip() for o in os.environ.get("MIE_CORS_ORIGINS", "").split(",")
+        if o.strip()
+    ]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "Accept"],
+        )
 
     def _json(status: int, body: dict) -> JSONResponse:
         return JSONResponse(status_code=status, content=body)

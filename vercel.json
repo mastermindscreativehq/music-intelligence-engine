@@ -1,0 +1,5 @@
+{
+  "buildCommand": "node frontend/scripts/inject-config.mjs",
+  "outputDirectory": "frontend/dist",
+  "framework": null
+}
