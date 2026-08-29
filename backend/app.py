@@ -104,10 +104,16 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     # empty means no cross-origin is allowed, preserving the historical
     # same-origin behavior. Credentials stay off: the API is unauthenticated
     # and same-origin cookies are never needed across hosts.
-    cors_origins = [
-        o.strip() for o in os.environ.get("MIE_CORS_ORIGINS", "").split(",")
-        if o.strip()
-    ]
+    cors_origins = []
+    for origin in os.environ.get("MIE_CORS_ORIGINS", "").split(","):
+        origin = origin.strip()
+        if not origin:
+            continue
+        # drop a trailing slash (and any query/fragment) so values like
+        # "https://console.example.app/" still match the browser Origin header
+        origin = origin.split("?")[0].split("#")[0].rstrip("/")
+        if origin:
+            cors_origins.append(origin)
     if cors_origins:
         app.add_middleware(
             CORSMiddleware,

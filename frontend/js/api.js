@@ -19,6 +19,17 @@ export class ApiError extends Error {
   }
 }
 
+// Human-readable origin for a request path, used so a connectivity failure
+// reports WHERE the client actually tried to reach. The API origin is a
+// public endpoint, never a secret or credential.
+function describeOrigin(path) {
+  try {
+    return new URL(path, window.location.origin).origin;
+  } catch (error) {
+    return "unknown";
+  }
+}
+
 function searchParams(params) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params || {})) {
@@ -37,7 +48,11 @@ export async function request(path, params) {
       credentials: "same-origin",
     });
   } catch (error) {
-    throw new ApiError("network", "API server unreachable", 0);
+    throw new ApiError(
+      "network",
+      `API server unreachable (tried ${describeOrigin(path)})`,
+      0,
+    );
   }
 
   let envelope;
@@ -121,7 +136,11 @@ export async function send(path, init, params) {
       headers,
     });
   } catch (error) {
-    throw new ApiError("network", "API server unreachable", 0);
+    throw new ApiError(
+      "network",
+      `API server unreachable (tried ${describeOrigin(path)})`,
+      0,
+    );
   }
 
   let envelope;

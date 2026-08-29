@@ -2,13 +2,13 @@
  *
  * Runs on Vercel before the static output is published (see vercel.json
  * buildCommand). The shipped source commits __MIE_API_BASE_URL__ as a token
- * (never a hardcoded URL) and substitutes it with the MIE_API_BASE_URL
- * environment variable here. Files are copied into ./dist (Vercel's
- * outputDirectory, relative to the frontend root), so committed source stays
- * tokenized and the repo keeps passing the no-remote-URL asset scans.
- *
- * When MIE_API_BASE_URL is unset/empty the token is left in place and the
- * client falls back to same-origin requests (local/single-origin use).
+ * (never a hardcoded URL) and substitutes it at build time with either the
+ * MIE_API_BASE_URL environment variable (if set) or the committed production
+ * Railway default. Files are copied into ./dist (Vercel's outputDirectory,
+ * relative to the frontend root), so committed source stays tokenized and the
+ * repo keeps passing the no-remote-URL asset scans. This is a static site, so
+ * the value must resolve at build time (there is no runtime env in Vercel's
+ * static output).
  */
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -16,7 +16,17 @@ import { fileURLToPath } from "node:url";
 
 const frontend = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(frontend, "dist");
-const base = process.env.MIE_API_BASE_URL || "";
+
+// Production API origin served by Railway. Used as the build-time default so
+// the shipped console reliably reaches the backend even if a Vercel
+// environment variable is unset, hidden, or misconfigured. This is a public
+// endpoint, not a secret. An explicit MIE_API_BASE_URL always wins.
+const DEFAULT_API_BASE_URL = "https://music-intelligence-engine-production.up.railway.app";
+const configured = process.env.MIE_API_BASE_URL || DEFAULT_API_BASE_URL;
+
+// Normalize so concatenation with "/api/v1/..." never doubles a slash and
+// credentials/auth hints are never needed (public backend).
+const base = configured.replace(/\/+$/, "");
 
 const TEXT_FILES = [
   "index.html",
@@ -45,6 +55,4 @@ for (const rel of BINARY_FILES) {
   copyFileSync(join(frontend, rel), join(dist, rel));
 }
 
-console.log(
-  `[inject-config] API base: ${base ? base : "(none; same-origin)"} -> ${dist}`,
-);
+console.log(`[inject-config] API base: ${base} -> ${dist}`);
