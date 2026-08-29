@@ -3,9 +3,9 @@
  * Runs on Vercel before the static output is published (see vercel.json
  * buildCommand). The shipped source commits __MIE_API_BASE_URL__ as a token
  * (never a hardcoded URL) and substitutes it with the MIE_API_BASE_URL
- * environment variable here. Files are copied into frontend/dist, which is
- * Vercel's outputDirectory, so committed source stays tokenized and the
- * repo keeps passing the no-remote-URL asset scans.
+ * environment variable here. Files are copied into ./dist (Vercel's
+ * outputDirectory, relative to the frontend root), so committed source stays
+ * tokenized and the repo keeps passing the no-remote-URL asset scans.
  *
  * When MIE_API_BASE_URL is unset/empty the token is left in place and the
  * client falls back to same-origin requests (local/single-origin use).
