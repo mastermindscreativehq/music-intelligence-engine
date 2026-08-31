@@ -27,6 +27,7 @@ import os
 import sys
 import threading
 import uuid
+from contextlib import contextmanager
 
 from discovery.events import get_logger, log_event
 from discovery.models import utc_now_iso
@@ -129,24 +130,85 @@ def _contact_from_row(row: dict) -> dict:
 class PostgresStorage:
     """PostgreSQL backend for the shared intelligence repository surface."""
 
+    # Statement/network guard: production connections are created with a
+    # finite statement_timeout so a single slow or client-aborted query can
+    # never block the whole API forever. Because all storage operations share
+    # one connection and a coarse lock, a query that never returns would
+    # otherwise hang every subsequent request (observed as the frontend
+    # sitting on "connecting..."). A bounded timeout lets the server abort the
+    # stuck query, release the lock, and recover instead of wedging the API.
+    _STATEMENT_TIMEOUT_MS = 8000
+
     def __init__(self, dsn: str | None = None, conn=None, logger=None) -> None:
         self.logger = logger or get_logger("mie.storage.pg")
         self._lock = threading.RLock()
+        # Only a connection created from *dsn* is "owned": it may be closed and
+        # replaced to recover from a poisoned/aborted transaction. Injected
+        # connections (structural tests) are never auto-closed so the
+        # connection-reuse contracts hold unchanged.
+        self._owns_conn = conn is None
+        self._dsn = dsn
         if conn is not None:            # injectable for structural tests
             self._conn = conn
         else:
-            try:
-                import psycopg
-                from psycopg.rows import dict_row
-            except ImportError as exc:  # pragma: no cover - env-dependent
-                raise ImportError(
-                    "psycopg is required for the PostgreSQL backend "
-                    '(pip install "psycopg[binary]"); configure it via '
-                    "MIE_PG_DSN or pass an existing connection") from exc
-            if not dsn:
-                raise ValueError("PostgresStorage requires a DSN")
-            self._conn = psycopg.connect(dsn, row_factory=dict_row)
+            self._conn = self._connect()
         self.version = apply_pg_migrations(self._conn)
+
+    def _connect(self):
+        """Open a new production connection (owned connections only)."""
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:  # pragma: no cover - env-dependent
+            raise ImportError(
+                "psycopg is required for the PostgreSQL backend "
+                '(pip install "psycopg[binary]"); configure it via '
+                "MIE_PG_DSN or pass an existing connection") from exc
+        if not self._dsn:
+            raise ValueError("PostgresStorage requires a DSN")
+        opts = f"-c statement_timeout={self._STATEMENT_TIMEOUT_MS}"
+        return psycopg.connect(self._dsn, row_factory=dict_row,
+                               options=opts)
+
+    def _recover_connection(self) -> None:
+        """Discard a poisoned connection and reopen a fresh one.
+
+        Only owned (production) connections are replaced. Injected test
+        connections are left untouched so the connection-reuse tests
+        continue to assert the persistent-connection contract. Called from
+        operation error paths so a single bad/failed query can never leave
+        the shared connection stuck for every later request.
+        """
+        if not self._owns_conn or self._conn is None:
+            return
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        try:
+            self._conn = self._connect()
+        except Exception:
+            self._conn = None
+
+    @contextmanager
+    def _guard(self):
+        """Run an operation under the coarse lock, recovering on any error.
+
+        Every read currently shares the single connection and the single
+        coarse lock. If one query errors (a dropped connection, an aborted
+        transaction from an earlier failure, a statement-timeout abort), the
+        connection can become poisoned and — because all reads share it —
+        every subsequent request blocks forever under the lock (the frontend
+        site on "connecting..."). This guard recovers an owned connection on
+        any exception so the API degrades to a fast error instead of a
+        permanent hang. Injected connections (tests) are never touched.
+        """
+        try:
+            with self._lock:
+                yield self._conn
+        except Exception:
+            self._recover_connection()
+            raise
 
     # -- ingestion -------------------------------------------------------------
 
@@ -366,8 +428,8 @@ class PostgresStorage:
             clauses.append("confidence_score >= %s")
             params.append(float(min_confidence))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._guard() as conn:
+            cur = conn.cursor()
             cur.execute(f"SELECT COUNT(*) AS n FROM organizations {where}",
                         params)
             total = int(cur.fetchone()["n"])
@@ -379,16 +441,16 @@ class PostgresStorage:
         return rows, total
 
     def get_station(self, identity_key: str) -> dict | None:
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._guard() as conn:
+            cur = conn.cursor()
             cur.execute("SELECT * FROM organizations WHERE identity_key=%s",
                         (identity_key,))
             row = cur.fetchone()
         return _org_from_row(row) if row else None
 
     def _facts(self, table: str, identity_key: str) -> list[dict]:
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._guard() as conn:
+            cur = conn.cursor()
             cur.execute(
                 f"SELECT fact FROM {table} WHERE identity_key=%s "
                 "ORDER BY value", (identity_key,))
@@ -401,24 +463,24 @@ class PostgresStorage:
         return self._facts("organization_phones", identity_key)
 
     def get_station_contacts(self, identity_key: str) -> list[dict]:
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._guard() as conn:
+            cur = conn.cursor()
             cur.execute(
                 "SELECT * FROM contacts WHERE identity_key=%s "
                 "ORDER BY role, lower(name)", (identity_key,))
             return [_contact_from_row(r) for r in cur.fetchall()]
 
     def get_submission(self, identity_key: str) -> dict | None:
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._guard() as conn:
+            cur = conn.cursor()
             cur.execute("SELECT payload FROM submission_paths "
                         "WHERE identity_key=%s", (identity_key,))
             row = cur.fetchone()
         return _j(row["payload"], None) if row else None
 
     def get_fetches(self, identity_key: str) -> list[dict]:
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._guard() as conn:
+            cur = conn.cursor()
             cur.execute(
                 "SELECT url, ok, status, error_kind, fetched_at "
                 "FROM source_fetches WHERE identity_key=%s ORDER BY fetch_id",

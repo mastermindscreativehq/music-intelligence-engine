@@ -1,6 +1,7 @@
 """Focused connection reuse tests for PostgresStorage."""
 import sys
 import os
+import threading
 
 os.environ.setdefault("MIE_TEST_MARKER", "1")
 
@@ -272,6 +273,58 @@ class TestExistingIngestBehavior(unittest.TestCase):
         inserts = [sql for sql, _ in self.conn.org_inserts]
         self.assertTrue(all("ON CONFLICT(identity_key)" in s
                             for s in inserts))
+
+
+class TestPostgresResilience(unittest.TestCase):
+    """Recovery when the shared PostgreSQL connection is poisoned.
+
+    The whole API shares one connection under one coarse lock; a single
+    failed/stuck query could otherwise wedge every later request (the
+    frontend hangs on "connecting..."). These tests assert that an owned
+    connection is discarded/reopened on error while injected (test)
+    connections are left untouched.
+    """
+
+    def _blank(self, owns):
+        storage = object.__new__(PostgresStorage)
+        storage._owns_conn = owns
+        storage._lock = threading.RLock()
+        return storage
+
+    def test_recover_connection_closes_and_reconnects_owned(self):
+        storage = self._blank(True)
+        closed = []
+        conn = type("Fake", (), {"close": lambda self: closed.append(1)})()
+        storage._conn = conn
+        storage._connect = lambda: "fresh"
+        storage._recover_connection()
+        self.assertEqual(closed, [1])
+        self.assertEqual(storage._conn, "fresh")
+
+    def test_guard_recovers_owned_connection_on_error(self):
+        storage = self._blank(True)
+        recovered = []
+        storage._conn = type(
+            "Bad", (), {"cursor": lambda self: (_ for _ in ()).throw(
+                RuntimeError("poisoned"))})()
+        storage._recover_connection = lambda: recovered.append("recovered")
+        with self.assertRaises(RuntimeError):
+            with storage._guard() as conn:
+                conn.cursor()
+        self.assertIn("recovered", recovered)
+
+    def test_guard_does_not_recover_injected_connection(self):
+        storage = self._blank(False)
+        bad_conn = type(
+            "Bad", (), {"cursor": lambda self: (_ for _ in ()).throw(
+                RuntimeError("boom"))})()
+        storage._conn = bad_conn
+        with self.assertRaises(RuntimeError):
+            with storage._guard() as conn:
+                conn.cursor()
+        # The injected (test) connection is never closed or replaced, so the
+        # persistent-connection contract holds even under an error.
+        self.assertIs(storage._conn, bad_conn)
 
 
 if __name__ == "__main__":
