@@ -355,5 +355,53 @@ class TestWebappLive(unittest.TestCase):
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
 
+# ---------------------------------------------------------------------------
+# Station view: single-source useful pages / action-link contract
+# ---------------------------------------------------------------------------
+
+class TestStationUsefulPagesContract(unittest.TestCase):
+    """Pin the station view's data-integrity contract from the shipped source.
+
+    The station page must have ONE evidence-backed source (``useful_pages``)
+    for every station-level external route. It must never open a URL from the
+    separate ``submission.submission_url`` representation, nor fabricate a
+    Send Music route, nor hide the Useful Pages section when data is empty.
+    """
+
+    def setUp(self):
+        self.src = _read(FRONTEND / "js" / "views" / "station.js")
+
+    def test_send_music_action_uses_useful_pages_only(self):
+        # The action bar must derive its submission route from useful_pages.
+        for needle in ("actionBar(detail, intel.useful_pages)",
+                       "submissionPages(usefulPages)[0]"):
+            self.assertIn(needle, self.src)
+
+    def test_submission_url_is_not_a_clickable_action_route(self):
+        # The separate path-selected submission_url must never feed an
+        # external link / action button (no competing clickable route).
+        self.assertNotIn("externalLink(submission.submission_url",
+                         self.src)
+        self.assertNotIn("addUrlRoute(sub.submission_url",
+                         self.src)
+        self.assertNotIn("submission.submission_url.value", self.src)
+
+    def test_useful_pages_always_render_honest_empty_state(self):
+        # The card must NEVER vanish on empty data; it must say so honestly.
+        self.assertNotIn("if (pages.length === 0) return null",
+                         self.src)
+        self.assertIn("No verified useful pages were discovered.", self.src)
+        self.assertIn("function usefulPagesCard(usefulPages)", self.src)
+
+    def test_no_submission_route_found_honest_label(self):
+        self.assertIn("No verified submission route found.", self.src)
+
+    def test_no_fabricated_conventional_route_sentences(self):
+        # No client-side construction of conventional paths from a base URL.
+        for needle in ("/submissions", "/contact", "/submit-music"):
+            self.assertNotIn(f"'{needle}'", self.src)
+            self.assertNotIn(f'"{needle}"', self.src)
+
+
 if __name__ == "__main__":
     unittest.main()

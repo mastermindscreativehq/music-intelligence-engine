@@ -158,6 +158,58 @@ class SourceFetchRecord:
         }
 
 
+# Categories used to classify a discovered station-level useful page. The
+# category is an INFERENCE from anchor text / surrounding context; the URL
+# itself is always the exact href discovered on the crawled page.
+USEFUL_PAGE_CATEGORIES = frozenset({
+    "send_music",
+    "dj_directory",
+    "contact",
+    "programming",
+    "about",
+    "submission_guidelines",
+    "other",
+})
+
+
+@dataclass
+class UsefulPage:
+    """A station-level page discovered as an exact link on a crawled page.
+
+    Data-integrity contract: ``url`` is the EXACT resolved href found in the
+    HTML anchor. It is never constructed, normalized into a different route,
+    or guessed from the station domain. ``label`` is the anchor text exactly
+    as discovered (trimmed). ``category`` is a labeled inference; ``source_url``
+    is the page the link was found on. ``reachable``/``status`` come only from
+    a recorded fetch of this exact URL, never from a guess.
+    """
+
+    url: str
+    label: str
+    category: str = "other"
+    source_url: str = ""
+    method: str = "link"
+    discovered_at: str = ""
+    rechecked_at: str = ""
+    reachable: bool | None = None
+    status: int | None = None
+    provenance: list[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "url": self.url,
+            "label": self.label,
+            "category": self.category,
+            "source_url": self.source_url,
+            "method": self.method,
+            "discovered_at": self.discovered_at,
+            "rechecked_at": self.rechecked_at,
+            "reachable": self.reachable,
+            "status": self.status,
+            "provenance": list(self.provenance),
+        }
+
+
 @dataclass
 class RadioIntelligenceRecord:
     """Phase 3 output: an enriched radio intelligence record.
@@ -193,6 +245,7 @@ class RadioIntelligenceRecord:
     phone_numbers: list[dict] = field(default_factory=list)  # Facts
     contacts: list[EnrichedContact] = field(default_factory=list)
     submission: SubmissionPath | None = None
+    useful_pages: list[UsefulPage] = field(default_factory=list)
     social_urls: dict[str, str] = field(default_factory=dict)
     # sources & lifecycle
     source_urls: list[str] = field(default_factory=list)
@@ -230,6 +283,7 @@ class RadioIntelligenceRecord:
             "phone_numbers": [dict(f) for f in self.phone_numbers],
             "contacts": [c.to_dict() for c in self.contacts],
             "submission": self.submission.to_dict() if self.submission else None,
+            "useful_pages": [p.to_dict() for p in self.useful_pages],
             "social_urls": dict(self.social_urls),
             "source_urls": list(self.source_urls),
             "fetches": [f.to_dict() for f in self.fetches],

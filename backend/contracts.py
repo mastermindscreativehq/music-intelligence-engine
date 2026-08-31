@@ -108,6 +108,11 @@ def intelligence_payload(station: dict, emails: list[dict],
         "contacts": [dict(c) for c in contacts],
         "submission": dict(submission) if submission else None,
         "fetches": [dict(f) for f in (fetches or [])],
+        "useful_pages": [
+            dict(p) for p in ((
+                station.get("raw_metadata") or {}).get("useful_pages") or [])
+            if isinstance(p, dict)
+        ],
         "epistemology": {
             "facts_count": _fact_count(station, emails, phones, contacts),
             "inferred_fields": inferred,

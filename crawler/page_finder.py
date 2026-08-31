@@ -1,8 +1,11 @@
 """Focused contact/submission page discovery for a station website.
 
-Not a spider: from the homepage we rank same-site links by keyword evidence
-and optionally guess a tiny set of conventional paths, always capped by the
-per-site page budget.
+Not a spider: from the homepage we rank same-site links by keyword evidence,
+always capped by the per-site page budget.
+
+Data-integrity rule: only links that actually appear on a crawled page are
+ever returned. No conventional path (``/contact``, ``/submissions`` ...) is
+ever guessed or constructed from the station domain.
 """
 
 from __future__ import annotations
@@ -29,9 +32,6 @@ KEYWORD_HINTS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"\babout\b", re.I), 2),
     (re.compile(r"\bshows?\b|\bschedule\b", re.I), 1),
 ]
-
-# Conventional paths guessed only when the homepage reveals nothing better.
-GUESSED_PATHS = ["/contact", "/contact-us", "/submissions"]
 
 
 def score_link(url: str, anchor_text: str) -> int:
@@ -99,19 +99,4 @@ def select_priority_pages(
                     ranked.append(url)
                 break
 
-    remaining = budget - len(ranked)
-    if remaining > 0:
-        base = homepage_url.rstrip("/")
-        for path in GUESSED_PATHS:
-            candidate = base + path
-            try:
-                normalized = normalize_url(candidate)
-            except ValueError:
-                continue
-            if normalized not in seen and canonical_domain(candidate) == site:
-                seen.add(normalized)
-                ranked.append(normalized)
-                remaining -= 1
-                if remaining <= 0:
-                    break
     return ranked[:budget]
