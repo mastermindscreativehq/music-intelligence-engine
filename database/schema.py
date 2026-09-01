@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -210,6 +210,55 @@ CREATE TABLE IF NOT EXISTS submission_link_checks (
 );
 CREATE INDEX IF NOT EXISTS idx_link_checks_station
     ON submission_link_checks(identity_key);
+"""),
+
+    # Phase 9: outreach messages + attempt ledger. A message row is the
+    # operator's outreach draft/record; attempts append every delivery
+    # handoff/event so history is traceable. Status is the explicit
+    # vocabulary draft|opened_in_email|sent|failed and is NEVER set to
+    # 'sent' merely because a mail client opened. track references are
+    # stored by opaque track_id (a foreign key into tracks) but a message
+    # may also carry freeform track metadata captured at compose time.
+    (4, """
+CREATE TABLE IF NOT EXISTS outreach_messages (
+    outreach_id      TEXT PRIMARY KEY,   -- 'om_<hex>'
+    contact_uid      TEXT,
+    identity_key     TEXT,
+    recipient_name   TEXT,
+    recipient_role   TEXT,
+    organization     TEXT,
+    email            TEXT NOT NULL,
+    source_url       TEXT,
+    track_id         TEXT,
+    track            TEXT,               -- JSON object (track metadata)
+    context          TEXT,               -- JSON object (artist/track context)
+    subject          TEXT,
+    message          TEXT,
+    from_email       TEXT,
+    sharing          TEXT,               -- JSON object (sharing options)
+    status           TEXT NOT NULL CHECK (status IN
+                       ('draft', 'opened_in_email', 'sent', 'failed')),
+    provider         TEXT NOT NULL DEFAULT 'local',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_outreach_contact
+    ON outreach_messages(contact_uid);
+CREATE INDEX IF NOT EXISTS idx_outreach_status
+    ON outreach_messages(status);
+
+CREATE TABLE IF NOT EXISTS outreach_attempts (
+    attempt_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    outreach_id   TEXT NOT NULL REFERENCES outreach_messages(outreach_id)
+                  ON DELETE CASCADE,
+    event         TEXT NOT NULL CHECK (event IN
+                    ('opened_in_email', 'sent', 'failed')),
+    provider      TEXT NOT NULL DEFAULT 'local',
+    at            TEXT NOT NULL,
+    meta          TEXT                -- JSON object
+);
+CREATE INDEX IF NOT EXISTS idx_outreach_attempts_msg
+    ON outreach_attempts(outreach_id);
 """),
 ]
 

@@ -71,6 +71,8 @@ from backend.contracts import (
 from submissions import service as submission_service
 from submissions.service import TrackRejected, TrackTooLarge
 
+from outreach import service as outreach_service
+
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
 
@@ -81,6 +83,10 @@ class StationNotFound(Exception):
 
 class TrackNotFound(Exception):
     """Unknown opaque asset id; converted to a 404 envelope."""
+
+
+class OutreachNotFound(Exception):
+    """Unknown outreach id; converted to a 404 envelope."""
 
 
 def create_app(storage, *, track_store=None, link_fetcher=None,
@@ -126,6 +132,12 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     def _json(status: int, body: dict) -> JSONResponse:
         return JSONResponse(status_code=status, content=body)
 
+    async def _json_request(request: Request) -> dict:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("body must be a JSON object")
+        return payload
+
     @app.exception_handler(StationNotFound)
     async def _station_not_found(request: Request, exc: StationNotFound):
         return _json(404, error_body("station_not_found", str(exc)))
@@ -146,6 +158,10 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     @app.exception_handler(TrackNotFound)
     async def _track_not_found(request: Request, exc: TrackNotFound):
         return _json(404, error_body("track_not_found", str(exc)))
+
+    @app.exception_handler(OutreachNotFound)
+    async def _outreach_not_found(request: Request, exc: OutreachNotFound):
+        return _json(404, error_body("outreach_not_found", str(exc)))
 
     async def _bad_value(request: Request, exc: Exception):
         # mirrors the stdlib dispatcher's contract-failure mapping
@@ -325,6 +341,43 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         history = submission_service.link_history(storage, key,
                                                   limit=limit)
         return success_body(history)
+
+    # -- Phase 9: outreach ----------------------------------------------------
+
+    @app.post("/api/v1/outreach", status_code=201)
+    async def create_outreach(request: Request):
+        payload = await _json_request(request)
+        record = outreach_service.create_outreach(storage, payload=payload)
+        return success_body(record)
+
+    @app.get("/api/v1/outreach")
+    def list_outreach(limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+                      offset: int = Query(0, ge=0),
+                      status: str | None = None):
+        rows, total = outreach_service.list_outreach(
+            storage, limit=limit, offset=offset, status=status)
+        return success_body({"outreach": rows, "total": total,
+                             "limit": limit, "offset": offset})
+
+    @app.get("/api/v1/outreach/{outreach_id}")
+    def get_outreach(outreach_id: str):
+        record = outreach_service.get_outreach(storage, outreach_id)
+        if record is None:
+            raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
+        return success_body(record)
+
+    @app.post("/api/v1/outreach/{outreach_id}/event")
+    async def outreach_event(outreach_id: str, request: Request):
+        if outreach_service.get_outreach(storage, outreach_id) is None:
+            raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
+        payload = await _json_request(request)
+        event = payload.get("event")
+        if not isinstance(event, str) or event not in \
+                outreach_service.OUTREACH_STATUSES or event == "draft":
+            raise ValueError("invalid outreach event")
+        record = outreach_service.record_outreach_event(
+            storage, outreach_id, event=event, meta=payload.get("meta"))
+        return success_body(record)
 
     return app
 

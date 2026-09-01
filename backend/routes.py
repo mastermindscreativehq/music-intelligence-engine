@@ -43,12 +43,15 @@ from backend.contracts import (
 from submissions import service as submission_service
 from submissions.service import TrackRejected, TrackTooLarge
 
+from outreach import service as outreach_service
+
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
 
 LIST_PARAMS = ("limit", "offset", "q", "status", "genre", "format",
                "country", "min_confidence")
 TRACK_LIST_PARAMS = ("limit", "offset", "status")
+OUTREACH_PARAMS = ("limit", "offset", "status")
 
 
 class StationNotFound(Exception):
@@ -61,6 +64,10 @@ class RunNotFound(Exception):
 
 class TrackNotFound(Exception):
     """Unknown opaque asset id; converted to a 404 envelope."""
+
+
+class OutreachNotFound(Exception):
+    """Unknown outreach id; converted to a 404 envelope."""
 
 
 # (method, pattern, path_template, query_params)
@@ -93,6 +100,14 @@ ROUTE_TABLE = (
     ("GET",
      re.compile(r"^/api/v1/tracks/(?P<track_id>sha256:[0-9a-f]{64})$"),
      "/api/v1/tracks/{track_id}", ()),
+    ("POST", re.compile(r"^/api/v1/outreach$"), "/api/v1/outreach", ()),
+    ("GET", re.compile(r"^/api/v1/outreach$"), "/api/v1/outreach",
+     OUTREACH_PARAMS),
+    ("POST", re.compile(r"^/api/v1/outreach/(?P<outreach_id>[^/]+)/event$"),
+     "/api/v1/outreach/{outreach_id}/event", ()),
+    ("GET",
+     re.compile(r"^/api/v1/outreach/(?P<outreach_id>om_[0-9a-f]+)$"),
+     "/api/v1/outreach/{outreach_id}", ()),
 )
 
 
@@ -113,6 +128,19 @@ def _int_param(params: dict, name: str, default: int,
 
 def _first(params: dict, name: str):
     return (params.get(name) or [None])[0]
+
+
+def _parse_json_body(body: bytes | None) -> dict:
+    """Validate a JSON object request body; raises ValueError on bad input."""
+    if not body:
+        raise ValueError("body is required")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("body must be valid JSON") from None
+    if not isinstance(payload, dict):
+        raise ValueError("body must be a JSON object")
+    return payload
 
 
 def _parse_ingest_body(body: bytes | None) -> tuple[list, str]:
@@ -161,6 +189,8 @@ def dispatch(service, method: str, path: str, params: dict,
             return 404, error_body("run_not_found", str(exc))
         except TrackNotFound as exc:
             return 404, error_body("track_not_found", str(exc))
+        except OutreachNotFound as exc:
+            return 404, error_body("outreach_not_found", str(exc))
         except TrackTooLarge as exc:
             return 413, error_body("payload_too_large", str(exc))
         except TrackRejected as exc:
@@ -240,6 +270,40 @@ def _handle(service, method: str, match: re.Match, params: dict,
     if path.startswith("/api/v1/tracks/"):
         return 200, success_body(
             track_projection(require_track(match.group("track_id"))))
+
+    # -- Phase 9: outreach ----------------------------------------------------
+    if path == "/api/v1/outreach":
+        if method == "POST":
+            payload = _parse_json_body(body)
+            record = outreach_service.create_outreach(service, payload=payload)
+            return 201, success_body(record)
+        limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
+        offset = _int_param(params, "offset", 0, 0, None)
+        rows, total = outreach_service.list_outreach(
+            service, limit=limit, offset=offset,
+            status=_first(params, "status"))
+        return 200, success_body({"outreach": rows, "total": total,
+                                  "limit": limit, "offset": offset})
+
+    if path.startswith("/api/v1/outreach/") and path.endswith("/event"):
+        outreach_id = match.group("outreach_id")
+        if outreach_service.get_outreach(service, outreach_id) is None:
+            raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
+        payload = _parse_json_body(body)
+        event = payload.get("event")
+        if not isinstance(event, str) or event not in \
+                outreach_service.OUTREACH_STATUSES or event == "draft":
+            raise ValueError("invalid outreach event")
+        record = outreach_service.record_outreach_event(
+            service, outreach_id, event=event, meta=payload.get("meta"))
+        return 200, success_body(record)
+
+    if path.startswith("/api/v1/outreach/"):
+        outreach_id = match.group("outreach_id")
+        if outreach_service.get_outreach(service, outreach_id) is None:
+            raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
+        return 200, success_body(
+            outreach_service.get_outreach(service, outreach_id))
 
     key = match.group("key")
     if path.endswith("/submission/checks"):
