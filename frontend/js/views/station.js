@@ -25,7 +25,7 @@ import { outreachHref } from "../router.js";
 import { openOutreachModal } from "./outreachModal.js";
 
 const STATUS_CLASSES = ["verified", "conflicting", "failed", "stale",
-  "unverified", "unsupported"];
+  "unverified", "unsupported", "enriched", "new", "broken"];
 
 const unsubscribeFns = [];
 

@@ -175,6 +175,10 @@ tr.station-row:hover { background: var(--panel-2); }
 .status-stale       { color: var(--stale); }
 .status-unverified,
 .status-unsupported { color: var(--text-dim); }
+/* enrichment lifecycle statuses from the pipeline (enriched / new / broken) */
+.status-enriched    { color: var(--ok); }
+.status-new         { color: var(--accent); }
+.status-broken      { color: var(--bad); }
 
 .banner-error {
   background: rgba(240, 86, 74, 0.12);
