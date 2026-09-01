@@ -374,6 +374,14 @@ function rankedContacts(contacts) {
   });
 }
 
+/* A decision-role or backend-preferred person counts as a key contact, but
+ * the actionable set only includes people with a verified outreach route.
+ * Unreachable (no-email) contacts never occupy the top-3; their role still
+ * powers the Best-Actions fallback, never fabricated. */
+function isActionable(contact) {
+  return isKeyContact(contact) && Boolean(verifiedEmail(contact));
+}
+
 function roleTitle(role) {
   if (!role || role === "unknown") return null;
   return String(role).replace(/_/g, " ");
@@ -458,7 +466,7 @@ function keyContactCard(contact, payload, identityKey, basket) {
 
 function keyContactsCard(contacts, payload, identityKey, basket) {
   const ranked = rankedContacts(contacts);
-  const keys = ranked.filter(isKeyContact);
+  const keys = ranked.filter(isActionable);
   const more = ranked.filter(isMoreRelevantContact);
   const shown = keys.slice(0, 3);
   const extraKeys = keys.slice(3);
