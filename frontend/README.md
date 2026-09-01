@@ -5,9 +5,12 @@ selecting radio-station intelligence.
 
 **Scope (roadmap Phase 7):** search & filter (location/genre/format +
 confidence/status), inspect contacts with confidence and source
-attribution visible, select recipients. **Not in scope:** campaign
-building, message review/approval, uploads, tracking (Phases 8–10);
-nothing here ever sends anything.
+attribution visible, select recipients, and start outreach. The page is
+**action-first**: Discover → open a station → Find Contacts / Send Music /
+Visit Website / Add to Campaign → Start outreach. Recipients are staged in
+a basket and reviewed in a minimal draft composer that hands off to the
+operator's email client (`mailto:`) — **nothing here ever sends anything**
+and there is no server-side campaign engine.
 
 ## Zero-dependency by design
 
@@ -31,11 +34,12 @@ no third-party code).
 | `css/app.css` | Dark operator theme. |
 | `js/dom.js` | `el()` element builder — the ONLY way DOM is created; dynamic data is attached as text/attributes, never markup. |
 | `js/api.js` | Envelope client for `/api/v1/*`; unwraps `ok/data/error`, raises typed `ApiError`. |
-| `js/basket.js` | Recipient selection store (sessionStorage); export-only payload builder. |
-| `js/router.js` | Hash router: `#/` list, `#/station/<key>` detail. |
+| `js/basket.js` | Recipient selection store (sessionStorage); lookup by `contact_uid`. |
+| `js/router.js` | Hash router: `#/` list, `#/station/<key>` detail, `#/outreach?recipient=<uid>,<uid>` composer. |
 | `js/views/list.js` | Search/filter form + results table + pagination; "add backend-preferred contacts" per station. |
-| `js/views/station.js` | Overview, contacts (confidence bars, reasons, provenance links), submission path (inference-labeled), epistemology notes, verification history with all six statuses. |
-| `js/app.js` | Bootstrap: header schema badge from live `/api/v1/health`, basket panel + JSON export, routing. |
+| `js/views/station.js` | Action-first + evidence-backed: Actions bar (Find contacts / Send music / Visit website / Add to campaign), "Useful pages" (discovered public pages surfaced as navigational links), individual recipient cards grouped as **Recommended Contacts** (backend *preferred_for_submissions* or music-outreach roles), **Other Discovered People** (weak evidence, shown for intelligence only), and **Station-Level Contact Routes** (EXACT backend-discovered submission/instructions URLs with reachability), plus submission path (inference-labeled) and a collapsed "Intelligence Details" disclosure (overview, epistemology, verification history with all six statuses, link accessibility). |
+| `js/views/outreach.js` | Handoff composer: loads recipients from the basket with station context + evidence source, editable From (operator's own address), subject/body persisted to `sessionStorage`, "Copy message" and "Open in email" (`mailto:`) handoff. |
+| `js/app.js` | Bootstrap: header schema badge from live `/api/v1/health`, basket panel with **Start outreach** action, routing. |
 
 ## Contract with the backend
 
@@ -47,6 +51,13 @@ no third-party code).
   conflicting | unsupported`), fact/inference labels are displayed as the
   backend computed them — the console never re-ranks or promotes.
 - Recipient selection is keyed by backend-stable `contact_uid`.
+- **Data integrity:** the frontend never constructs an outreach route. A
+  person is reachable only when the backend stored the exact email
+  (`contact.email`) or URL (`submission.submission_url.value`), and every
+  card shows the evidence (`source_url` / provenance) that produced it —
+  "No verified outreach route found" is an honest state, never a guess.
+  The composer only ever hands off to the operator's own email client via
+  `mailto:`; nothing is sent by this console.
 
 ## Testing
 

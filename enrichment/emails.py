@@ -17,15 +17,20 @@ EMAIL_CORE = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 EMAIL_RE = re.compile(EMAIL_CORE)
 EMAIL_FULL_RE = re.compile(rf"^{EMAIL_CORE}$")
 
-# Obfuscation patterns: "user [at] domain [dot] com", "user (at) domain (dot) com"
+# Obfuscation patterns: "user [at] domain [dot] com", "user (at) domain (dot) com",
+# or bare capitalized "user AT domain DOT com". Lowercase bare "at"/"dot" in prose
+# ("contact at station dot org") is NEVER decoded — that would fabricate an address.
 _OBFUSCATED_RE = re.compile(
-    r"[A-Za-z0-9._%+-]+\s*[\[(]?\s*at\s*[\])]?\s*"
-    r"[A-Za-z0-9.-]+\s*[\[(]?\s*dot\s*[\])]?\s*"
+    r"[A-Za-z0-9._%+-]+\s*"
+    r"(?:[([]\s*[Aa][Tt]\s*[\])]|AT)\s*"
+    r"[A-Za-z0-9.-]+\s*"
+    r"(?:[([]\s*[Dd][Oo][Tt]\s*[\])]|DOT)\s*"
     r"[A-Za-z]{2,}",
-    re.I,
 )
-_AT_VARIANTS = re.compile(r"\s*[\[(]?\s*\bat\b\s*[\])]?\s*", re.I)
-_DOT_VARIANTS = re.compile(r"\s*[\[(]?\s*\bdot\b\s*[\])]?\s*", re.I)
+_AT_TOKEN = r"(?:[([]\s*[Aa][Tt]\s*[\])]|AT)"
+_DOT_TOKEN = r"(?:[([]\s*[Dd][Oo][Tt]\s*[\])]|DOT)"
+_AT_VARIANTS = re.compile(r"\s*" + _AT_TOKEN + r"\s*")
+_DOT_VARIANTS = re.compile(r"\s*" + _DOT_TOKEN + r"\s*")
 
 # Zero-width / formatting characters stripped before matching.
 _INVISIBLES = re.compile(r"[\u200b\u200c\u200d\ufeff\xa0]")
