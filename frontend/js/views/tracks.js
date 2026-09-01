@@ -99,26 +99,46 @@ function uploadCard(onUploaded) {
 }
 
 function trackDetailPanel(data) {
-  const pairs = [
-    ["track_id", data.track_id],
-    ["sha256", data.sha256],
-    ["original_filename", data.original_filename],
-    ["size_bytes", data.size_bytes],
-    ["content_type", data.content_type],
-    ["status", data.status],
-    ["reject_reason", data.reject_reason ?? "—"],
-    ["notes", data.notes ?? "—"],
-    ["created_at", data.created_at],
-    ["updated_at", data.updated_at],
-    ["links.self", data.links ? data.links.self : "—"],
+  const record = data && typeof data === "object" ? data : {};
+  const title = record.original_filename || "(untitled upload)";
+  const uploadedAt = record.created_at || null;
+
+  function kvRows(pairs) {
+    const rows = pairs
+      .filter(([, value]) => value !== null && value !== undefined
+        && value !== "" && value !== "—" && value !== "–")
+      .map(([key, value]) =>
+        [el("dt", {}, key),
+          el("dd", { class: key === "track_id" || key === "sha256" ? "track-id" : "" },
+            String(value))]);
+    return Array.isArray(rows) ? rows.flat() : [];
+  }
+
+  const main = el("div", { class: "track-overview" },
+    el("h3", {}, title),
+    el("p", { class: "dim" }, "Asset status · ",
+      statusChip(record.status),
+      uploadedAt ? el("span", { class: "dim" }, ` · uploaded ${uploadedAt}`) : null));
+
+  const techPairs = [
+    ["asset id", record.track_id],
+    ["sha256", record.sha256],
+    ["file size (bytes)", record.size_bytes],
+    ["content type", record.content_type],
+    ["status", record.status],
+    ["reject reason", record.reject_reason],
+    ["notes", record.notes],
+    ["changed", record.updated_at],
+    ["asset link", record.links && record.links.self],
   ];
+
+  const tech = el("details", { class: "track-tech" },
+    el("summary", {}, "Technical Details"),
+    el("dl", { class: "kv" }, kvRows(techPairs)));
+
   return el("div", { class: "track-detail" },
-    el("h3", {}, "Asset record"),
-    el("dl", { class: "kv" }, pairs.map(([key, value]) =>
-      [el("dt", {}, key),
-        el("dd", { class: key === "sha256" || key === "track_id"
-          || key === "links.self" ? "track-id" : "" },
-          String(value ?? "—"))])).flat());
+    main,
+    tech);
 }
 
 function trackRow(track, detailBox) {
