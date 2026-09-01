@@ -41,6 +41,8 @@ const TEXT_FILES = [
   "js/views/station.js",
   "js/views/tracks.js",
   "js/views/outreach.js",
+  "js/views/outreachHistory.js",
+  "js/draftGenerator.js",
   "js/views/outreachModal.js",
 ];
 const BINARY_FILES = [];

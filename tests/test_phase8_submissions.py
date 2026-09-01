@@ -961,16 +961,18 @@ class TestSubmissionServiceFunctions(unittest.TestCase):
 
 
 class TestPostgresMigration0002(unittest.TestCase):
-    def test_tracks_migration_is_last_ordered_and_structural(self):
+    def test_tracks_migration_precedes_outreach_tail(self):
         migrations = load_pg_migrations()
         versions = [version for version, _name, _sql in migrations]
         self.assertEqual(versions, sorted(versions))
+        sequenced = {name for _v, name, _sql in migrations}
+        self.assertIn("0002_submissions.sql", sequenced)
+        self.assertIn("0003_outreach.sql", sequenced)
         name, sql = migrations[-1][1], migrations[-1][2]
-        self.assertEqual(name, "0002_submissions.sql")
-        self.assertIn("CREATE TABLE IF NOT EXISTS tracks", sql)
-        self.assertIn(
-            "CREATE TABLE IF NOT EXISTS submission_link_checks", sql)
-        self.assertIn("REFERENCES organizations", sql)
+        self.assertEqual(name, "0003_outreach.sql")
+        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_messages", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_attempts", sql)
+        self.assertIn("REFERENCES outreach_messages", sql)
 
 
 if __name__ == "__main__":  # pragma: no cover

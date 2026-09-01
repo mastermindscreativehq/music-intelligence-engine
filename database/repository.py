@@ -77,4 +77,31 @@ class IntelligenceRepository(Protocol):
         """Most recent checks first."""
         ...
 
+    # -- Phase 9: outreach records + attempt ledger ---------------------------
+
+    def save_outreach(self, record: dict) -> dict:
+        """Insert or overwrite one outreach message row."""
+        ...
+
+    def get_outreach(self, outreach_id: str) -> dict | None: ...
+
+    def list_outreach(self, limit: int = ..., offset: int = ...,
+                      status: str | None = ...) -> tuple[list[dict], int]:
+        """Listing; returns (rows, total), newest first."""
+        ...
+
+    def append_outreach_attempt(self, outreach_id: str,
+                                attempt: dict) -> None:
+        """Append one traceable delivery event (never rewrites history)."""
+        ...
+
+    def set_outreach_status(self, outreach_id: str, status: str,
+                            at: str | None = ...) -> None:
+        """Advance a message's status with an explicit timestamp."""
+        ...
+
+    def get_outreach_attempts(self, outreach_id: str) -> list[dict]:
+        """All recorded events for a message, oldest first."""
+        ...
+
     def close(self) -> None: ...

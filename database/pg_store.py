@@ -704,6 +704,155 @@ class PostgresStorage:
                 "checked_at": r["checked_at"],
             } for r in cur.fetchall()]
 
+    # -- outreach messages + attempts (Phase 9) --------------------------------
+
+    @staticmethod
+    def _outreach_from_row(row: dict) -> dict:
+        """Keys identical to PersistenceService._outreach_from_row; JSONB
+        columns arrive pre-decoded from psycopg, so _j keeps NULL as None."""
+        return {
+            "outreach_id": row["outreach_id"],
+            "contact_uid": row["contact_uid"],
+            "identity_key": row["identity_key"],
+            "recipient_name": row["recipient_name"],
+            "recipient_role": row["recipient_role"],
+            "organization": row["organization"],
+            "email": row["email"],
+            "source_url": row["source_url"],
+            "track_id": row["track_id"],
+            "track": _j(row["track"], None),
+            "context": _j(row["context"], None),
+            "subject": row["subject"],
+            "message": row["message"],
+            "from_email": row["from_email"],
+            "sharing": _j(row["sharing"], None),
+            "status": row["status"],
+            "provider": row["provider"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_outreach(self, record: dict) -> dict:
+        """Insert or overwrite one outreach message row."""
+        now = utc_now_iso()
+        with self._lock:
+            with self._conn:
+                cur = self._conn.cursor()
+                cur.execute(
+                    "SELECT created_at FROM outreach_messages "
+                    "WHERE outreach_id=%s",
+                    (record["outreach_id"],))
+                existing = cur.fetchone()
+                created = existing["created_at"] if existing \
+                    else str(record.get("created_at") or now)
+                cur.execute(
+                    """
+                    INSERT INTO outreach_messages(
+                        outreach_id, contact_uid, identity_key,
+                        recipient_name, recipient_role, organization,
+                        email, source_url, track_id, track, context,
+                        subject, message, from_email, sharing,
+                        status, provider, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                            %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                    ON CONFLICT(outreach_id) DO UPDATE SET
+                        contact_uid=EXCLUDED.contact_uid,
+                        identity_key=EXCLUDED.identity_key,
+                        recipient_name=EXCLUDED.recipient_name,
+                        recipient_role=EXCLUDED.recipient_role,
+                        organization=EXCLUDED.organization,
+                        email=EXCLUDED.email,
+                        source_url=EXCLUDED.source_url,
+                        track_id=EXCLUDED.track_id,
+                        track=EXCLUDED.track,
+                        context=EXCLUDED.context,
+                        subject=EXCLUDED.subject,
+                        message=EXCLUDED.message,
+                        from_email=EXCLUDED.from_email,
+                        sharing=EXCLUDED.sharing,
+                        status=EXCLUDED.status,
+                        provider=EXCLUDED.provider,
+                        updated_at=EXCLUDED.updated_at
+                    """,
+                    (record["outreach_id"], record.get("contact_uid"),
+                     record.get("identity_key"), record.get("recipient_name"),
+                     record.get("recipient_role"), record.get("organization"),
+                     record["email"], record.get("source_url"),
+                     record.get("track_id"),
+                     _dumps(record.get("track")),
+                     _dumps(record.get("context")),
+                     record.get("subject"), record.get("message"),
+                     record.get("from_email"),
+                     _dumps(record.get("sharing")),
+                     record["status"], record.get("provider") or "local",
+                     created, str(record.get("updated_at") or now)))
+        return self.get_outreach(record["outreach_id"])
+
+    def get_outreach(self, outreach_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM outreach_messages WHERE outreach_id=%s",
+                (outreach_id,))
+            row = cur.fetchone()
+        return self._outreach_from_row(row) if row else None
+
+    def list_outreach(self, limit: int = 50, offset: int = 0,
+                      status: str | None = None) -> tuple[list[dict], int]:
+        clauses, params = [], []
+        if status:
+            clauses.append("status = %s")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                f"SELECT COUNT(*) AS n FROM outreach_messages {where}",
+                params)
+            total = int(cur.fetchone()["n"])
+            cur.execute(
+                f"SELECT * FROM outreach_messages {where} "
+                "ORDER BY created_at DESC, outreach_id LIMIT %s OFFSET %s",
+                [*params, int(limit), int(offset)])
+            rows = [self._outreach_from_row(r) for r in cur.fetchall()]
+        return rows, total
+
+    def append_outreach_attempt(self, outreach_id: str,
+                                attempt: dict) -> None:
+        with self._lock:
+            with self._conn:
+                cur = self._conn.cursor()
+                cur.execute(
+                    "INSERT INTO outreach_attempts(outreach_id, event, "
+                    "provider, \"at\", meta) VALUES (%s, %s, %s, %s, %s)",
+                    (outreach_id, attempt["event"],
+                     attempt.get("provider") or "local",
+                     str(attempt.get("at") or utc_now_iso()),
+                     _dumps(attempt.get("meta"))))
+
+    def set_outreach_status(self, outreach_id: str, status: str,
+                            at: str | None = None) -> None:
+        with self._lock:
+            with self._conn:
+                cur = self._conn.cursor()
+                cur.execute(
+                    "UPDATE outreach_messages SET status=%s, updated_at=%s "
+                    "WHERE outreach_id=%s",
+                    (status, at or utc_now_iso(), outreach_id))
+
+    def get_outreach_attempts(self, outreach_id: str) -> list[dict]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT event, provider, \"at\" AS at, meta "
+                "FROM outreach_attempts WHERE outreach_id=%s "
+                "ORDER BY attempt_id ASC",
+                (outreach_id,))
+            rows = cur.fetchall()
+        return [{
+            "event": r["event"], "provider": r["provider"],
+            "at": r["at"], "meta": _j(r["meta"], None),
+        } for r in rows]
 
     def close(self) -> None:
         with self._lock:

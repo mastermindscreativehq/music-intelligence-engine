@@ -203,5 +203,49 @@ class OutreachDispatchTests(unittest.TestCase):
         self.assertIn(("GET", "/api/v1/outreach/{outreach_id}"), verbs)
 
 
+# ---------------------------------------------------------------------------
+# Postgres structural contract (offline): verifies the PG storage and
+# migration file satisfy the outreach surface so prod gets them on deploy.
+# ---------------------------------------------------------------------------
+
+class PostgresOutreachContractTests(unittest.TestCase):
+    def test_pg_storage_exposes_outreach_methods(self):
+        from database.pg_store import PostgresStorage
+        need = {
+            "save_outreach", "get_outreach", "list_outreach",
+            "append_outreach_attempt", "set_outreach_status",
+            "get_outreach_attempts",
+        }
+        actual = {m for m in dir(PostgresStorage)
+                  if not m.startswith("_") and callable(getattr(PostgresStorage, m))}
+        missing = need - actual
+        self.assertFalse(missing, f"PostgresStorage missing outreach methods: {missing}")
+        self.assertTrue(hasattr(PostgresStorage, "_outreach_from_row"))
+
+    def test_pg_migration_tail_is_outreach(self):
+        from database.schema_migrations import load_pg_migrations
+        migrations = load_pg_migrations()
+        names = {name for _v, name, _sql in migrations}
+        self.assertIn("0003_outreach.sql", names)
+        tail_name, tail_sql = migrations[-1][1], migrations[-1][2]
+        self.assertEqual(tail_name, "0003_outreach.sql")
+        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_messages", tail_sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_attempts", tail_sql)
+        self.assertIn("REFERENCES outreach_messages", tail_sql)
+        self.assertIn('"at"', tail_sql)
+
+    def test_repository_protocol_includes_outreach(self):
+        from database.repository import IntelligenceRepository
+        need = {
+            "save_outreach", "get_outreach", "list_outreach",
+            "append_outreach_attempt", "set_outreach_status",
+            "get_outreach_attempts",
+        }
+        actual = {m for m in dir(IntelligenceRepository)
+                  if not m.startswith("__")}
+        missing = need - actual
+        self.assertFalse(missing, f"Protocol missing: {missing}")
+
+
 if __name__ == "__main__":
     unittest.main()
