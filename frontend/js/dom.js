@@ -17,7 +17,7 @@ export function el(tag, attrs = {}, ...children) {
     } else if (name === "dataset") {
       Object.assign(node.dataset, value);
     } else if (name.startsWith("on") && typeof value === "function") {
-      node.addEventListener(name.slice(2), value);
+      node.addEventListener(name.slice(2).toLowerCase(), value);
     } else if (value === true) {
       node.setAttribute(name, "");
     } else {

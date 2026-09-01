@@ -6,9 +6,10 @@
 
 import { api, ApiError } from "./api.js";
 import { Basket } from "./basket.js";
-import { createDownload, el } from "./dom.js";
-import { startRouter } from "./router.js";
+import { el } from "./dom.js";
+import { outreachHref, startRouter } from "./router.js";
 import { renderListView } from "./views/list.js";
+import { renderOutreachView } from "./views/outreach.js";
 import { renderStationView, teardownStationView } from "./views/station.js";
 import { renderTracksView } from "./views/tracks.js";
 
@@ -34,18 +35,17 @@ function renderBasketPanel(items) {
     return;
   }
 
-  const exportButton = el("button", { class: "primary" }, "export JSON");
-  exportButton.addEventListener("click", () => {
-    createDownload("recipients.json",
-      JSON.stringify(basket.exportPayload(), null, 2));
+  const outreachButton = el("button", { class: "primary" }, "Start outreach");
+  outreachButton.addEventListener("click", () => {
+    window.location.hash = outreachHref(items.map((item) => item.contact_uid));
   });
 
-  const clearButton = el("button", { class: "subtle" }, "clear all");
+  const clearButton = el("button", { class: "subtle" }, "clear");
   clearButton.addEventListener("click", () => basket.clear());
 
   basketPanel.replaceChildren(
     el("section", { class: "card" },
-      el("h2", {}, `Selected recipients (${items.length})`),
+      el("h2", {}, `Recipients (${items.length})`),
       items.map((item) =>
         el("div", { class: "recipient-item" },
           el("span", {},
@@ -59,7 +59,7 @@ function renderBasketPanel(items) {
               class: "linkish",
               onClick: () => basket.remove(item.contact_uid),
             }, "remove")))),
-      el("div", { class: "actions-row" }, exportButton, clearButton)));
+      el("div", { class: "actions-row" }, outreachButton, clearButton)));
 }
 
 basket.subscribe(renderBasketPanel);
@@ -90,5 +90,9 @@ startRouter(viewRoot, {
   tracks(root) {
     teardownStationView();
     renderTracksView(root);
+  },
+  outreach(root, uids) {
+    teardownStationView();
+    renderOutreachView(root, uids, basket);
   },
 });

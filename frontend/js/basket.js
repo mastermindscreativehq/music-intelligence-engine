@@ -57,6 +57,11 @@ export class Basket {
     return this.items.some((item) => item.contact_uid === contactUid);
   }
 
+  get(contactUid) {
+    const uid = String(contactUid);
+    return this.items.find((item) => item.contact_uid === uid) || null;
+  }
+
   add(recipient) {
     if (!recipient || !recipient.contact_uid || this.has(recipient.contact_uid)) {
       return false;
@@ -68,6 +73,7 @@ export class Basket {
       name: recipient.name ?? null,
       role: recipient.role ?? null,
       email: recipient.email ?? null,
+      source_url: recipient.source_url ?? null,
     });
     this._save();
     return true;
