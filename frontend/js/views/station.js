@@ -81,9 +81,36 @@ function submissionPages(usefulPages) {
  * path-regex-selected representation) or constructed from a label/domain.
  * ------------------------------------------------------------------------- */
 
-function actionBar(detail, usefulPages) {
+/* ---------------------------------------------------------------------------
+ * Section A — Recommended Actions (classified, evidence-backed)
+ *
+ * A short set (3–5) of the highest-value actions, each built ONLY from data
+ * the backend actually discovered. Station-page actions open the exact
+ * classified discovered URL (send music / DJ directory / programming / contact
+ * page); a music-department contact opens the verified email of a qualified
+ * contact. Nothing is fabricated: if no such route was discovered the action
+ * is not shown (or is shown muted with the honest reason).
+ * ------------------------------------------------------------------------- */
+
+function firstPageOf(usefulPages, category) {
+  return (usefulPages || []).find((p) =>
+    p && p.category === category && typeof p.url === "string"
+    && /^https?:\/\//i.test(p.url)) || null;
+}
+
+function actionBar(detail, usefulPages, contactsPayload) {
   const website = detail.website || detail.domain || null;
   const submissionRoute = submissionPages(usefulPages)[0] || null;
+  const djDirectory = firstPageOf(usefulPages, "dj_directory");
+  const programmingPage = firstPageOf(usefulPages, "programming");
+  const contactPage = firstPageOf(usefulPages, "contact");
+
+  // Music-department contact: first QUALIFIED (recommended) contact with a
+  // verified email, used only as an evidence-backed reach-out target.
+  let musicContact = null;
+  for (const c of (contactsPayload && contactsPayload.contacts) || []) {
+    if (isRecommended(c) && verifiedEmail(c)) { musicContact = c; break; }
+  }
 
   const findContacts = el("button", { class: "primary" }, "Find contacts");
   findContacts.addEventListener("click", () => {
@@ -91,34 +118,73 @@ function actionBar(detail, usefulPages) {
     if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 
-  return el("section", { class: "card action-bar", id: "station-actions" },
-    el("h2", {}, "Actions"),
-    el("div", { class: "action-grid" },
-      findContacts,
-      submissionRoute
-        ? externalLink(submissionRoute.url,
-          el("span", { class: "action-tile" },
-            el("strong", {}, "Send music"),
-            el("span", { class: "dim action-sub" },
-              submissionRoute.label || "submission page")))
-        : el("span", { class: "action-tile action-muted" },
-          el("strong", {}, "Send music"),
-          el("span", { class: "dim action-sub" },
-            "No verified submission route found.")),
-      website
-        ? externalLink(website,
-          el("span", { class: "action-tile" },
-            el("strong", {}, "Visit website"),
-            el("span", { class: "dim action-sub" },
-              detail.domain ?? website)))
-        : el("span", { class: "action-tile action-muted" },
+  const tiles = [];
+
+  findContacts.id = "action-find-contacts";
+  tiles.push(findContacts);
+
+  tiles.push(submissionRoute
+    ? externalLink(submissionRoute.url,
+      el("span", { class: "action-tile" },
+        el("strong", {}, "Send music"),
+        el("span", { class: "dim action-sub" },
+          submissionRoute.label || "submission page")))
+    : el("span", { class: "action-tile action-muted" },
+      el("strong", {}, "Send music"),
+      el("span", { class: "dim action-sub" },
+        "No verified submission route found.")));
+
+  if (musicContact && musicContact.email) {
+    tiles.push(externalLink(`mailto:${musicContact.email}`,
+      el("span", { class: "action-tile" },
+        el("strong", {}, "Contact music dept"),
+        el("span", { class: "dim action-sub" },
+          musicContact.email))));
+  }
+
+  if (djDirectory) {
+    tiles.push(externalLink(djDirectory.url,
+      el("span", { class: "action-tile" },
+        el("strong", {}, "DJ directory"),
+        el("span", { class: "dim action-sub" },
+          (djDirectory.label || "DJ directory").trim()))));
+  }
+
+  if (programmingPage) {
+    tiles.push(externalLink(programmingPage.url,
+      el("span", { class: "action-tile" },
+        el("strong", {}, "Programming"),
+        el("span", { class: "dim action-sub" },
+          (programmingPage.label || "programming page").trim()))));
+  }
+
+  const stationContactPage = contactPage || null;
+  tiles.push(stationContactPage
+    ? externalLink(stationContactPage.url,
+      el("span", { class: "action-tile" },
+        el("strong", {}, "Contact page"),
+        el("span", { class: "dim action-sub" },
+          (stationContactPage.label || "contact page").trim())))
+    : website && tiles.length < 5
+      ? externalLink(website,
+        el("span", { class: "action-tile" },
           el("strong", {}, "Visit website"),
-          el("span", { class: "dim action-sub" }, "no website on record")),
-      el("span", { class: "action-tile action-staged" },
-        el("button", {
-          class: "primary inline",
-          id: "station-add-campaign",
-        }, "Add to campaign"))));
+          el("span", { class: "dim action-sub" },
+            detail.domain ?? website)))
+      : null);
+
+  tiles.push(el("span", { class: "action-tile action-staged" },
+    el("button", {
+      class: "primary inline",
+      id: "station-add-campaign",
+    }, "Add to campaign")));
+
+  return el("section", { class: "card action-bar", id: "station-actions" },
+    el("h2", {}, "Recommended actions"),
+    el("p", { class: "dim" },
+      "High-value, evidence-backed actions from discovered data — never ",
+      "invented routes."),
+    el("div", { class: "action-grid" }, tiles));
 }
 
 /* ---------------------------------------------------------------------------
@@ -153,50 +219,152 @@ function detailHead(detail) {
  * verified outreach routes.
  *
  * The section ALWAYS renders. With zero qualifying pages it states the honest
- * empty state instead of disappearing the whole feature. */
-function usefulPagesCard(usefulPages) {
-  const pages = (usefulPages || []).filter((p) =>
-    p && typeof p.url === "string" && /^https?:\/\//i.test(p.url));
+ * empty state instead of disappearing the whole feature.
+ *
+ * IA: discovered pages are DEDUPED and CLASSIFIED by the backend's own
+ * category label into high-value groups (Music submission / DJ directory /
+ * Programming / Contact / About / Other). Only the top 1–3 most outreach-
+ * relevant pages per group are shown by default; every remaining discovered
+ * page stays available behind a single "View N additional discovered pages"
+ * disclosure. Hundreds of raw URLs are never dumped inline by default. */
+const USEFUL_GROUP_LABEL = {
+  send_music: "Music submission",
+  submission_guidelines: "Music submission",
+  dj_directory: "DJ directory",
+  programming: "Programming",
+  contact: "Contact",
+  about: "About",
+  other: "Other",
+};
 
-  // Show the first (backend-ordered, most outreach-relevant) discovered page
-  // per category as the highlighted route while keeping every other
-  // discovered page available below it.
-  const primaryCategories = new Set();
+/* Display priority within Useful Pages: submission first, "other" last. */
+const USEFUL_GROUP_ORDER = [
+  "send_music", "submission_guidelines", "dj_directory", "programming",
+  "contact", "about", "other",
+];
+
+const USEFUL_GROUP_TOP = 3;
+
+function normalizePageUrl(raw) {
+  try {
+    const u = new URL(raw);
+    let path = u.pathname.replace(/\/+$/, "") || "/";
+    return `${u.protocol}//${u.hostname}${u.port ? ":" + u.port : ""}${path}`;
+  } catch (error) {
+    return String(raw || "").trim();
+  }
+}
+
+function usefulPageRow(p, extra) {
+  const label = (p.label && p.label.trim()) || p.url;
+  const hostOf = (raw) => {
+    try { return new URL(raw).hostname; } catch (_e) { return raw; }
+  };
+  const groups = [];
+  const append = (node) => { if (node) groups.push(node); };
+  append(extra);
+  return el("div", { class: "up-row" },
+    el("div", { class: "up-main" },
+      externalLink(p.url, el("span", { class: "up-label" }, label)),
+      el("span", { class: "dim up-url" }, normalizePageUrl(p.url))),
+    el("span", { class: "up-meta" }, groups));
+}
+
+function usefulPagesCard(usefulPages) {
+  const pages = (usefulPages || [])
+    .filter((p) => p && typeof p.url === "string" && /^https?:\/\//i.test(p.url));
+
+  // Dedupe by normalized URL, keeping the first (backend-ordering preserves
+  // outreach relevance). Never drops the exact discovered URL itself.
+  const seen = new Set();
+  const unique = [];
   for (const p of pages) {
-    if (p.category && !primaryCategories.has(p.category)) {
-      primaryCategories.add(p.category);
-      p._primary = true;
-    }
+    const key = normalizePageUrl(p.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(p);
   }
 
-  const hostOf = (raw) => {
-    try { return new URL(raw).hostname; } catch (error) { return raw; }
+  // Classify into display groups using the backend's own category label.
+  const grouped = new Map();
+  for (const p of unique) {
+    const group = USEFUL_GROUP_LABEL[p.category] || "Other";
+    if (!grouped.has(group)) grouped.set(group, []);
+    grouped.get(group).push(p);
+  }
+  const presentGroups = [...grouped.keys()].sort((a, b) => {
+    const rank = (g) => {
+      for (let i = 0; i < USEFUL_GROUP_ORDER.length; i++) {
+        if (USEFUL_GROUP_LABEL[USEFUL_GROUP_ORDER[i]] === g) return i;
+      }
+      return USEFUL_GROUP_ORDER.length;
+    };
+    return rank(a) - rank(b);
+  });
+
+  const showCount = (net) => {
+    const c = net.length;
+    return c > 1 ? el("span", { class: "dim up-count" }, `${c} discovered`) : null;
   };
 
-  const chips = pages.map((p) => {
-    const label = (p.label && p.label.trim()) || p.url;
-    const reach = p.reachable === true ? "reachable"
-      : p.reachable === false ? "unreachable"
-        : null;
-    const meta = [
-      p.source_url ? `found on ${hostOf(p.source_url)}` : null,
-      reach ? (reach + (p.status != null ? ` · ${p.status}` : "")) : null,
-    ].filter(Boolean).join(" · ");
-    return el("span",
-      { class: `chip usable-page${p._primary ? " primary" : ""}` },
-      label, " ", externalLink(p.url),
-      el("span", { class: "dim" },
-        meta ? ` (${meta})` : ""));
+  const body = el("div", { class: "up-groups" });
+  const groupEls = presentGroups.map((group) => {
+    const net = grouped.get(group);
+    const top = net.slice(0, USEFUL_GROUP_TOP);
+    return el("div", { class: "up-group" },
+      el("h3", {}, group,
+        " ", showCount(net)),
+      el("div", { class: "up-list" },
+        top.map((p) => usefulPageRow(p))));
   });
+  body.append(...groupEls);
+
+  const total = unique.length;
+  const visible = presentGroups.reduce((acc, g) =>
+    acc + Math.min(grouped.get(g).length, USEFUL_GROUP_TOP), 0);
+  const rest = unique.slice(0, visible).length < total
+    ? unique.filter((p) => !presentGroups.reduce(
+      (acc, g) => acc || grouped.get(g).slice(0, USEFUL_GROUP_TOP).indexOf(p) >= 0,
+      false))
+    : [];
+
+  let moreToggle = null;
+  let moreBody = null;
+  if (rest.length > 0) {
+    const moreNet = new Map();
+    for (const p of rest) {
+      const group = USEFUL_GROUP_LABEL[p.category] || "Other";
+      if (!moreNet.has(group)) moreNet.set(group, []);
+      moreNet.get(group).push(p);
+    }
+    moreBody = el("div", { class: "up-groups up-more" },
+      [...moreNet.entries()].map(([group, net]) =>
+        el("div", { class: "up-group" },
+          el("h4", {}, group, " ", showCount(net)),
+          el("div", { class: "up-list" },
+            net.map((p) => usefulPageRow(p))))));
+
+    moreToggle = el("div", { class: "up-more-toggle" },
+      el("button", { class: "linkish" }, `View ${rest.length} additional discovered pages +`),
+      el("p", { class: "dim" },
+        "Lower-priority station links the engine recorded but did not rank ",
+        "to the top of a group — kept for full discovery, collapsed by ",
+        "default."));
+    moreToggle.addEventListener("click", () => {
+      const open = moreBody.classList.toggle("open");
+      moreToggle.querySelector("button").textContent =
+        open ? "Hide additional discovered pages −" : `View ${rest.length} additional discovered pages +`;
+    });
+  }
 
   return el("section", { class: "card" },
     el("h2", {}, "Useful pages"),
     el("p", { class: "dim" },
       "Exact links the engine discovered on this station's site — each opens ",
-      "the precise URL found, never a guessed route. Station pages only; ",
-      "not individual people."),
-    pages.length
-      ? el("div", { class: "chips" }, chips)
+      "the precise URL found, never a guessed route. Grouped by the backend ",
+      "classification; station pages only, not individual people."),
+    unique.length
+      ? [body, moreBody, moreToggle]
       : el("p", { class: "dim" },
         "No verified useful pages were discovered."));
 }
@@ -390,18 +558,29 @@ function recommendedContactsCard(contacts, payload, identityKey, basket) {
     "station-contacts");
 }
 
-/* Section 2 — Other Discovered People: lower relevance or weaker evidence. */
+/* Section 2 — Other Discovered People: lower relevance or weaker evidence.
+ * Collapsed by default: the full list is large and is for intelligence, not
+ * for default outreach. Revealed only on demand. */
 function otherContactsCard(contacts, payload, identityKey, basket) {
   const other = (contacts || [])
     .filter((c) => !isRecommended(c))
     .sort((a, b) => b.confidence_score - a.confidence_score);
-  return contactsSection(
-    `Other discovered people (${other.length})`,
-    "Discovered but not yet qualified for outreach — lower confidence or "
-      + "no clear music-outreach relevance. Shown for intelligence, not as "
-      + "verified outreach targets.",
-    other, payload, identityKey, basket,
-    "No other discovered people on record.");
+
+  const body = other.length
+    ? other.map((contact) =>
+      recipientCard(contact, payload.station_name, identityKey, basket))
+    : el("p", { class: "dim" }, "No other discovered people on record.");
+
+  return el("details", { class: "card detail-collapse" },
+    el("summary", {},
+      `Other discovered people (${other.length}) `,
+      el("span", { class: "dim" }, "[Explore discovered intelligence]")),
+    el("div", { class: "detail-body" },
+      el("p", { class: "dim" },
+        "Discovered but not yet qualified for outreach — lower confidence "
+        + "or no clear music-outreach relevance. Shown for intelligence, "
+        + "not as verified outreach targets."),
+      body));
 }
 
 /* Section 3 — Station-Level Contact Routes: exact evidence-backed routes.
@@ -739,7 +918,7 @@ export function renderStationView(root, identityKey, basket) {
     submissionData]) => {
     root.replaceChildren(
       detailHead(detail),
-      actionBar(detail, intel.useful_pages),
+      actionBar(detail, intel.useful_pages, contactsPayload),
       usefulPagesCard(intel.useful_pages),
       recommendedContactsCard(contactsPayload.contacts, contactsPayload,
         identityKey, basket),
