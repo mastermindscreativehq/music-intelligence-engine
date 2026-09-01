@@ -122,8 +122,7 @@ class TestJsSecuritySurface(unittest.TestCase):
 
 def _route_regex(template: str) -> re.Pattern:
     pattern = re.escape(template)
-    pattern = pattern.replace(re.escape("{key}"), "[^/]+")
-    pattern = pattern.replace(re.escape("{run_id}"), "[^/]+")
+    pattern = re.sub(r"\\\{[^}]+\}", "[^/]+", pattern)
     return re.compile("^" + pattern + "$")
 
 

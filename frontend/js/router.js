@@ -1,6 +1,7 @@
 /* Hash router: "#/" -> list view, "#/station/<key>" -> station view,
  * "#/tracks" -> submission assets view (Phase 8), "#/outreach" -> outreach
- * composer (recipient selection passed as ?recipient=<uid>,<uid>).
+ * composer (recipient selection passed as ?recipient=<uid>,<uid>),
+ * "#/outreach-history" -> prior outreach records (Phase 9).
  * Identity keys contain ":" so they are percent-encoded in the hash and
  * decoded here before reaching the API client. */
 
@@ -13,6 +14,8 @@ export function startRouter(root, routes) {
     root.replaceChildren();
     if (match) {
       routes.station(root, decodeURIComponent(match[1]));
+    } else if (hash === "#/outreach-history") {
+      routes.outreachHistory(root);
     } else if (outreach) {
       const params = new URLSearchParams(outreach[1]);
       const uids = (params.get("recipient") || "").split(",")
@@ -35,3 +38,5 @@ export const tracksHref = "#/tracks";
 
 export const outreachHref = (contactUids) =>
   `#/outreach?recipient=${(contactUids || []).map(encodeURIComponent).join(",")}`;
+
+export const outreachHistoryHref = () => "#/outreach-history";

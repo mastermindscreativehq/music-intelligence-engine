@@ -474,3 +474,48 @@ a.open-route:hover { filter: brightness(1.08); }
   padding: 0; text-decoration: underline;
 }
 
+/* Outreach composer (Parts 2-7) */
+.track-picker-list { margin-top: 12px; }
+.track-picker-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px; align-items: center; padding: 8px 0;
+  border-bottom: 1px dashed var(--border); font-size: 13.5px;
+}
+.track-picker-row:last-child { border-bottom: none; }
+.selected-track {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 10px 0 4px; padding: 12px 14px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.selected-track-title { font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.select-track-meta { font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; }
+
+.context-block { margin: 16px 0 6px; }
+.context-block h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); margin: 0 0 8px; }
+.context-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 12px;
+}
+.context-block .field { margin-top: 10px; }
+.context-block .field textarea { min-height: 52px; }
+.context-block textarea,
+.outreach-content textarea { resize: vertical; }
+.draft-status { min-height: 1.2em; margin-top: 8px; font-size: 12.5px; }
+
+/* Status chips for outreach statuses */
+.chip.draft { color: var(--text-dim); border-style: dashed; }
+.chip.opened_in_email { color: var(--accent); }
+.chip.sent { color: var(--ok); }
+.chip.failed { color: var(--bad); }
+
+/* Outreach history (Phase 9) */
+.record-id { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.receiver { margin-top: 6px; font-size: 13.5px; }
+.attempt-list { margin-top: 12px; padding-left: 18px; }
+.attempt-row { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; font-size: 12.5px; }
+.table-card-header { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; }
+.table-card-title { display: flex; gap: 10px; align-items: center; }
+.table-card-actions a { margin-left: auto; }
+.table-card-body { margin-top: 6px; }
+

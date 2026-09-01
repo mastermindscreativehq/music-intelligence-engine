@@ -794,7 +794,7 @@ class TestLiveWebappSubmissions(unittest.TestCase):
         status, body = self.get_json("/api/v1/health")
         self.assertEqual(status, 200)
         self.assertEqual(body["data"]["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 3)
+        self.assertGreaterEqual(SCHEMA_VERSION, 4)
         self.assertNoLeak(text=json.dumps(body))
 
     def test_upload_roundtrip_over_real_http(self):

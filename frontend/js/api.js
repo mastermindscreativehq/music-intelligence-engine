@@ -120,6 +120,20 @@ export const api = {
         headers: { "Content-Type": "audio/mpeg" },
       },
       { filename }),
+  // Phase 9: outreach records/history. These POST JSON objects; send()
+  // shares the envelope/typed-error conventions.
+  createOutreach: (payload) =>
+    send(API_BASE_URL + "/api/v1/outreach",
+      { method: "POST", body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" } }),
+  listOutreach: (params) =>
+    request(API_BASE_URL + "/api/v1/outreach", params),
+  getOutreach: (id) =>
+    request(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}`),
+  outreachEvent: (id, event, meta) =>
+    send(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}/event`,
+      { method: "POST", body: JSON.stringify({ event, meta: meta || null }),
+        headers: { "Content-Type": "application/json" } }),
 };
 
 /* Phase 8 addition: POST-capable companion to request(), sharing the same

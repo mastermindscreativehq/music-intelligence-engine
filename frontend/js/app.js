@@ -10,6 +10,7 @@ import { el } from "./dom.js";
 import { outreachHref, startRouter } from "./router.js";
 import { renderListView } from "./views/list.js";
 import { renderOutreachView } from "./views/outreach.js";
+import { renderOutreachHistoryView } from "./views/outreachHistory.js";
 import { renderStationView, teardownStationView } from "./views/station.js";
 import { renderTracksView } from "./views/tracks.js";
 
@@ -94,5 +95,9 @@ startRouter(viewRoot, {
   outreach(root, uids) {
     teardownStationView();
     renderOutreachView(root, uids, basket);
+  },
+  outreachHistory(root) {
+    teardownStationView();
+    renderOutreachHistoryView(root);
   },
 });
