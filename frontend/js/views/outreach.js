@@ -200,7 +200,7 @@ export function renderOutreachView(root, uids, basket) {
           return;
         }
         trackPickerList.replaceChildren(
-          trackList.map((t) => {
+          ...trackList.map((t) => {
             const choose = el("button", { class: "subtle" }, "Select");
             choose.addEventListener("click", () => {
               trackRecord = t;

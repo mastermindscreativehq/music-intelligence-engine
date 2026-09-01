@@ -41,7 +41,7 @@ export function generateDraft(recipient, track, artist) {
   if (org) subject += ` for ${org}`;
 
   // ---- Message body -----------------------------------------------------------
-  const lines = [];
+  const lines = [greeting, ""];
 
   if (org) {
     lines.push(`I'm writing to the ${role} at ${org} to share a piece of ` +

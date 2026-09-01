@@ -57,7 +57,7 @@ export function renderOutreachHistoryView(root) {
           );
           return;
         }
-        listSlot.replaceChildren(records.map((r) => {
+        listSlot.replaceChildren(...records.map((r) => {
           const recipient = r.recipient || {};
           const track = r.track;
           const body = [
