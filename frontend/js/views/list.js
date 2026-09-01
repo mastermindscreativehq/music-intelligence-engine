@@ -87,37 +87,7 @@ function summaryLine(total, limit, offset) {
   return `showing ${from}–${to} of ${total} stations`;
 }
 
-function resultRow(station, basket) {
-  const addPreferred = async (event) => {
-    event.stopPropagation();
-    const button = event.currentTarget;
-    button.disabled = true;
-    try {
-      const payload = await api.contacts(station.identity_key);
-      const preferred = payload.preferred_submission_contacts || [];
-      if (preferred.length === 0) {
-        button.textContent = "no backend-preferred contacts";
-        return;
-      }
-      for (const contact of preferred) {
-        basket.add({
-          contact_uid: contact.contact_uid,
-          identity_key: station.identity_key,
-          station_name: station.name,
-          role: contact.role,
-          email: contact.email,
-          name: null,
-        });
-      }
-      button.textContent = `added ${preferred.length}`;
-    } catch (error) {
-      button.textContent =
-        error instanceof ApiError ? `error: ${error.code}` : "error";
-    } finally {
-      button.disabled = false;
-    }
-  };
-
+function resultRow(station) {
   return el(
     "tr",
     { class: "station-row" },
@@ -135,9 +105,6 @@ function resultRow(station, basket) {
       [station.city, station.state_or_region, station.country]
         .filter(Boolean).join(", ") || "—"),
     el("td", {},
-      el("button", { class: "linkish", onClick: addPreferred },
-        "+ add backend-preferred contacts"),
-      " ",
       el("a", { href: stationHref(station.identity_key) }, "inspect")),
   );
 }
@@ -162,7 +129,7 @@ export function renderListView(root, basket) {
             el("th", {}, "actions"))),
           el("tbody", {},
             (data.stations || []).map((station) =>
-              resultRow(station, basket)))),
+              resultRow(station)))),
         pagination(data));
     } catch (error) {
       resultsCard.replaceChildren(el("h2", {}, "Stations"), errorBanner(error));

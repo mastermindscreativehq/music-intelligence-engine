@@ -199,6 +199,14 @@ tr.station-row:hover { background: var(--panel-2); }
 
 /* station detail */
 .detail-head h1 { margin: 0 0 4px; font-size: 20px; }
+.overview-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  margin: 6px 0;
+}
+.overview-row .chips { display: inline-flex; }
+.note-honest {
+  margin: 8px 0 0; padding-top: 8px; border-top: 1px dashed var(--border);
+}
 .kv { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 4px 12px; }
 .kv dt { color: var(--text-dim); }
 .kv dd { margin: 0; word-break: break-word; }
@@ -214,17 +222,6 @@ tr.station-row:hover { background: var(--panel-2); }
 .contact-card .name { font-weight: 600; }
 .preferred-star { color: var(--warn); }
 .provenance-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-dim); font-size: 12px; }
-
-.kind-badge {
-  font-size: 11px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-}
-.kind-badge.named { color: var(--ok); border-color: var(--ok); }
-.kind-badge.role { color: var(--accent); border-color: var(--accent); }
-.kind-badge.observed { color: var(--text-dim); border-style: dashed; }
-.mono { font-family: monospace; font-size: 12px; }
 
 .result-row {
   display: grid;
@@ -322,15 +319,7 @@ button.inline { width: 100%; }
 .chip.usable-page { color: var(--accent); border-style: dashed; }
 .chip.usable-page a { color: var(--accent); margin-left: 2px; }
 
-/* Curated useful-page groups (classified, top-N per group + expandable rest) */
-.up-groups { display: grid; gap: 14px; }
-.up-group h3, .up-group h4 {
-  margin: 0 0 6px; font-size: 12px; color: var(--accent);
-  text-transform: uppercase; letter-spacing: 0.06em;
-  display: flex; align-items: baseline; gap: 8px;
-}
-.up-group h4 { color: var(--text-dim); }
-.up-count { font-size: 11px; letter-spacing: 0; text-transform: none; }
+/* Curated useful-page rows (strict categories, at most 3, deduplicated) */
 .up-list { display: grid; gap: 6px; }
 .up-row {
   display: flex; align-items: baseline; gap: 10px;
@@ -343,12 +332,17 @@ button.inline { width: 100%; }
 .up-label:hover { text-decoration: underline; }
 .up-url { display: block; font-size: 11.5px; word-break: break-all; }
 .up-meta { margin-left: auto; white-space: nowrap; }
-.up-more { display: none; }
-.up-more.open { display: grid; }
-.up-more-toggle {
+
+/* Action tiles */
+.primary-tile { border-color: var(--accent); }
+.primary-tile strong { color: var(--accent); }
+
+/* Key contacts — additional relevant people behind a toggle */
+.key-more { display: grid; gap: 10px; margin-top: 10px; }
+.key-more-toggle {
   margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border);
 }
-.up-more-toggle button { padding: 0; width: auto; }
+.key-more-toggle button { padding: 0; width: auto; }
 
 .detail-collapse summary {
   cursor: pointer; font-size: 13px; text-transform: uppercase;

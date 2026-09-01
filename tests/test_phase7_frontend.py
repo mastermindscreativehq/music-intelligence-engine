@@ -35,7 +35,12 @@ from database.service import (
 from tests.test_phase6_database_api import conflict_verification_report, kzow
 
 FRONTEND = DEFAULT_STATIC_ROOT
-JS_FILES = sorted(FRONTEND.rglob("*.js"))
+# Shipped SOURCE assets only. frontend/dist is the deploy-time build output
+# (inject-config.mjs substitutes the resolved backend origin into
+# dist/js/config.js), so it is excluded from the remote-URL security scan.
+JS_FILES = sorted(
+    p for p in FRONTEND.rglob("*.js") if "dist" not in p.parts
+)
 
 
 def _read(path: Path) -> str:
@@ -356,42 +361,55 @@ class TestWebappLive(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Station view: single-source useful pages / action-link contract
+# Station view: canonical submission route / curated useful pages contract
 # ---------------------------------------------------------------------------
 
 class TestStationUsefulPagesContract(unittest.TestCase):
     """Pin the station view's data-integrity contract from the shipped source.
 
-    The station page must have ONE evidence-backed source (``useful_pages``)
-    for every station-level external route. It must never open a URL from the
-    separate ``submission.submission_url`` representation, nor fabricate a
-    Send Music route, nor hide the Useful Pages section when data is empty.
+    The Send Music action must honor ONE best verified submission route: the
+    canonical backend ``submission.submission_url`` Fact when present,
+    otherwise the best discovered ``send_music``/``submission_guidelines``
+    useful page. The frontend never fabricates a route from a domain/route
+    convention, and the Useful Pages section always renders an honest state
+    (never a hidden-then-empty card, never a raw dump of every discovered
+    link).
     """
 
     def setUp(self):
         self.src = _read(FRONTEND / "js" / "views" / "station.js")
 
-    def test_send_music_action_uses_useful_pages_only(self):
-        # The action bar must derive its submission route from useful_pages.
-        for needle in ("actionBar(detail, intel.useful_pages)",
-                       "submissionPages(usefulPages)[0]"):
+    def test_send_music_uses_canonical_submission_url_or_useful_page(self):
+        # The action bar derives its submission route from the canonical
+        # submission_url Fact first, with the discovered useful page as the
+        # only fallback.
+        for needle in ("bestSubmissionRoute(intel, intel.useful_pages)",
+                       "submissionPages(usefulPages)[0]",
+                       "submission.submission_url",
+                       "canonical.value"):
             self.assertIn(needle, self.src)
 
-    def test_submission_url_is_not_a_clickable_action_route(self):
-        # The separate path-selected submission_url must never feed an
-        # external link / action button (no competing clickable route).
-        self.assertNotIn("externalLink(submission.submission_url",
-                         self.src)
-        self.assertNotIn("addUrlRoute(sub.submission_url",
-                         self.src)
-        self.assertNotIn("submission.submission_url.value", self.src)
+    def test_send_music_is_an_external_link_to_the_best_route(self):
+        # The chosen route feeds a clickable external link / action button —
+        # never a synthetic href built from a domain or label.
+        self.assertIn("externalLink(route.url", self.src)
 
     def test_useful_pages_always_render_honest_empty_state(self):
         # The card must NEVER vanish on empty data; it must say so honestly.
         self.assertNotIn("if (pages.length === 0) return null",
                          self.src)
         self.assertIn("No verified useful pages were discovered.", self.src)
-        self.assertIn("function usefulPagesCard(usefulPages)", self.src)
+        self.assertIn("function usefulPagesCard(usefulPages", self.src)
+
+    def test_useful_pages_are_curated_to_a_handful_of_strict_categories(self):
+        # Strict categories only; donate/blog/news/about/merch/volunteer and
+        # random reverse-indexes are rejected; at most 3 rows are shown.
+        self.assertIn("USEFUL_PRIORITY", self.src)
+        self.assertIn("if (rows.length >= 3) break;", self.src)
+        self.assertIn("JUNK_LABEL", self.src)
+
+    def test_useful_pages_are_deduplicated_by_normalized_url(self):
+        self.assertIn("normalizePageUrl(p.url)", self.src)
 
     def test_no_submission_route_found_honest_label(self):
         self.assertIn("No verified submission route found.", self.src)
