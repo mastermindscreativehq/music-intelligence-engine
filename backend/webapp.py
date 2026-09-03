@@ -1,10 +1,16 @@
 """Single-origin operator server: static frontend + JSON API (Phase 7).
 
-Serves the zero-dependency SPA in ``frontend/`` and the Phase 4-6 API
+Serves the zero-dependency SPA in ``frontend/`` and the Phase 4-9 API
 under one origin so the operator UI needs no build step, no CDN, and no
 cross-origin configuration:
 
+    python -m backend.webapp --dsn postgresql://... [--static frontend]
     python -m backend.webapp --db path/to/db.sqlite [--static frontend]
+
+PostgreSQL (via ``--dsn`` / ``MIE_PG_DSN``) is the intended production
+persistence. SQLite (via ``--db`` / ``MIE_DATABASE_PATH``) is retained as
+an offline-test / local-development fallback. Configuration uses CLI flags
+or environment variable NAMES only; values are never logged.
 
 Security posture:
 - Static files resolve strictly under the static root; traversal attempts
@@ -16,8 +22,8 @@ Security posture:
   the reference server), so behavior is identical across servers.
 
 Configuration uses CLI flags or environment variable NAMES only
-(MIE_DATABASE_PATH / MIE_WEB_HOST / MIE_WEB_PORT). Values are never
-logged or echoed into responses.
+(MIE_PG_DSN / MIE_DATABASE_PATH / MIE_WEB_HOST / MIE_WEB_PORT). Values
+are never logged or echoed into responses.
 """
 
 from __future__ import annotations
@@ -29,6 +35,14 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+
+from dotenv import load_dotenv
+
+load_dotenv(
+    Path(__file__).resolve().parents[1] / ".env",
+    override=False,
+    verbose=False,
+)
 
 from backend.routes import dispatch
 
@@ -162,7 +176,7 @@ def build_handler(service, static_root: Path, track_store=None,
     return OperatorWebappHandler
 
 
-def create_server(db_path: str, host: str, port: int,
+def create_server(db_path, host: str, port: int,
                   static_root: Path | None = None, *,
                   track_store=None, link_fetcher=None,
                   allow_private: bool = False) -> ThreadingHTTPServer:
@@ -178,6 +192,19 @@ def create_server(db_path: str, host: str, port: int,
     return server
 
 
+def build_storage(db_path: str | None = None,
+                  pg_dsn: str | None = None):
+    """PostgreSQL via explicit DSN; SQLite offline/tests as fallback."""
+    if pg_dsn:
+        from database.pg_store import PostgresStorage
+        return PostgresStorage(dsn=pg_dsn)
+    from database.service import PersistenceService
+    if not db_path:
+        raise SystemExit(
+            "--db or MIE_DATABASE_PATH (or --dsn / MIE_PG_DSN) is required")
+    return PersistenceService(db_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m backend.webapp",
@@ -185,6 +212,9 @@ def main(argv: list[str] | None = None) -> int:
                     "one origin.")
     parser.add_argument("--db", default=os.environ.get("MIE_DATABASE_PATH"),
                         help="SQLite DB path (env: MIE_DATABASE_PATH)")
+    parser.add_argument("--dsn",
+                        default=os.environ.get("MIE_PG_DSN"),
+                        help="PostgreSQL DSN (env: MIE_PG_DSN)")
     parser.add_argument("--host",
                         default=os.environ.get("MIE_WEB_HOST",
                                                os.environ.get(
@@ -197,10 +227,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--static", default=str(DEFAULT_STATIC_ROOT),
                         help="directory containing index.html")
     args = parser.parse_args(argv)
-    if not args.db:
-        parser.error("--db or MIE_DATABASE_PATH is required")
 
-    server = create_server(args.db, args.host, args.port,
+    storage = build_storage(args.db, args.dsn)
+    server = create_server(storage, args.host, args.port,
                            Path(args.static))
     print(f"operator UI listening on http://{args.host}:{args.port}"
           f" (db schema v{getattr(server.service, 'version', '?')}); "

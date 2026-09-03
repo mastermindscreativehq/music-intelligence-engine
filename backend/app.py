@@ -49,6 +49,20 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+
+# Load the PROJECT-ROOT .env before any code reads os.environ. python-dotenv
+# only sets variables that are not already present (override=False), so a real
+# platform var such as Railway's MIE_PG_DSN / DATABASE_URL always wins. The
+# path is derived from this file (parents[1] == repo root), so it works even
+# when the backend is started from another working directory.
+from dotenv import load_dotenv
+
+load_dotenv(
+    Path(__file__).resolve().parents[1] / ".env",
+    override=False,
+    verbose=False,
+)
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
