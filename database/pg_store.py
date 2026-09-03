@@ -190,6 +190,24 @@ class PostgresStorage:
         except Exception:
             self._conn = None
 
+    def _ensure_connection(self) -> None:
+        """Verify the connection is alive; recover transparently if stale.
+
+        Runs a lightweight ``SELECT 1`` under the coarse lock. If the
+        connection is closed or the server has dropped it (idle-timeout,
+        PgBouncer reclaim, network blip), ``_recover_connection`` opens a
+        fresh one so the caller never sees a 500 on the first request.
+        Must be called with ``self._lock`` held.
+        """
+        if not self._owns_conn or self._conn is None:
+            return
+        try:
+            cur = self._conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        except Exception:
+            self._recover_connection()
+
     @contextmanager
     def _guard(self):
         """Run an operation under the coarse lock, recovering on any error.
@@ -202,9 +220,15 @@ class PostgresStorage:
         site on "connecting..."). This guard recovers an owned connection on
         any exception so the API degrades to a fast error instead of a
         permanent hang. Injected connections (tests) are never touched.
+
+        A proactive ``SELECT 1`` health check runs *before* yielding the
+        connection so stale/idle connections (e.g. Supabase/PgBouncer idle
+        timeouts) are recovered transparently instead of causing a first-
+        request 500.
         """
         try:
             with self._lock:
+                self._ensure_connection()
                 yield self._conn
         except Exception:
             self._recover_connection()
@@ -221,6 +245,7 @@ class PostgresStorage:
         log_event(self.logger, EVENT_INGESTION_STARTED,
                   run_id=report.run_id, count=len(records), source=source)
         with self._lock:
+            self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
@@ -495,7 +520,7 @@ class PostgresStorage:
     # -- verification persistence (append-only) ---------------------------------
 
     def persist_verification(self, records: list[dict], report: dict, *,
-                             source: str = "api") -> dict:
+                              source: str = "api") -> dict:
         if not isinstance(report, dict) \
                 or not isinstance(report.get("records"), list):
             raise TypeError("report must be a verify_records() report dict")
@@ -503,6 +528,7 @@ class PostgresStorage:
         stored = skipped = 0
         dict_records = [r for r in records if isinstance(r, dict)]
         with self._lock:
+            self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
@@ -546,6 +572,7 @@ class PostgresStorage:
 
     def get_verification(self, identity_key: str) -> dict | None:
         with self._lock:
+            self._ensure_connection()
             cur = self._conn.cursor()
             cur.execute(
                 "SELECT * FROM verification_runs WHERE run_id IN "
@@ -576,6 +603,7 @@ class PostgresStorage:
 
     def get_ingestion_run(self, run_id: str) -> dict | None:
         with self._lock:
+            self._ensure_connection()
             cur = self._conn.cursor()
             cur.execute("SELECT * FROM ingestion_runs WHERE run_id=%s",
                         (run_id,))
@@ -616,6 +644,7 @@ class PostgresStorage:
     def save_track(self, track: dict) -> dict:
         now = utc_now_iso()
         with self._lock:
+            self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
@@ -664,6 +693,7 @@ class PostgresStorage:
             params.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
+            self._ensure_connection()
             cur = self._conn.cursor()
             cur.execute(f"SELECT COUNT(*) AS n FROM tracks {where}", params)
             total = int(cur.fetchone()["n"])
@@ -676,6 +706,7 @@ class PostgresStorage:
 
     def record_link_check(self, identity_key: str, entry: dict) -> None:
         with self._lock:
+            self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
@@ -690,6 +721,7 @@ class PostgresStorage:
     def get_link_checks(self, identity_key: str,
                         limit: int = 50) -> list[dict]:
         with self._lock:
+            self._ensure_connection()
             cur = self._conn.cursor()
             cur.execute(
                 "SELECT url, target_kind, ok, status, error_kind, "
@@ -736,6 +768,7 @@ class PostgresStorage:
         """Insert or overwrite one outreach message row."""
         now = utc_now_iso()
         with self._lock:
+            self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
@@ -790,6 +823,7 @@ class PostgresStorage:
 
     def get_outreach(self, outreach_id: str) -> dict | None:
         with self._lock:
+            self._ensure_connection()
             cur = self._conn.cursor()
             cur.execute(
                 "SELECT * FROM outreach_messages WHERE outreach_id=%s",
@@ -805,6 +839,7 @@ class PostgresStorage:
             params.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
+            self._ensure_connection()
             cur = self._conn.cursor()
             cur.execute(
                 f"SELECT COUNT(*) AS n FROM outreach_messages {where}",
@@ -820,6 +855,7 @@ class PostgresStorage:
     def append_outreach_attempt(self, outreach_id: str,
                                 attempt: dict) -> None:
         with self._lock:
+            self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
@@ -833,6 +869,7 @@ class PostgresStorage:
     def set_outreach_status(self, outreach_id: str, status: str,
                             at: str | None = None) -> None:
         with self._lock:
+            self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
@@ -842,6 +879,7 @@ class PostgresStorage:
 
     def get_outreach_attempts(self, outreach_id: str) -> list[dict]:
         with self._lock:
+            self._ensure_connection()
             cur = self._conn.cursor()
             cur.execute(
                 "SELECT event, provider, \"at\" AS at, meta "
