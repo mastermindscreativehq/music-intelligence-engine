@@ -15,6 +15,7 @@ import os
 import re
 import tempfile
 import unittest
+import uuid
 
 os.environ.setdefault("MIE_TEST_MARKER", "1")
 
@@ -317,8 +318,68 @@ class TestSqliteParity(ParityContractMixin, unittest.TestCase):
 @unittest.skipUnless(os.environ.get("MIE_PG_DSN"),
                      "PostgreSQL integration requires MIE_PG_DSN")
 class TestPostgresParity(ParityContractMixin, unittest.TestCase):
+    """Live PostgreSQL parity, isolated in an ephemeral schema.
+
+    The parity contract asserts ABSOLUTE row counts, so it can only be
+    meaningful against an empty database. Running it against ``public`` would
+    (a) fail whenever the shared DB holds real stations and (b) silently
+    inject ``kzow``/``WXYZ`` test fixtures into production. Instead, connection
+    startup creates a uniquely-named schema, every PostgresStorage opened by
+    ``make_storage`` is scoped to it via ``search_path``, and teardown drops
+    the schema ``CASCADE`` — tests stay green regardless of production data
+    and never leave a trace behind.
+    """
+
+    schema: str | None = None
+
+    def setUp(self):
+        dsn = os.environ.get("MIE_PG_DSN")
+        if not dsn:
+            self.skipTest("PostgreSQL integration requires MIE_PG_DSN")
+        try:
+            import psycopg
+        except ImportError:  # pragma: no cover - env-dependent
+            self.skipTest("psycopg not installed")
+        name = "parity_" + uuid.uuid4().hex[:12]
+        admin = psycopg.connect(dsn)
+        try:
+            cur = admin.cursor()
+            cur.execute(f'CREATE SCHEMA "{name}"')
+            admin.commit()
+        except Exception as exc:  # pragma: no cover - permission varies
+            try:
+                admin.close()
+            except Exception:
+                pass
+            self.skipTest(f"cannot create isolated schema {name!r}: {exc}")
+        try:
+            admin.close()
+        except Exception:
+            pass
+        self.schema = name
+
+    def tearDown(self):
+        if not self.schema:
+            return
+        dsn = os.environ.get("MIE_PG_DSN")
+        if dsn:
+            try:
+                import psycopg  # pragma: no cover - always installed here
+                admin = psycopg.connect(dsn)
+                try:
+                    cur = admin.cursor()
+                    cur.execute(
+                        f'DROP SCHEMA IF EXISTS "{self.schema}" CASCADE')
+                    admin.commit()
+                finally:
+                    admin.close()
+            except Exception:
+                pass
+        self.schema = None
+
     def make_storage(self):
-        return PostgresStorage(dsn=os.environ["MIE_PG_DSN"])
+        return PostgresStorage(dsn=os.environ["MIE_PG_DSN"],
+                               search_path=self.schema)
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +393,9 @@ class _FakeState:
 
 
 class _FakeCursor:
-    def __init__(self, state: _FakeState):
+    def __init__(self, state: _FakeState, conn=None):
         self._state = state
+        self.connection = conn
 
     def execute(self, sql, params=None):
         lowered = sql.strip().lower()
@@ -349,6 +411,20 @@ class _FakeCursor:
                          if self._state.applied else 0}
         elif lowered.startswith("insert into schema_migrations"):
             self._state.applied.add(int(params[0]))
+        elif lowered.startswith("show "):
+            name = params[0] if params else sql.strip().split(None, 1)[1]
+            self._row = {name: self._state.settings.get(name)}
+        elif lowered.startswith("set session"):
+            parts = sql.strip().split()
+            guc = parts[2]
+            raw = parts[-1]
+            if raw == "0":
+                self._state.settings[guc] = 0
+            else:
+                try:
+                    self._state.settings[guc] = int(raw)
+                except ValueError:
+                    self._state.settings[guc] = raw
         return self
 
     def fetchall(self):
@@ -365,10 +441,12 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self):
         self.state = _FakeState()
+        self.state.settings = {
+            "statement_timeout": 8000, "lock_timeout": 0}
         self.commits = 0
 
     def cursor(self):
-        return _FakeCursor(self.state)
+        return _FakeCursor(self.state, conn=self)
 
     def commit(self):
         self.commits += 1
@@ -438,6 +516,17 @@ class TestPostgresStorageGuards(unittest.TestCase):
             with self.assertRaises((ImportError, ValueError)):
                 PostgresStorage()
 
+    def test_search_path_must_be_plain_identifier(self):
+        """search_path is inlined into ``SET search_path TO "..."``, so only
+        identifiers free of quotes/dots/whitespace may be accepted."""
+        for bad in ('public; DROP SCHEMA public CASCADE --',
+                    'parity a', 'parity.a', 'parity"a', ''):
+            with self.assertRaises(ValueError):
+                PostgresStorage(conn=object(), search_path=bad)
+        for good in ("parity_abc_12", "_parity", "P"):
+            storage = PostgresStorage(conn=_FakeConn(), search_path=good)
+            self.assertEqual(storage._search_path, good)
+
     def test_pg_class_exposes_full_repository_surface(self):
         for name in ("ingest_intelligence", "list_stations", "get_station",
                      "get_station_emails", "get_station_phones",
@@ -464,8 +553,14 @@ class TestFastAPIApp(unittest.TestCase):
         storage = PersistenceService(
             os.path.join(cls._tmp.name, "db.sqlite"))
         record = kzow()
-        storage.ingest_intelligence([record], source="api")
+        real = {
+            "name": "WCUR", "website": "https://wcur-radio.org",
+            "genres": ["news"], "station_type": "community",
+            "confidence_score": 0.95, "status": "enriched",
+        }
+        storage.ingest_intelligence([record, real], source="api")
         cls.key = normalize_intelligence_record(record)[1]
+        cls.real_key = normalize_intelligence_record(real)[1]
         cls.client = TestClient(create_app(storage),
                                 raise_server_exceptions=False)
         cls.storage = storage
@@ -493,13 +588,16 @@ class TestFastAPIApp(unittest.TestCase):
         status, body = self.get_json("/api/v1/stations")
         self.assertEqual(status, 200)
         data = body["data"]
+        # The dev fixture (.example domain) is quarantined from the
+        # production view; only the real station is listed.
         self.assertEqual(data["total"], 1)
+        self.assertEqual(data["dev_fixtures_excluded"], 1)
         summary = data["stations"][0]
         for field in ("identity_key", "name", "genres", "formats",
                       "confidence_score", "links"):
             self.assertIn(field, summary)
         self.assertEqual(summary["links"]["self"],
-                         f"/api/v1/stations/{self.key}")
+                         f"/api/v1/stations/{self.real_key}")
 
     def test_listing_filters_additive(self):
         _, body = self.get_json("/api/v1/stations?genre=jazz")
@@ -507,7 +605,7 @@ class TestFastAPIApp(unittest.TestCase):
         _, body = self.get_json("/api/v1/stations?genre=news")
         self.assertEqual(body["data"]["total"], 1)
         _, body = self.get_json("/api/v1/stations?min_confidence=0.9")
-        self.assertEqual(body["data"]["total"], 0)
+        self.assertEqual(body["data"]["total"], 1)
 
     def test_limit_bounds_validated(self):
         status, body = self.get_json("/api/v1/stations?limit=5000")
@@ -561,7 +659,10 @@ class TestFastAPIApp(unittest.TestCase):
         second = self.client.post("/api/v1/ingest", json=payload)
         self.assertEqual(second.json()["data"]["records_accepted"], 1)
         _, listing = self.get_json("/api/v1/stations?q=QWER")
-        self.assertEqual(listing["data"]["total"], 1)
+        # QWER is a .example dev fixture: it ingests but is quarantined from
+        # the production listing.
+        self.assertEqual(listing["data"]["total"], 0)
+        self.assertEqual(listing["data"]["dev_fixtures_excluded"], 1)
         status, run_body = self.get_json(f"/api/v1/runs/{run_id}")
         self.assertEqual(status, 200)
         self.assertEqual(run_body["data"]["run_id"], run_id)

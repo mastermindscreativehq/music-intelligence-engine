@@ -24,10 +24,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import uuid
 from contextlib import contextmanager
+
+# A plain PostgreSQL identifier used as an isolated schema name; anything
+# with quotes/dots/whitespace would be a SQL-injection vector if inlined into
+# ``SET search_path TO "..."``, so only these are accepted.
+_SQL_IDENT_FULLMATCH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 from discovery.events import get_logger, log_event
 from discovery.models import utc_now_iso
@@ -47,6 +53,19 @@ from database.service import (
     normalize_intelligence_record,
     validate_intelligence_record,
 )
+
+# Development-fixture quarantine, mirroring database.service so the
+# PostgreSQL stack hides the same artifacts from production display. A row is
+# a dev artifact when its identity is a geo-name seed, or when its host lives
+# on a reserved-TLD suffix or is absent.
+_DEV_HOST_SUFFIXES = (".example", ".test", ".invalid", ".localhost", ".local")
+_DEV_HOST = "LOWER(COALESCE(NULLIF(domain, ''), NULLIF(website, '')))"
+_DEV_FIXTURE_EXCLUSION_SQL = (
+    "identity_key NOT LIKE 'namegeo:%' AND "
+    + " AND ".join(
+        f"{_DEV_HOST} IS NOT NULL AND {_DEV_HOST} NOT LIKE '%{suffix}' "
+        "ESCAPE '\\'"
+        for suffix in _DEV_HOST_SUFFIXES))
 
 _JSON = frozenset({
     "classification_evidence", "formats", "genres", "genre_evidence",
@@ -139,7 +158,8 @@ class PostgresStorage:
     # stuck query, release the lock, and recover instead of wedging the API.
     _STATEMENT_TIMEOUT_MS = 8000
 
-    def __init__(self, dsn: str | None = None, conn=None, logger=None) -> None:
+    def __init__(self, dsn: str | None = None, conn=None, logger=None,
+                 search_path: str | None = None) -> None:
         self.logger = logger or get_logger("mie.storage.pg")
         self._lock = threading.RLock()
         # Only a connection created from *dsn* is "owned": it may be closed and
@@ -148,6 +168,12 @@ class PostgresStorage:
         # connection-reuse contracts hold unchanged.
         self._owns_conn = conn is None
         self._dsn = dsn
+        if search_path is not None:
+            if not _SQL_IDENT_FULLMATCH.search(search_path):
+                raise ValueError(
+                    "search_path must be a plain SQL identifier "
+                    f"(got {search_path!r})")
+        self._search_path = search_path
         if conn is not None:            # injectable for structural tests
             self._conn = conn
         else:
@@ -166,9 +192,38 @@ class PostgresStorage:
                 "MIE_PG_DSN or pass an existing connection") from exc
         if not self._dsn:
             raise ValueError("PostgresStorage requires a DSN")
+        # The connect-time ``-c`` option is honored by self-hosted PostgreSQL
+        # but silently IGNORED by Supabase's transaction pooler (which pins
+        # its own 2-minute default). Because every read shares one connection
+        # and one coarse lock, this guard is the only thing that prevents a
+        # single stuck query from wedging the whole API; so instead of
+        # relying on the startup option we issue an explicit ``SET`` after
+        # connecting, which the pooler *does* honor (verified live). The ``-c``
+        # option is kept as a belt-and-suspenders for direct connections.
         opts = f"-c statement_timeout={self._STATEMENT_TIMEOUT_MS}"
-        return psycopg.connect(self._dsn, row_factory=dict_row,
-                               options=opts)
+        conn = psycopg.connect(self._dsn, row_factory=dict_row, options=opts)
+        try:
+            cur = conn.cursor()
+            # SET does not accept bind parameters, so the timeout is inlined
+            # as a literal; it is a fixed integer constant, not user input.
+            cur.execute(
+                f"SET statement_timeout = {self._STATEMENT_TIMEOUT_MS}")
+            if self._search_path:
+                # Scope every unqualified table reference to the isolated
+                # schema (persists on this connection across transactions;
+                # verified live on Supabase). Used to run parity tests / ad-
+                # hoc ingestion against an ephemeral schema instead of public.
+                cur.execute(f'SET search_path TO "{self._search_path}"')
+            conn.commit()
+        except Exception:
+            # A host that forbids client-side SET (rare) still has the ``-c``
+            # option and the pooler's own default as fallback; do not let the
+            # guard setup itself break connection creation.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return conn
 
     def _recover_connection(self) -> None:
         """Discard a poisoned connection and reopen a fresh one.
@@ -348,8 +403,10 @@ class PostgresStorage:
     def _upsert_contacts(self, cur, stable_id: str, contacts: list[dict],
                          now: str) -> int:
         count = 0
+        incoming_uids: list[str] = []
         for contact in contacts:
             uid = contact_uid(stable_id, contact)
+            incoming_uids.append(uid)
             cur.execute(
                 "SELECT provenance, first_stored_at FROM contacts "
                 "WHERE contact_uid=%s", (uid,))
@@ -393,6 +450,20 @@ class PostgresStorage:
                  contact.get("verified_at"), _dumps(provenance),
                  first_stored, now))
             count += 1
+
+        # Full-replace reconciliation: an intake delivers the COMPLETE, freshly
+        # enriched contact set for the station. Any contact_uid already stored
+        # for this station that is NOT in the fresh result is stale (superseded
+        # extraction, garbage from older code, a DJ-list flood) and is removed
+        # so a re-enrich never re-surfaces obsolete or fabricated rows.
+        if incoming_uids:
+            cur.execute(
+                "DELETE FROM contacts WHERE identity_key=%s "
+                "AND contact_uid != ALL(%s::text[])",
+                (stable_id, incoming_uids))
+        else:
+            cur.execute(
+                "DELETE FROM contacts WHERE identity_key=%s", (stable_id,))
         return count
 
     def _upsert_submission(self, cur, stable_id: str, payload: dict,
@@ -431,8 +502,9 @@ class PostgresStorage:
                       genre: str | None = None,
                       format_filter: str | None = None,
                       country: str | None = None,
-                      min_confidence: float | None = None
-                      ) -> tuple[list[dict], int]:
+                      min_confidence: float | None = None,
+                      exclude_dev: bool = False
+                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
         clauses, params = [], []
         if q:
             clauses.append("name ILIKE %s")
@@ -452,7 +524,26 @@ class PostgresStorage:
         if min_confidence is not None:
             clauses.append("confidence_score >= %s")
             params.append(float(min_confidence))
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        base_where = " AND ".join(clauses)
+        where = f"WHERE {base_where}" if base_where else ""
+        if exclude_dev:
+            dev_clause = "(" + _DEV_FIXTURE_EXCLUSION_SQL + ")"
+            dev_where = (f"WHERE {base_where} AND {dev_clause}"
+                         if base_where else f"WHERE {dev_clause}")
+            with self._guard() as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT COUNT(*) AS n FROM organizations {dev_where}",
+                            params)
+                visible_total = int(cur.fetchone()["n"])
+                cur.execute(f"SELECT COUNT(*) AS n FROM organizations {where}",
+                            params)
+                full_total = int(cur.fetchone()["n"])
+                cur.execute(
+                    f"SELECT * FROM organizations {dev_where} "
+                    "ORDER BY lower(name), identity_key LIMIT %s OFFSET %s",
+                    [*params, int(limit), int(offset)])
+                rows = [_org_from_row(r) for r in cur.fetchall()]
+            return rows, visible_total, full_total - visible_total
         with self._guard() as conn:
             cur = conn.cursor()
             cur.execute(f"SELECT COUNT(*) AS n FROM organizations {where}",
@@ -751,6 +842,8 @@ class PostgresStorage:
             "organization": row["organization"],
             "email": row["email"],
             "source_url": row["source_url"],
+            "outreach_class": row["outreach_class"],
+            "submission_url": row["submission_url"],
             "track_id": row["track_id"],
             "track": _j(row["track"], None),
             "context": _j(row["context"], None),
@@ -783,11 +876,13 @@ class PostgresStorage:
                     INSERT INTO outreach_messages(
                         outreach_id, contact_uid, identity_key,
                         recipient_name, recipient_role, organization,
-                        email, source_url, track_id, track, context,
+                        email, source_url, outreach_class, submission_url,
+                        track_id, track, context,
                         subject, message, from_email, sharing,
                         status, provider, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
-                            %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb,
+                            %s, %s, %s, %s)
                     ON CONFLICT(outreach_id) DO UPDATE SET
                         contact_uid=EXCLUDED.contact_uid,
                         identity_key=EXCLUDED.identity_key,
@@ -796,6 +891,8 @@ class PostgresStorage:
                         organization=EXCLUDED.organization,
                         email=EXCLUDED.email,
                         source_url=EXCLUDED.source_url,
+                        outreach_class=EXCLUDED.outreach_class,
+                        submission_url=EXCLUDED.submission_url,
                         track_id=EXCLUDED.track_id,
                         track=EXCLUDED.track,
                         context=EXCLUDED.context,
@@ -811,6 +908,8 @@ class PostgresStorage:
                      record.get("identity_key"), record.get("recipient_name"),
                      record.get("recipient_role"), record.get("organization"),
                      record["email"], record.get("source_url"),
+                     record.get("outreach_class") or "email",
+                     record.get("submission_url"),
                      record.get("track_id"),
                      _dumps(record.get("track")),
                      _dumps(record.get("context")),
