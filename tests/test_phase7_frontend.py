@@ -180,6 +180,11 @@ class TestRoutesDispatcher(unittest.TestCase):
             os.path.join(self._tmp.name, "db.sqlite"))
         record = kzow()
         self.storage.ingest_intelligence([record], source="test")
+        self.storage.ingest_intelligence([{
+            "name": "WCUR", "website": "https://wcur-radio.org",
+            "genres": ["news"], "station_type": "community",
+            "confidence_score": 0.95, "status": "enriched",
+        }], source="test")
         self.storage.persist_verification([record],
                                           conflict_verification_report(),
                                           source="test")
@@ -197,10 +202,14 @@ class TestRoutesDispatcher(unittest.TestCase):
     def test_listing_supports_phase6_filters(self):
         status, body = dispatch(self.storage, "GET", "/api/v1/stations",
                                 {"genre": ["news"]})
+        # kzow.example is a quarantined dev fixture; the real news station
+        # carries the visible filter result.
         self.assertEqual(body["data"]["total"], 1)
         _, body = dispatch(self.storage, "GET", "/api/v1/stations",
                            {"genre": ["jazz"]})
         self.assertEqual(body["data"]["total"], 0)
+        _, body = dispatch(self.storage, "GET", "/api/v1/stations", {})
+        self.assertEqual(body["data"]["dev_fixtures_excluded"], 1)
 
     def test_min_confidence_validated(self):
         status, body = dispatch(self.storage, "GET", "/api/v1/stations",
@@ -262,6 +271,11 @@ class TestWebappLive(unittest.TestCase):
             os.path.join(cls._tmp.name, "db.sqlite"))
         record = kzow()
         storage.ingest_intelligence([record], source="live")
+        storage.ingest_intelligence([{
+            "name": "WCUR", "website": "https://wcur-radio.org",
+            "genres": ["news"], "station_type": "community",
+            "confidence_score": 0.95, "status": "enriched",
+        }], source="live")
         storage.persist_verification([record],
                                      conflict_verification_report(),
                                      source="live")

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -259,6 +259,12 @@ CREATE TABLE IF NOT EXISTS outreach_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_outreach_attempts_msg
     ON outreach_attempts(outreach_id);
+"""),
+    (5, """
+ALTER TABLE outreach_messages
+    ADD COLUMN outreach_class TEXT NOT NULL DEFAULT 'email';
+ALTER TABLE outreach_messages
+    ADD COLUMN submission_url TEXT;
 """),
 ]
 

@@ -341,5 +341,177 @@ class TestStationNoiseFiltering(unittest.TestCase):
         self.assertEqual(found["source_url"], HOME_WS)
 
 
+class TestEvidenceStateContract(unittest.TestCase):
+    """Phase 10 evidence model on the read path (never "verified or empty")."""
+
+    def test_unfetched_page_is_evidence_state_DISCOVERED(self):
+        payload = build_and_surface(
+            station_dict("Static Radio", HOME_WS),
+            pages((HOME_WS, STATIC_HOME)))
+        send = next(u for u in payload["useful_pages"]
+                    if u["url"] == "https://static.example/music/send")
+        self.assertEqual(send["evidence_state"], "DISCOVERED")
+        self.assertIn("not yet confirmed", send["evidence_note"])
+
+    def test_reachable_page_is_evidence_state_VERIFIED(self):
+        fetch = SourceFetchRecord(url="https://static.example/music/send",
+                                  ok=True, status=200)
+        payload = build_and_surface(
+            station_dict("Static Radio", HOME_WS),
+            pages((HOME_WS, STATIC_HOME)), [fetch])
+        send = next(u for u in payload["useful_pages"]
+                    if u["url"] == "https://static.example/music/send")
+        self.assertEqual(send["evidence_state"], "VERIFIED")
+        self.assertEqual(send["evidence_note"], "verified reachable")
+
+    def test_failed_fetch_stays_DISCOVERED_with_status(self):
+        fetch = SourceFetchRecord(url="https://static.example/music/send",
+                                  ok=False, status=503)
+        payload = build_and_surface(
+            station_dict("Static Radio", HOME_WS),
+            pages((HOME_WS, STATIC_HOME)), [fetch])
+        send = next(u for u in payload["useful_pages"]
+                    if u["url"] == "https://static.example/music/send")
+        self.assertEqual(send["evidence_state"], "DISCOVERED")
+        self.assertEqual(send["status"], 503)
+
+
+class TestSubmissionStatusSemantics(unittest.TestCase):
+    """Phase 10 submission_status maps evidence to one clear message/action."""
+
+    def test_static_fixture_is_DIRECT_SUBMISSION_by_page(self):
+        payload = build_and_surface(
+            station_dict("Static Radio", HOME_WS),
+            pages((HOME_WS, STATIC_HOME)))
+        self.assertEqual(payload["submission_status"], "DIRECT_SUBMISSION")
+        action = payload["best_action"]
+        self.assertEqual(action["kind"], "submit")
+        self.assertEqual(action["label"], "Send music")
+        self.assertEqual(action["url"], "https://static.example/music/send")
+
+    def test_spa_with_no_evidence_is_UNKNOWN_not_none(self):
+        payload = build_and_surface(
+            station_dict("SPA Radio", HOME_SPA),
+            pages((HOME_SPA, SPA_HOME)))
+        self.assertEqual(payload["submission_status"], "UNKNOWN")
+        self.assertEqual(payload["best_action"]["kind"], "none")
+
+    def test_noise_only_is_UNKNOWN_not_none(self):
+        payload = build_and_surface(
+            station_dict("Noise Radio", HOME_NOISE),
+            pages((HOME_NOISE, NOISE_HOME)))
+        self.assertEqual(payload["submission_status"], "UNKNOWN")
+        self.assertEqual(payload["best_action"]["kind"], "none")
+
+    def test_contact_page_only_is_CONTACT_FOR_SUBMISSION(self):
+        contact_only = """
+        <html><body><h1>North Star Radio</h1>
+          <a href="/contact">Contact Us</a>
+          <a href="/about">About</a>
+        </body></html>
+        """
+        payload = build_and_surface(
+            station_dict("North Star Radio", "https://northstar.example/"),
+            pages(("https://northstar.example/", contact_only)))
+        self.assertEqual(payload["submission_status"],
+                         "CONTACT_FOR_SUBMISSION")
+        action = payload["best_action"]
+        self.assertEqual(action["kind"], "browse")
+        self.assertEqual(action["label"], "Contact station")
+        self.assertEqual(action["url"], "https://northstar.example/contact")
+
+    def test_send_page_beats_decision_contact_for_direct(self):
+        # WFMU-shaped: dedicated send-music page + named music director with
+        # NO email => still DIRECT_SUBMISSION via the page, not a contact.
+        station = station_dict("Wilfully", "https://wilfully.example/")
+        station["contacts"] = [{
+            "contact_uid": "c1", "name": "Jess R.", "role": "music_director",
+        }]
+        fetched = SourceFetchRecord(url="https://wilfully.example/sendmusic.html",
+                                    ok=True, status=200)
+        payload = build_and_surface(station, pages((
+            "https://wilfully.example/",
+            '<html><body><a href="/sendmusic.html">Send Us Your Music</a>'
+            "<a href=\"/reachout\">REACH OUT</a>"
+            '<a href="/mailus.php">Mail Us</a></body></html>')), [fetched])
+        self.assertEqual(payload["submission_status"], "DIRECT_SUBMISSION")
+        self.assertEqual(payload["best_action"]["kind"], "submit")
+        self.assertEqual(payload["best_action"]["url"],
+                         "https://wilfully.example/sendmusic.html")
+
+
+class TestContactViewEvidence(unittest.TestCase):
+    """Contact views carry evidence_state/role_reason/sources (Phase 10)."""
+
+    def _payload(self, contacts, submission=None, useful_pages=None):
+        from backend.contracts import contacts_payload
+        station = {
+            "identity_key": "domain:contact.example",
+            "name": "Contact Radio",
+            "raw_metadata": {"useful_pages": useful_pages or []},
+        }
+        return contacts_payload(station, contacts, submission)
+
+    def test_named_decision_contact_without_email_is_DISCOVERED(self):
+        payload = self._payload([{
+            "contact_uid": "c1", "name": "Jess R.",
+            "role": "music_director",
+            "source_url": "https://contact.example/",
+        }], useful_pages=[{
+            "url": "https://contact.example/contact", "label": "Contact Us",
+            "category": "contact", "source_url": "https://contact.example/",
+        }])
+        self.assertEqual(payload["submission_status"],
+                         "CONTACT_FOR_SUBMISSION")
+        view = payload["contacts"][0]
+        self.assertEqual(view["evidence_state"], "DISCOVERED")
+        self.assertIn("music director", view["role_reason"])
+        self.assertIn("https://contact.example/", view["sources"])
+        self.assertIsNone(view["method"])
+
+    def test_email_contact_is_VERIFIED_independent_of_role(self):
+        payload = self._payload([{
+            "contact_uid": "c2", "name": "Ken F.",
+            "role": "program_director", "email": "ken@contact.example",
+        }])
+        view = payload["contacts"][0]
+        self.assertEqual(view["evidence_state"], "VERIFIED")
+        self.assertEqual(view["method"], "email")
+        self.assertEqual(payload["submission_status"],
+                         "CONTACT_FOR_SUBMISSION")
+
+    def test_phone_only_contact_is_EVIDENCE_BACKED(self):
+        payload = self._payload([{
+            "contact_uid": "c3", "role": "unknown", "phone": "2125551234",
+        }])
+        self.assertEqual(payload["contacts"][0]["evidence_state"],
+                         "EVIDENCE-BACKED")
+
+
+class TestReachOutAndMailUsClassifiedContact(unittest.TestCase):
+    """'reach out' / 'mail us' anchors are CONTACT pages, not DJ directory."""
+
+    def setUp(self):
+        self.station = station_dict("Reachout Radio", "https://reachout.example/")
+        self.payload = build_and_surface(self.station, pages((
+            "https://reachout.example/",
+            '<html><body><a href="/reachout">REACH OUT</a>'
+            '<a href="/mailus.php">Mail Us</a>'
+            '<a href="/djs">DJs</a></body></html>')))
+        self.by_url = {u["url"]: u for u in self.payload["useful_pages"]}
+
+    def test_reach_out_is_contact(self):
+        self.assertEqual(self.by_url["https://reachout.example/reachout"]
+                         ["category"], "contact")
+
+    def test_mail_us_is_contact(self):
+        self.assertEqual(self.by_url["https://reachout.example/mailus.php"]
+                         ["category"], "contact")
+
+    def test_dj_directory_still_distinct(self):
+        self.assertEqual(self.by_url["https://reachout.example/djs"]
+                         ["category"], "dj_directory")
+
+
 if __name__ == "__main__":
     unittest.main()

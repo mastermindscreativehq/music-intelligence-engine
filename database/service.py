@@ -61,6 +61,19 @@ _JSON_LIST_FIELDS = (
     "source_urls", "confidence_reasons",
 )
 _JSON_DICT_FIELDS = ("genre_evidence", "social_urls", "raw_metadata")
+
+# Development-fixture quarantine (read path only; storage is never mutated).
+# A row is a dev artifact when its identity is a geo-name seed, or when its
+# host lives on a reserved-TLD suffix (.example/.test/.invalid/.localhost/
+# .local) or is absent. Such rows never surface in the production listing.
+_DEV_HOST_SUFFIXES = (".example", ".test", ".invalid", ".localhost", ".local")
+_DEV_HOST = "LOWER(COALESCE(NULLIF(domain, ''), NULLIF(website, '')))"
+_DEV_FIXTURE_EXCLUSION_SQL = (
+    "identity_key NOT LIKE 'namegeo:%' AND "
+    + " AND ".join(
+        f"{_DEV_HOST} IS NOT NULL AND {_DEV_HOST} NOT LIKE '%{suffix}' "
+        "ESCAPE '\\'"
+        for suffix in _DEV_HOST_SUFFIXES))
 _FLOAT_UNIT_FIELDS = ("confidence_score", "classification_confidence")
 
 
@@ -465,6 +478,23 @@ class PersistenceService:
                     first_stored, now,
                 ))
             count += 1
+        # Full-replace reconciliation: an intake delivers the COMPLETE,
+        # freshly enriched contact set. Any contact_uid already stored for
+        # this station that is NOT in the fresh result is stale (superseded
+        # extraction, garbage from older code, a DJ-list flood) and is
+        # removed so a re-enrich never re-surfaces obsolete rows. Mirrors
+        # PostgresStorage._upsert_contacts exactly.
+        incoming_uids = {contact_uid(stable_id, c) for c in contacts}
+        if incoming_uids:
+            marks = ",".join(["?"] * len(incoming_uids))
+            self._conn.execute(
+                f"DELETE FROM contacts WHERE identity_key=? "
+                f"AND contact_uid NOT IN ({marks})",
+                [stable_id, *sorted(incoming_uids)])
+        else:
+            self._conn.execute(
+                "DELETE FROM contacts WHERE identity_key=?",
+                (stable_id,))
         return count
 
     def _upsert_submission(self, stable_id: str, payload: dict,
@@ -498,8 +528,9 @@ class PersistenceService:
                       genre: str | None = None,
                       format_filter: str | None = None,
                       country: str | None = None,
-                      min_confidence: float | None = None
-                      ) -> tuple[list[dict], int]:
+                      min_confidence: float | None = None,
+                      exclude_dev: bool = False
+                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
         clauses, params = [], []
         if q:
             clauses.append("name LIKE ? ESCAPE '\\'")
@@ -521,7 +552,26 @@ class PersistenceService:
         if min_confidence is not None:
             clauses.append("confidence_score >= ?")
             params.append(float(min_confidence))
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        base_where = " AND ".join(clauses)
+        where = f"WHERE {base_where}" if base_where else ""
+        if exclude_dev:
+            dev_clause = "(" + _DEV_FIXTURE_EXCLUSION_SQL + ")"
+            dev_where = (f"WHERE {base_where} AND {dev_clause}"
+                         if base_where else f"WHERE {dev_clause}")
+            with self._lock:
+                visible_total = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM stations {dev_where}",
+                    params).fetchone()["n"]
+                full_total = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM stations {where}",
+                    params).fetchone()["n"]
+                rows = self._conn.execute(
+                    f"SELECT * FROM stations {dev_where} "
+                    "ORDER BY name COLLATE NOCASE, identity_key "
+                    "LIMIT ? OFFSET ?",
+                    [*params, int(limit), int(offset)]).fetchall()
+            return ([self._station_from_row(r) for r in rows],
+                    int(visible_total), int(full_total - visible_total))
         with self._lock:
             total = self._conn.execute(
                 f"SELECT COUNT(*) AS n FROM stations {where}",
@@ -816,6 +866,8 @@ class PersistenceService:
             "sharing": _loads(row["sharing"]),
             "status": row["status"],
             "provider": row["provider"],
+            "outreach_class": row["outreach_class"],
+            "submission_url": row["submission_url"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -836,9 +888,10 @@ class PersistenceService:
                     recipient_name, recipient_role, organization,
                     email, source_url, track_id, track, context,
                     subject, message, from_email, sharing,
-                    status, provider, created_at, updated_at)
+                    status, provider, created_at, updated_at,
+                    outreach_class, submission_url)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(outreach_id) DO UPDATE SET
                     contact_uid=excluded.contact_uid,
                     identity_key=excluded.identity_key,
@@ -856,6 +909,8 @@ class PersistenceService:
                     sharing=excluded.sharing,
                     status=excluded.status,
                     provider=excluded.provider,
+                    outreach_class=excluded.outreach_class,
+                    submission_url=excluded.submission_url,
                     updated_at=excluded.updated_at
                 """,
                 (record["outreach_id"], record.get("contact_uid"),
@@ -867,7 +922,9 @@ class PersistenceService:
                  record.get("message"), record.get("from_email"),
                  _dumps(record.get("sharing")), record["status"],
                  record.get("provider") or "local", created,
-                 str(record.get("updated_at") or now)))
+                 str(record.get("updated_at") or now),
+                 record.get("outreach_class"),
+                 record.get("submission_url")))
         return self.get_outreach(record["outreach_id"])
 
     def get_outreach(self, outreach_id: str) -> dict | None:

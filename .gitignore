@@ -46,8 +46,12 @@ temp/
 *.sqlite
 *.sqlite3
 *.db
+*.db-journal
 *.dump
 pgdata/
+
+# ---- Local runtime data directory (working DB, journals, submission assets) -----
+data/
 
 # ---- Uploaded music / media assets (never commit artist files) -----------------
 media/

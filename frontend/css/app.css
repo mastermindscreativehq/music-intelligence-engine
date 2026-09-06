@@ -7,6 +7,7 @@
   --text-dim: #8b96a8;
   --accent: #4da3ff;
   --ok: #3ecf8e;
+  --danger: #ff6b6b;
   --warn: #f5a524;
   --bad: #f0564a;
   --stale: #7aa2ff;
@@ -52,6 +53,7 @@ body {
 }
 .badge-muted { color: var(--text-dim); }
 .badge-accent { color: var(--accent); border-color: var(--accent); }
+.badge-fail { color: var(--danger); border-color: var(--danger); }
 
 .epistemics-note {
   margin: 10px 18px;

@@ -30,6 +30,26 @@ function describeOrigin(path) {
   }
 }
 
+// Every request carries a hard deadline instead of hanging forever: a stale
+// keep-alive socket, a stalling proxy, or a backend that never answers must
+// surface as a typed error — never leave the console on "connecting…".
+const REQUEST_TIMEOUT_MS = 10000;
+
+function deadline() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return { controller, timer };
+}
+
+function deadlineError(path) {
+  return new ApiError(
+    "timeout",
+    `API request timed out after ${
+      Math.round(REQUEST_TIMEOUT_MS / 1000)}s (tried ${describeOrigin(path)})`,
+    0,
+  );
+}
+
 function searchParams(params) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params || {})) {
@@ -41,46 +61,58 @@ function searchParams(params) {
 }
 
 export async function request(path, params) {
-  let response;
+  const { controller, timer } = deadline();
   try {
-    response = await fetch(path + searchParams(params), {
-      headers: { Accept: "application/json" },
-      credentials: "same-origin",
-    });
-  } catch (error) {
-    throw new ApiError(
-      "network",
-      `API server unreachable (tried ${describeOrigin(path)})`,
-      0,
-    );
-  }
+    let response;
+    try {
+      response = await fetch(path + searchParams(params), {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        throw deadlineError(path);
+      }
+      throw new ApiError(
+        "network",
+        `API server unreachable (tried ${describeOrigin(path)})`,
+        0,
+      );
+    }
 
-  let envelope;
-  try {
-    envelope = await response.json();
-  } catch (error) {
+    let envelope;
+    try {
+      envelope = await response.json();
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        throw deadlineError(path);
+      }
+      throw new ApiError(
+        "internal_error",
+        `non-JSON response (HTTP ${response.status})`,
+        response.status,
+      );
+    }
+
+    if (!envelope || typeof envelope.ok !== "boolean") {
+      throw new ApiError(
+        "internal_error",
+        "malformed envelope from API",
+        response.status,
+      );
+    }
+    if (envelope.ok) return envelope.data;
+
+    const detail = envelope.error || {};
     throw new ApiError(
-      "internal_error",
-      `non-JSON response (HTTP ${response.status})`,
+      detail.code || "internal_error",
+      detail.message || "unknown error",
       response.status,
     );
+  } finally {
+    clearTimeout(timer);
   }
-
-  if (!envelope || typeof envelope.ok !== "boolean") {
-    throw new ApiError(
-      "internal_error",
-      "malformed envelope from API",
-      response.status,
-    );
-  }
-  if (envelope.ok) return envelope.data;
-
-  const detail = envelope.error || {};
-  throw new ApiError(
-    detail.code || "internal_error",
-    detail.message || "unknown error",
-    response.status,
-  );
 }
 
 export const api = {
@@ -140,47 +172,59 @@ export const api = {
  * envelope conventions and typed errors. request() above is intentionally
  * left untouched. */
 export async function send(path, init, params) {
-  let response;
+  const { controller, timer } = deadline();
   try {
-    const headers = { Accept: "application/json" };
-    if (init && init.headers) Object.assign(headers, init.headers);
-    response = await fetch(path + searchParams(params), {
-      credentials: "same-origin",
-      ...init,
-      headers,
-    });
-  } catch (error) {
-    throw new ApiError(
-      "network",
-      `API server unreachable (tried ${describeOrigin(path)})`,
-      0,
-    );
-  }
+    let response;
+    try {
+      const headers = { Accept: "application/json" };
+      if (init && init.headers) Object.assign(headers, init.headers);
+      response = await fetch(path + searchParams(params), {
+        credentials: "same-origin",
+        ...init,
+        headers,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        throw deadlineError(path);
+      }
+      throw new ApiError(
+        "network",
+        `API server unreachable (tried ${describeOrigin(path)})`,
+        0,
+      );
+    }
 
-  let envelope;
-  try {
-    envelope = await response.json();
-  } catch (error) {
+    let envelope;
+    try {
+      envelope = await response.json();
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        throw deadlineError(path);
+      }
+      throw new ApiError(
+        "internal_error",
+        `non-JSON response (HTTP ${response.status})`,
+        response.status,
+      );
+    }
+
+    if (!envelope || typeof envelope.ok !== "boolean") {
+      throw new ApiError(
+        "internal_error",
+        "malformed envelope from API",
+        response.status,
+      );
+    }
+    if (envelope.ok) return envelope.data;
+
+    const detail = envelope.error || {};
     throw new ApiError(
-      "internal_error",
-      `non-JSON response (HTTP ${response.status})`,
+      detail.code || "internal_error",
+      detail.message || "unknown error",
       response.status,
     );
+  } finally {
+    clearTimeout(timer);
   }
-
-  if (!envelope || typeof envelope.ok !== "boolean") {
-    throw new ApiError(
-      "internal_error",
-      "malformed envelope from API",
-      response.status,
-    );
-  }
-  if (envelope.ok) return envelope.data;
-
-  const detail = envelope.error || {};
-  throw new ApiError(
-    detail.code || "internal_error",
-    detail.message || "unknown error",
-    response.status,
-  );
 }

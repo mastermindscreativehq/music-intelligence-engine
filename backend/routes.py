@@ -48,6 +48,12 @@ from outreach import service as outreach_service
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
 
+# Development fixtures are quarantined from production display on the read
+# path only (storage is never mutated and fixtures are never deleted). The
+# SQL reservation lives in database.service._DEV_FIXTURE_EXCLUSION_SQL:
+# geo-name seeds and reserved-TLD hosts are dev artifacts, not stations, and
+# never surface in the list response.
+
 LIST_PARAMS = ("limit", "offset", "q", "status", "genre", "format",
                "country", "min_confidence")
 TRACK_LIST_PARAMS = ("limit", "offset", "status")
@@ -231,15 +237,17 @@ def _handle(service, method: str, match: re.Match, params: dict,
     if path == "/api/v1/stations":
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
-        rows, total = service.list_stations(
+        rows, total, dev_excluded = service.list_stations(
             limit=limit, offset=offset, q=_first(params, "q"),
             status=_first(params, "status"), genre=_first(params, "genre"),
             format_filter=_first(params, "format"),
             country=_first(params, "country"),
-            min_confidence=_min_confidence(params))
+            min_confidence=_min_confidence(params),
+            exclude_dev=True)
         return 200, success_body({
             "stations": [station_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,
+            "dev_fixtures_excluded": dev_excluded,
         })
 
     if path == "/api/v1/ingest":

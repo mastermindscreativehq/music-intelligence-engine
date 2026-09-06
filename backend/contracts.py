@@ -17,6 +17,8 @@ credentials are ever included.
 
 from __future__ import annotations
 
+from backend import outreach_intel
+
 # Fields documented as meaningful-but-maybe-absent on a station. When the
 # stored value is None they are reported in epistemology.unknown_fields —
 # except country/state_or_region once locality (city/market) is established.
@@ -92,6 +94,13 @@ def _fact_count(station: dict, emails: list[dict], phones: list[dict],
     return count
 
 
+def _raw_useful_pages(station: dict) -> list[dict]:
+    return [
+        p for p in (station.get("raw_metadata") or {}).get("useful_pages") or []
+        if isinstance(p, dict)
+    ]
+
+
 def intelligence_payload(station: dict, emails: list[dict],
                          phones: list[dict], contacts: list[dict],
                          submission: dict | None,
@@ -101,18 +110,31 @@ def intelligence_payload(station: dict, emails: list[dict],
     if submission and isinstance(submission.get("methods"), dict) \
             and submission["methods"].get("methods"):
         inferred.append("submission.methods")
+    useful_pages = [_useful_page_view(p) for p in _raw_useful_pages(station)]
+    submission_status, submission_status_reason, best_action = \
+        submission_status_and_best_action(
+            useful_pages, submission, contacts,
+            investigated=bool(fetches or useful_pages))
+    level, level_reason = outreach_intel.station_intelligence_level(
+        station, _raw_useful_pages(station), submission, contacts)
+    recommendation = outreach_intel.primary_recommendation(
+        station, _raw_useful_pages(station), submission, contacts)
     payload = {
         "station": station_detail(station),
+        "intelligence_level": level,
+        "intelligence_level_reason": level_reason,
         "emails": [dict(fact) for fact in emails],      # Fact dicts verbatim
         "phone_numbers": [dict(fact) for fact in phones],
         "contacts": [dict(c) for c in contacts],
         "submission": dict(submission) if submission else None,
+        "submission_status": submission_status,
+        "submission_status_reason": submission_status_reason,
+        "best_action": best_action,
+        "outreach_routes": outreach_intel.build_outreach_routes(
+            _raw_useful_pages(station), submission, contacts),
+        "outreach_recommendation": recommendation,
         "fetches": [dict(f) for f in (fetches or [])],
-        "useful_pages": [
-            dict(p) for p in ((
-                station.get("raw_metadata") or {}).get("useful_pages") or [])
-            if isinstance(p, dict)
-        ],
+        "useful_pages": useful_pages,
         "epistemology": {
             "facts_count": _fact_count(station, emails, phones, contacts),
             "inferred_fields": inferred,
@@ -131,11 +153,28 @@ def intelligence_payload(station: dict, emails: list[dict],
 
 def contacts_payload(station: dict, contacts: list[dict],
                      submission: dict | None) -> dict:
+    raw_pages = _raw_useful_pages(station)
+    useful_pages = [_useful_page_view(p) for p in raw_pages]
+    submission_status, submission_status_reason, best_action = \
+        submission_status_and_best_action(
+            useful_pages, submission, contacts, investigated=bool(useful_pages))
+    level, level_reason = outreach_intel.station_intelligence_level(
+        station, raw_pages, submission, contacts)
+    recommendation = outreach_intel.primary_recommendation(
+        station, raw_pages, submission, contacts)
     payload = {
         "station_identity_key": station["identity_key"],
         "station_name": station["name"],
+        "intelligence_level": level,
+        "intelligence_level_reason": level_reason,
         "contacts": _contact_views(contacts),
         "submission": dict(submission) if submission else None,
+        "submission_status": submission_status,
+        "submission_status_reason": submission_status_reason,
+        "best_action": best_action,
+        "outreach_routes": outreach_intel.build_outreach_routes(
+            raw_pages, submission, contacts),
+        "outreach_recommendation": recommendation,
         "preferred_submission_contacts": [
             {"contact_uid": c["contact_uid"], "role": c.get("role"),
              "email": c.get("email")}
@@ -199,6 +238,10 @@ def _annotate_contact(contact: dict) -> dict:
         view["value_normalized"] = None
     view["identity_state"] = _identity_state(contact)
     view["observations"] = 1
+    view["evidence_state"] = _contact_evidence_state(contact)
+    view["role_reason"] = _contact_role_reason(contact)
+    view["sources"] = _distinct_sources(contact)
+    view["route_class"] = outreach_intel.contact_route_class(contact.get("role"))
     return view
 
 
@@ -254,6 +297,209 @@ def _prov_token(prov: object) -> str:
 def _contact_views(contacts: list[dict]) -> list[dict]:
     return _merge_unattributed(
         [_annotate_contact(c) for c in contacts])
+
+
+# -- Evidence-state model (Phase 10 repairs) -------------------------------
+#
+# Read-path derivation ONLY: storage rows are never rewritten. Every artifact
+# the console shows carries an explicit evidence state so it can be presented
+# honestly instead of "verified or empty":
+#
+#   VERIFIED         a concrete observable was recorded (page reachable,
+#                    email observed on an official page)
+#   EVIDENCE-BACKED  a concrete channel is on record (phone), but not the
+#                    strongest channel; or discovery combined with a
+#                    submission-relevant page
+#   DISCOVERED       the artifact exists in evidence but is unconfirmed
+#                    (page found, reachability not verified; contact with no
+#                    outreach channel)
+#   UNKNOWN          nothing was observed (dedicated field absent)
+
+def _useful_page_view(page: dict) -> dict:
+    view = dict(page)
+    reachable = page.get("reachable")
+    view["evidence_state"] = "VERIFIED" if reachable is True else "DISCOVERED"
+    if reachable is True:
+        view["evidence_note"] = "verified reachable"
+    elif reachable is None:
+        view["evidence_note"] = "discovered link; reachability not yet confirmed"
+    else:
+        view["evidence_note"] = "discovered link; currently unreachable"
+    semantics = outreach_intel.PAGE_ROUTE_SEMANTICS.get(
+        page.get("category"), outreach_intel.PAGE_ROUTE_SEMANTICS["other"])
+    view["kind"] = semantics["kind"]
+    view["route_class"] = semantics["class"]
+    view["why"] = semantics["why"]
+    view["actionability"] = semantics["actionability"]
+    view["next_step"] = semantics["next_step"]
+    return view
+
+
+def _contact_evidence_state(contact: dict) -> str:
+    if contact.get("email"):
+        return "VERIFIED"
+    if contact.get("phone"):
+        return "EVIDENCE-BACKED"
+    return "DISCOVERED"
+
+
+def _contact_role_reason(contact: dict) -> str:
+    role = str(contact.get("role") or "").strip()
+    if role and role != "unknown":
+        return f"{role.replace('_', ' ')} - role label on station website"
+    if str(contact.get("name") or "").strip():
+        return "named contact from station website"
+    return "observed contact from station website"
+
+
+def _distinct_sources(contact: dict) -> list[str]:
+    urls: list[str] = []
+    for candidate in [contact.get("source_url")] + [
+            p.get("source_url") for p in (contact.get("provenance") or [])
+            if isinstance(p, dict)]:
+        if isinstance(candidate, str) and candidate and candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+
+_SUBMISSION_STATUS_DIRECT = "DIRECT_SUBMISSION"
+_SUBMISSION_STATUS_CONTACT = "CONTACT_FOR_SUBMISSION"
+_SUBMISSION_STATUS_SHOW = "SHOW_SPECIFIC_OPPORTUNITY"
+_SUBMISSION_STATUS_NONE = "NO_PUBLIC_SUBMISSION_ROUTE_FOUND"
+_SUBMISSION_STATUS_UNKNOWN = "UNKNOWN"
+
+_DECISION_ROLE_ORDER = {
+    "music_director": 0,
+    "program_director": 1,
+    "music_programmer": 2,
+    "music_submission": 3,
+    "programming": 4,
+    "music_scheduler": 5,
+    "music_coordinator": 6,
+}
+_DECISION_ROLE_SET = frozenset(_DECISION_ROLE_ORDER)
+
+
+def _submission_page_from(useful_pages: list[dict]) -> dict | None:
+    candidates = [
+        p for p in useful_pages or []
+        if p.get("category") in ("send_music", "submission_guidelines")]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: (0 if p.get("reachable") is True else 1,
+                                   p.get("url") or ""))
+    return candidates[0]
+
+
+def _best_contact_action(contacts: list[dict]) -> dict | None:
+    decision = [
+        c for c in contacts or []
+        if c.get("role") in _DECISION_ROLE_SET
+        and (c.get("email") or c.get("phone"))]
+    if not decision:
+        return None
+    decision.sort(key=lambda c: (_DECISION_ROLE_ORDER.get(c.get("role"), 99),
+                                 c.get("role") or ""))
+    top = decision[0]
+    role = str(top.get("role") or "").strip()
+    if top.get("email"):
+        label = ("Contact music director" if role == "music_director"
+                 else "Contact program director"
+                 if role == "program_director"
+                 else "Contact music department")
+        return {"url": f"mailto:{top['email']}",
+                "label": label, "detail": top["email"]}
+    if top.get("phone"):
+        label = ("Call music director"
+                 if role == "music_director"
+                 else "Call music department")
+        return {"url": None, "label": label, "detail": top["phone"]}
+    return None
+
+
+def submission_status_and_best_action(
+    useful_pages: list[dict],
+    submission: dict | None,
+    contacts: list[dict],
+    investigated: bool,
+) -> tuple[str, str, dict]:
+    """Derive the station's submission intelligence state and one best action.
+
+    Returns ``(status, reason, best_action)``. ``best_action`` is a single
+    clear next step; ``kind`` is one of submit|contact|browse|none. Nothing is
+    ever fabricated: URLs come from stored facts / exact discovered pages.
+    """
+    submission_url = None
+    if submission and isinstance(submission.get("submission_url"), dict):
+        value = (submission["submission_url"] or {}).get("value")
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            submission_url = value
+    submission_email = submission.get("submission_email") if submission else None
+    sub_page = _submission_page_from(useful_pages)
+
+    if submission_url or sub_page or submission_email:
+        if submission_url:
+            url, label, detail = submission_url, "official submission page", ""
+            reason = "dedicated submission URL recorded on the station site"
+        elif sub_page:
+            url, label, detail = sub_page["url"], \
+                sub_page.get("label") or "submission page", ""
+            # The dedicated submission page is stronger evidence than an
+            # inferred generic email: its anchor text was explicitly about
+            # music submissions.
+            reason = "station submission page discovered on the station site"
+        else:
+            url, label, detail = f"mailto:{submission_email}", \
+                "submission email", submission_email
+            reason = f"submission email on the station site ({submission_email})"
+        action = {"kind": "submit", "label": "Send music",
+                  "url": url, "detail": detail}
+        return _SUBMISSION_STATUS_DIRECT, reason, action
+
+    contact_action = _best_contact_action(contacts)
+    contact_page = next(
+        (p for p in useful_pages or [] if p.get("category") == "contact"), None)
+    if contact_action or contact_page:
+        if contact_action:
+            action = {"kind": "contact", "url": contact_action["url"],
+                      "label": contact_action["label"],
+                      "detail": contact_action["detail"],
+                      "reason": "music decision-maker contact on the station site"}
+            reason = (f"{contact_action['label']} "
+                      f"({contact_action['detail']}) on the station site")
+        else:
+            action = {"kind": "browse", "label": "Contact station",
+                      "url": contact_page["url"],
+                      "detail": contact_page.get("label") or "",
+                      "reason": "station contact page discovered on the station site"}
+            reason = "station contact page found - reach out for music submissions"
+        return _SUBMISSION_STATUS_CONTACT, reason, action
+
+    opportunity_page = next(
+        (p for p in useful_pages or []
+         if p.get("category") in ("dj_directory", "programming")), None)
+    if opportunity_page:
+        action = {"kind": "browse", "label": "Browse station DJs & programming",
+                  "url": opportunity_page["url"],
+                  "detail": opportunity_page.get("label") or "",
+                  "reason": "station DJ/programming pages found — show-specific outreach"}
+        return _SUBMISSION_STATUS_SHOW, \
+            "station DJ/programming pages found (show-specific opportunity)", \
+            action
+
+    if investigated:
+        action = {"kind": "none", "label": "No public submission route found",
+                  "url": None, "detail": "",
+                  "reason": "station site investigated; no public submission "
+                            "or music-contact route surfaced"}
+        return _SUBMISSION_STATUS_NONE, \
+            "investigated the station site and found no public route", action
+
+    action = {"kind": "none", "label": "Submission route not yet investigated",
+              "url": None, "detail": "",
+              "reason": "no pages or facts recorded for this station yet"}
+    return _SUBMISSION_STATUS_UNKNOWN, \
+        "station has not been investigated yet", action
 
 
 # -- Phase 8: submission assets + link accessibility --------------------------

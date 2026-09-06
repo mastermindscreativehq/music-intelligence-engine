@@ -228,11 +228,10 @@ class PostgresOutreachContractTests(unittest.TestCase):
         names = {name for _v, name, _sql in migrations}
         self.assertIn("0003_outreach.sql", names)
         tail_name, tail_sql = migrations[-1][1], migrations[-1][2]
-        self.assertEqual(tail_name, "0003_outreach.sql")
-        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_messages", tail_sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_attempts", tail_sql)
-        self.assertIn("REFERENCES outreach_messages", tail_sql)
-        self.assertIn('"at"', tail_sql)
+        # outreach is created in 0003; 0004 adds the webform/URL route columns
+        self.assertEqual(tail_name, "0004_webform_outreach.sql")
+        self.assertIn("outreach_class", tail_sql)
+        self.assertIn("submission_url", tail_sql)
 
     def test_repository_protocol_includes_outreach(self):
         from database.repository import IntelligenceRepository

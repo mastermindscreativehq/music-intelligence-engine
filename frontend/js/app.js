@@ -72,10 +72,12 @@ async function refreshSchemaBadge() {
     schemaBadge.textContent =
       `API online · storage schema v${data.schema_version}`;
     schemaBadge.className = "badge badge-accent";
+    schemaBadge.title = "GET /api/v1/health";
   } catch (error) {
-    const detail = error instanceof ApiError ? error.code : "error";
+    const detail = error instanceof ApiError ? error.message : String(error);
     schemaBadge.textContent = `API unreachable (${detail})`;
-    schemaBadge.className = "badge";
+    schemaBadge.className = "badge badge-fail";
+    schemaBadge.title = "GET /api/v1/health failed — see message";
   }
 }
 refreshSchemaBadge();

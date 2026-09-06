@@ -19,7 +19,7 @@ import re
 from urllib.parse import urlsplit
 
 from crawler.pages import ParsedPage
-from crawler.urls import canonical_domain
+from crawler.urls import canonical_domain, is_individual_contact_route
 
 from discovery.radio.schema import (
     EnrichedContact,
@@ -135,8 +135,8 @@ _USEFUL_CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
         re.I)),
     ("contact", re.compile(
         r"contact[\s\-_]?(us)?\b|get[\s\-_]?in[\s\-_]?touch\b|email[\s\-_]?us\b|"
-        r"reach[\s\-_]?us\b|\bdirectory\b|staff(?:[\s\-_]?directory)?\b|"
-        r"\bpeople\b|\bteam\b", re.I)),
+        r"mail[\s\-_]?us\b|reach[\s\-_]?(us|out)\b|\bdirectory\b|"
+        r"staff(?:[\s\-_]?directory)?\b|\bpeople\b|\bteam\b", re.I)),
     ("programming", re.compile(
         r"programming\b|program[\s\-_]?director\b|\bshows?\b|\bschedule\b",
         re.I)),
@@ -615,15 +615,7 @@ def _is_individual_contact_route(url: str, label: str) -> bool:
     not surface as a station Useful Page. Detection is generic (never
     station-specific): an individual-email form path carrying a person id.
     """
-    try:
-        split = urlsplit(url)
-    except (ValueError, AttributeError):
-        return False
-    path = (split.path or "").lower()
-    query = (split.query or "").lower()
-    if not _INDIVIDUAL_EMAIL_PATH_RE.search(path):
-        return False
-    return any(f"{p}=" in query for p in _INDIVIDUAL_ID_PARAMS)
+    return is_individual_contact_route(url)
 
 
 # Session / auth / form-action chrome is NOT a navigational content page. It is

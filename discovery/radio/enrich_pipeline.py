@@ -48,6 +48,7 @@ class EngineConfig:
     def __init__(
         self,
         max_pages_per_station: int = 6,
+        verify_pages_per_station: int = 8,
         timeout_seconds: float = 15.0,
         rate_limit_seconds: float = 1.0,
         respect_robots: bool = True,
@@ -55,11 +56,102 @@ class EngineConfig:
         logger=None,
     ) -> None:
         self.max_pages_per_station = max(0, int(max_pages_per_station))
+        # Separate, additional budget used to *verify* already-discovered
+        # useful pages (reachability evidence), distinct from the discovery
+        # fetch budget above. Verification only ever requests exact URLs that
+        # were already discovered as links on crawled pages — it never invents
+        # routes.
+        self.verify_pages_per_station = max(
+            0, int(verify_pages_per_station))
         self.timeout_seconds = timeout_seconds
         self.rate_limit_seconds = rate_limit_seconds
         self.respect_robots = respect_robots
         self.user_agent = user_agent
         self.logger = logger or get_logger("mie.enrichment")
+
+
+# Categories worth verifying first (the outreach-relevant pages). "other"
+# clutter is never fetched purely to become actionable.
+_VERIFY_CATEGORY_ORDER = {
+    "send_music": 0,
+    "submission_guidelines": 1,
+    "dj_directory": 2,
+    "contact": 3,
+    "programming": 4,
+    "about": 5,
+    "other": 6,
+}
+
+
+class _UsefulPageVerifier:
+    """Bounded reachability verification of already-discovered useful pages.
+
+    Only EXACT URLs that were discovered as links on crawled pages are ever
+    fetched — this class never constructs or guesses a route. It records a
+    ``SourceFetchRecord`` per verification request and writes the outcome
+    (reachable / status / rechecked_at) back onto the matching
+    ``UsefulPage``. Pages already carrying verified reachability evidence
+    from an earlier fetch are skipped.
+    """
+
+    def __init__(self, fetcher, logger) -> None:
+        self._fetcher = fetcher
+        self._logger = logger
+
+    def verify(self, enriched, budget: int) -> list[SourceFetchRecord]:
+        if budget <= 0 or not enriched.useful_pages:
+            return []
+        already_fetched = _exact_ok_urls(enriched.fetches or [])
+        # Order candidates: highest-value category first, then stable by URL.
+        candidates = [
+            p for p in enriched.useful_pages
+            if p.reachable is not True      # already verified/success: skip
+            and p.url not in already_fetched  # exact URL already fetched: skip
+        ]
+        candidates.sort(key=lambda p: (
+            _VERIFY_CATEGORY_ORDER.get(p.category, 6), p.url))
+        to_check = candidates[:budget]
+        new_records: list[SourceFetchRecord] = []
+        for page in to_check:
+            url = page.url
+            fetched_at = utc_now_iso()
+            try:
+                fetch = self._fetcher.fetch(url)
+            except Exception as exc:
+                fetch = None
+                rec = SourceFetchRecord(
+                    url=url, ok=False,
+                    error_kind=type(exc).__name__, fetched_at=fetched_at)
+                page.reachable = False
+                page.status = None
+                page.rechecked_at = fetched_at
+                new_records.append(rec)
+                log_event(self._logger, EVENT_ENRICHMENT_PAGE_FETCH,
+                          url=url, ok=False, status=None)
+                continue
+            ok = bool(fetch.ok)
+            rec = SourceFetchRecord(
+                url=url, ok=ok, status=getattr(fetch, "status", None),
+                error_kind=getattr(fetch, "error_kind", None),
+                fetched_at=fetched_at)
+            page.reachable = ok
+            page.status = getattr(fetch, "status", None)
+            page.rechecked_at = fetched_at
+            new_records.append(rec)
+            log_event(self._logger, EVENT_ENRICHMENT_PAGE_FETCH,
+                      url=url, ok=ok, status=getattr(fetch, "status", None))
+        return new_records
+
+
+def _exact_ok_urls(fetches) -> set[str]:
+    ok: set[str] = set()
+    for f in fetches:
+        try:
+            if f.ok and f.url:
+                ok.add(f.url.rstrip("/"))
+        except AttributeError:
+            continue
+    return ok
 
 
 class EnrichmentEngine:
@@ -171,6 +263,25 @@ class EnrichmentEngine:
                 fetch_records.extend(extra_records)
 
         enriched = build_intelligence_record(record, pages, fetch_records)
+        if self.live:
+            # Phase 6: bounded link-verification pass. Confirm which discovered
+            # useful pages are truly reachable by fetching their EXACT URLs
+            # (never guessing routes), writing reachable/status/rechecked_at
+            # evidence so only verified links surface as actionable.
+            verifier = _UsefulPageVerifier(self._fetcher, self.config.logger)
+            new_records = verifier.verify(
+                enriched,
+                budget=getattr(self.config, "verify_pages_per_station", 8))
+            if new_records:
+                fetch_records.extend(new_records)
+                enriched.fetches = list(fetch_records)
+                # The verifier wrote reachability evidence onto each UsefulPage
+                # AFTER build_intelligence_record serialized them into
+                # raw_metadata. Re-serialize so the persisted/API list carries
+                # the same reachable/status/rechecked_at evidence.
+                enriched.raw_metadata["useful_pages"] = [
+                    p.to_dict() for p in enriched.useful_pages
+                ]
         if self._role_advisor is not None:
             self._apply_role_advisor(enriched)
         return enriched

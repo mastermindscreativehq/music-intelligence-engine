@@ -122,3 +122,31 @@ def slugify_name(name: str) -> str:
     """Stable slug used as part of the no-domain dedup fallback key."""
     slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower())
     return slug.strip("-")
+
+
+# Query params that mark a URL as an individual person's route (a per-person
+# email/contact form endpoint such as ``email.php?id=N``), NOT a station page.
+_INDIVIDUAL_ID_PARAMS = {"id", "uid", "user", "userid", "user_id", "to",
+                         "from", "person", "profile", "member", "contactid"}
+_INDIVIDUAL_EMAIL_PATH_RE = re.compile(
+    r"(?:\bemail\b|\bmails\b|\bmailto\b|\bmessage\b|\bsend\b)", re.I)
+
+
+def is_individual_contact_route(url: str) -> bool:
+    """True when *url* is a per-person email/contact route, not a station page.
+
+    Detects ``email.php?id=N``-style endpoints: an individual-email/contact
+    form path carrying an individual identifier query parameter. Station-level
+    resources (staff/directory/people/contact pages) are deliberately NOT
+    matched, so ``/contact`` or a "DJ & staff email list" page is never
+    mistaken for an individual route. Generic and never station-specific.
+    """
+    try:
+        split = urlsplit(url)
+    except (AttributeError, ValueError):
+        return False
+    path = (split.path or "").lower()
+    query = (split.query or "").lower()
+    if not _INDIVIDUAL_EMAIL_PATH_RE.search(path):
+        return False
+    return any(f"{p}=" in query for p in _INDIVIDUAL_ID_PARAMS)

@@ -151,6 +151,22 @@ def wxyz_minimal(**overrides) -> dict:
     return record
 
 
+def wcur_intelligence(**overrides) -> dict:
+    """A real TLD station that is NOT a dev fixture (stays in the production
+    listing so projection/filter tests have a visible member)."""
+    record = {
+        "organization_type": "radio_station",
+        "name": "WCUR",
+        "website": "https://wcur-radio.org",
+        "genres": ["news"],
+        "station_type": "community",
+        "confidence_score": 0.95,
+        "status": "enriched",
+    }
+    record.update(overrides)
+    return record
+
+
 def kzow_second_sighting() -> dict:
     """Same station via a www alias + fresh engine UUIDs + extra source URL.
 
@@ -385,7 +401,8 @@ class ApiTestCase(TempDBTestCase):
         super().setUp()
         self.harness = APIServerHarness(self.db_path)
         self.harness.server.service.ingest_intelligence(
-            [kzow_intelligence(), wxyz_minimal()], source="test")
+            [kzow_intelligence(), wxyz_minimal(), wcur_intelligence()],
+            source="test")
         self.harness.start()
         self.addCleanup(self.harness.stop)
 
@@ -400,19 +417,23 @@ class Test09ApiStationListing(ApiTestCase):
         self.assertTrue(body["ok"])
         self.assertIsNone(body["error"])
         data = body["data"]
-        self.assertEqual(data["total"], 2)
+        # kzow.example + wxyz.example are dev fixtures: quarantined from the
+        # production view. Only the real station is listed.
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["dev_fixtures_excluded"], 2)
         first = data["stations"][0]
         for field in ("identity_key", "name", "website", "station_type",
                       "confidence_score", "status", "genres", "links"):
             self.assertIn(field, first)
+        self.assertEqual(first["name"], "WCUR")
         _status, filtered = self.get("/api/v1/stations?q=kzow")
-        self.assertEqual(filtered["data"]["total"], 1)
+        self.assertEqual(filtered["data"]["total"], 0)
         _status, by_status = self.get("/api/v1/stations?status=enriched")
-        self.assertEqual(by_status["data"]["total"], 2)
+        self.assertEqual(by_status["data"]["total"], 1)
         status_p, paged = self.get("/api/v1/stations?limit=1&offset=1")
         self.assertEqual(status_p, 200)
         self.assertEqual(paged["data"]["limit"], 1)
-        self.assertEqual(len(paged["data"]["stations"]), 1)
+        self.assertEqual(len(paged["data"]["stations"]), 0)
 
     def test_health_endpoint(self):
         status, body = self.get("/api/v1/health")

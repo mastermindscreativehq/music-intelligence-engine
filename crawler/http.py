@@ -94,7 +94,7 @@ class RobotsCache:
             parser = urllib.robotparser.RobotFileParser()
             parser.set_url(f"{base}/robots.txt")
             try:
-                parser.read()
+                self._load(parser)
             except Exception as exc:  # unreachable robots -> fail open
                 logger.info("robots_unreadable host=%s error=%s", base, exc)
                 self._cache[base] = parser
@@ -104,6 +104,44 @@ class RobotsCache:
             return parser.can_fetch(self.user_agent, url)
         except Exception:
             return True
+
+    def _load(self, parser: urllib.robotparser.RobotFileParser) -> None:
+        """Read a host's robots.txt under the fetcher's OWN User-Agent.
+
+        ``RobotFileParser.read()`` requests with ``User-Agent:
+        Python-urllib/<ver>``, which several station sites 403 — the parser
+        then marks every path ``disallow_all`` and the engine wrongly reports
+        ``robots_disallowed`` for sites whose policy actually allows ``*``.
+        By fetching with the real bot agent the policy that is evaluated is
+        the one the server applies to this bot. 401/403 responses to our UA
+        are still treated as an explicit robots block (robotparser's
+        semantics); a non-readable robots file fails open (allow).
+        """
+        request = urllib.request.Request(
+            parser.url,
+            headers={"User-Agent": self.user_agent,
+                     "Accept": "text/plain,*/*"})
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as resp:
+                status = int(getattr(resp, "status", 0) or 0)
+                if status == 401 or status == 403:
+                    parser.disallow_all = True
+                    parser.allow_all = False
+                elif status == 404:
+                    parser.disallow_all = False
+                    parser.allow_all = True
+                else:
+                    parser.disallow_all = False
+                    parser.allow_all = False
+                    parser.parse((resp.read(200_000) or b"")
+                                 .decode("utf-8", "replace").splitlines())
+        except urllib.error.HTTPError as exc:
+            if getattr(exc, "code", None) in (401, 403):
+                parser.disallow_all = True
+                parser.allow_all = False
+            else:
+                raise  # any other failure -> caller fails open (allow)
+        parser.modified()
 
 
 class StdlibHttpFetcher:

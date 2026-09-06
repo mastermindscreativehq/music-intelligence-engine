@@ -26,6 +26,7 @@ import re
 import uuid
 
 from crawler.pages import ParsedPage
+from crawler.urls import is_individual_contact_route
 from enrichment.emails import normalize_email
 from enrichment.roles import classify_role
 
@@ -115,7 +116,13 @@ def is_staff_directory(page: ParsedPage) -> bool:
     1. ``<title>`` contains a staff/team/people signal.
     2. URL path contains a staff/team/people signal.
     3. Content heuristic: enough name-like lines near role keywords.
+
+    A per-person email/contact route (an ``email.php?id=N``-style individual
+    mail-form index) is NEVER a staff directory, however role-word-rich its
+    text — those names are individuals' forms, not a staff listing.
     """
+    if is_individual_contact_route(page.url):
+        return False
     title = page.title or ""
     if _TITLE_SIGNALS.search(title):
         return True

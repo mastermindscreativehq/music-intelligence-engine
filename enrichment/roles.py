@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import re
 
+_EMAIL_IN_LINE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
+
 ROLE_RULES: list[tuple[str, str]] = [
     (r"music\s*director", "music_director"),
     (r"assistant\s*music\s*director", "music_director"),
@@ -88,23 +92,43 @@ def find_role_evidence_near(text: str | None, anchor_index: int) -> dict | None:
                     return role, match, line_no
         return None
 
-    # Same line first, then labels ABOVE the address (station pages place
-    # the label before its contact), then below-the-address labels as the
-    # last resort — precedence is asymmetric ON PURPOSE.
-    for offset in (0, -1, -2, -3, 1, 2, 3):
-        hit = scan(target + offset)
-        if hit is None:
-            continue
+    def unpack(hit) -> dict:
         role, match, line_no = hit
         _, line_start = lines[line_no]
         return {
             "role": role,
             "matched_label": match.group(0),
             "line_index": line_no,
-            "line_offset": offset,
+            "line_offset": line_no - target,
             "char_start": line_start + match.start(),
             "char_end": line_start + match.end(),
         }
+
+    def scan_direction(step: int, limit: int):
+        # Scan a single direction. A line that itself carries an email
+        # address is the tail of ANOTHER entry ("Role: Name, addr" lines in
+        # a staff directory), so no role label beyond it belongs to the
+        # contact at *anchor_index* — stop at the first such boundary.
+        for k in range(1, limit + 1):
+            lineno = target + step * k
+            if not 0 <= lineno < len(lines):
+                return None
+            if _EMAIL_IN_LINE.search(lines[lineno][0]):
+                return None
+            hit = scan(lineno)
+            if hit is not None:
+                return unpack(hit)
+        return None
+
+    # Same line first, then labels ABOVE the address (station pages place
+    # the label before its contact), then below-the-address labels as the
+    # last resort — precedence is asymmetric ON PURPOSE.
+    own = scan(target)
+    if own is not None:
+        return unpack(own)
+    for hit in (scan_direction(-1, 3), scan_direction(1, 3)):
+        if hit is not None:
+            return hit
     return None
 
 

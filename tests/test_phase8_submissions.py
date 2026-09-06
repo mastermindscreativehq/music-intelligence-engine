@@ -968,11 +968,15 @@ class TestPostgresMigration0002(unittest.TestCase):
         sequenced = {name for _v, name, _sql in migrations}
         self.assertIn("0002_submissions.sql", sequenced)
         self.assertIn("0003_outreach.sql", sequenced)
-        name, sql = migrations[-1][1], migrations[-1][2]
-        self.assertEqual(name, "0003_outreach.sql")
-        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_messages", sql)
-        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_attempts", sql)
-        self.assertIn("REFERENCES outreach_messages", sql)
+        self.assertIn("0004_webform_outreach.sql", sequenced)
+        by_name = {name: sql for _v, name, sql in migrations}
+        outreach = by_name["0003_outreach.sql"]
+        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_messages", outreach)
+        self.assertIn("CREATE TABLE IF NOT EXISTS outreach_attempts", outreach)
+        self.assertIn("REFERENCES outreach_messages", outreach)
+        webform = by_name["0004_webform_outreach.sql"]
+        self.assertIn("outreach_class", webform)
+        self.assertIn("submission_url", webform)
 
 
 if __name__ == "__main__":  # pragma: no cover

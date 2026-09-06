@@ -51,6 +51,8 @@ def _oom_payload(row: dict, attempts: list[dict] | None = None) -> dict:
             "email": row["email"],
             "identity_key": row.get("identity_key"),
             "source_url": row.get("source_url"),
+            "outreach_class": row.get("outreach_class") or "email",
+            "submission_url": row.get("submission_url"),
         },
         "track": row.get("track"),
         "context": row.get("context"),
@@ -73,12 +75,40 @@ def create_outreach(repository, *, payload: dict,
 
     ``payload`` is the operator-supplied outreach (recipient, optional
     track/context/sharing, subject, message). Nothing is sent here.
+
+    Recipient route — a record targets EITHER a verified email
+    (``outreach_class == "email"``) OR a verified submission/contact web-form
+    URL (``outreach_class == "webform"``), never both, never neither:
+
+    - ``recipient.email`` non-empty  -> email class (historical behavior).
+    - ``recipient.submission_url`` a valid http(s) URL -> webform class, for
+      URL-only stations (e.g. WFMU) that expose a VERIFIED submission route
+      but no verified email decision-maker. The URL is supplied by caller
+      evidence (a verified useful page / submission route); it is never
+      invented here. ``recipient.email`` stays empty for a webform record so
+      an unverified address is never fabricated or silently assumed.
+    - otherwise -> ``ValueError`` (honest rejection, never a fake recipient).
+
+    ``outreach_class`` is persisted verbatim and returned; consumers use it
+    (not an empty email) to distinguish the route.
     """
     provider = provider or LocalStubProvider()
     recipient = payload.get("recipient") or {}
     email = (recipient.get("email") or "").strip()
-    if not email:
-        raise ValueError("outreach_requires_email")
+    submission_url = (recipient.get("submission_url") or "").strip()
+    if email and submission_url:
+        raise ValueError("outreach_ambiguous_recipient")
+    if email:
+        outreach_class = "email"
+        stored_email = email
+    elif submission_url:
+        if not (submission_url.startswith("http://")
+                or submission_url.startswith("https://")):
+            raise ValueError("outreach_requires_verified_url")
+        outreach_class = "webform"
+        stored_email = ""   # no verified email; empty => absent (never fabricated)
+    else:
+        raise ValueError("outreach_requires_recipient")
 
     outreach_id = "om_" + uuid.uuid4().hex[:16]
     ts = now or utc_now_iso()
@@ -89,8 +119,10 @@ def create_outreach(repository, *, payload: dict,
         "recipient_name": recipient.get("name"),
         "recipient_role": recipient.get("role"),
         "organization": recipient.get("organization"),
-        "email": email,
+        "email": stored_email,
         "source_url": recipient.get("source_url"),
+        "outreach_class": outreach_class,
+        "submission_url": submission_url or None,
         "track_id": (payload.get("track") or {}).get("track_id"),
         "track": payload.get("track"),
         "context": payload.get("context"),

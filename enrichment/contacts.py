@@ -20,6 +20,7 @@ import re
 import uuid
 
 from crawler.pages import ParsedPage
+from crawler.urls import is_individual_contact_route
 from enrichment.emails import extract_emails_from_text, normalize_email
 from enrichment.roles import (
     CONTEXT_CHARS,
@@ -137,7 +138,15 @@ def build_contacts_from_page(page: ParsedPage) -> list[dict]:
     # below may supplement but not replace.  Email is the primary key;
     # name-only entries (no email) use a synthetic key and may receive
     # email data from the standard extraction below.
-    if is_staff_directory(page):
+    #
+    # Data-integrity gate: a per-person email/contact route (an
+    # ``email.php?id=N``-style individual mail-form index, e.g. a station's
+    # "email your DJ" page) is NOT a staff directory and is NOT run through
+    # structured extraction. Treating it as one floods the station with
+    # hundreds of name-only "contacts" who are really per-person forms with
+    # no annotatable email. Generic email/mailto extraction still runs below,
+    # so any literal addresses on the page are still captured.
+    if not is_individual_contact_route(page.url) and is_staff_directory(page):
         for entry in extract_staff_entries(page):
             email = entry.get("email")
             if email and email not in contacts:

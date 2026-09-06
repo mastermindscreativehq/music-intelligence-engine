@@ -125,10 +125,18 @@ function bestSubmissionRoute(intel, usefulPages) {
         ? "official submission page"
         : "verified submission page",
       source: canonical,
+      verified: canonical.verified === true,
     };
   }
   const page = submissionPages(usefulPages)[0] || null;
-  if (page) return { url: page.url, label: page.label || "submission page", source: page };
+  if (page) {
+    return {
+      url: page.url,
+      label: page.label || "submission page",
+      source: page,
+      verified: page.reachable === true,
+    };
+  }
   return null;
 }
 
@@ -217,6 +225,10 @@ function usefulPageRow(p) {
     el("div", { class: "up-main" },
       externalLink(p.url, el("span", { class: "up-label" }, p.label || p.url)),
       el("span", { class: "dim up-url" }, normalizePageUrl(p.url))),
+    p.why || p.next_step
+      ? el("div", { class: "dim up-why" },
+        [p.why, p.next_step].filter(Boolean).join(" "))
+      : null,
     el("span", { class: "dim up-meta" }, USEFUL_LABELS[p.category] || p.category));
 }
 
@@ -239,7 +251,135 @@ function usefulPagesCard(usefulPages, canonicalRoute) {
 }
 
 /* ---------------------------------------------------------------------------
- * Section 2 — Best Actions
+ * Section 2 — Outreach intelligence (evidence model, Phase 11)
+ *
+ * Renders the station's derived intelligence exactly as computed by the
+ * backend: level, the single best outreach route, alternatives, and — always
+ * — what is still unknown. Nothing here invents a route; when no verified
+ * route exists the no-route state is shown head-on (differs from the
+ * best-action tiles by design).
+ * ------------------------------------------------------------------------- */
+
+const PRIORITY_LABEL = {
+  1: "P1 · Direct music submission",
+  2: "P2 · Music contact",
+  3: "P3 · General contact",
+  4: "P4 · DJ / program directory",
+};
+const LEVEL_BADGE_CLASS = {
+  ACTIONABLE: "intel-actionable",
+  LIMITED: "intel-limited",
+  INSUFFICIENT_EVIDENCE: "intel-insufficient",
+  VERIFIED: "intel-verified",
+  RAW: "intel-raw",
+  UNKNOWN: "intel-raw",
+};
+
+function routeLink(route) {
+  const value = String(route.value || "");
+  if (/^https?:/i.test(value)) {
+    return externalLink(value, route.title || value);
+  }
+  if (/^mailto:/i.test(value)) {
+    return externalLink(value, route.title || value.replace(/^mailto:/, ""));
+  }
+  return el("span", {}, route.title || value || "—");
+}
+
+function routeChip(route) {
+  return el("span", {
+    class: "chip evidence",
+    title: route.evidence || "",
+  }, route.verification_state || route.evidence_state || "UNKNOWN");
+}
+
+function routeRow(route) {
+  return el("div", { class: "route-row" },
+    el("span", { class: "route-priority" },
+      PRIORITY_LABEL[route.priority] || `P${route.priority} · Route`),
+    el("div", { class: "route-body" },
+      el("div", { class: "route-title" },
+        routeLink(route),
+        routeChip(route)),
+      el("div", { class: "dim route-why" }, route.why || "")));
+}
+
+function unknownList(unknowns) {
+  if (!unknowns || !unknowns.length) return null;
+  return el("div", { class: "unknown-list" },
+    el("span", { class: "dim unknown-label" }, "Still unknown: "),
+    unknowns.map((item) => el("span", { class: "chip" }, item)));
+}
+
+/* Re-exported label kept as its own function so the honest copy stays
+ * pinned at one spelling across cases. */
+function unverifiedLabel() {
+  return "No verified outreach route";
+}
+
+function outreachIntelligenceCard(detail, intel) {
+  const level = String(intel.intelligence_level || "UNKNOWN");
+  const reason = intel.intelligence_level_reason || "";
+  const rec = intel.outreach_recommendation || null;
+  const routes = intel.outreach_routes || [];
+  const primary = rec && rec.route ? rec.route : null;
+  const alternatives = (primary ? routes.filter((r) => r !== primary)
+    : routes).filter((r) => Boolean(r.value)
+      || r.verification_state === "ACTIONABLE");
+
+  const levelBadge = el("span", {
+    class: `chip intel-level ${LEVEL_BADGE_CLASS[level] || "intel-raw"}`,
+  }, level);
+
+  const verifiedBlock = el("div", { class: "intel-verified" },
+    el("h3", {}, "WHAT WE VERIFIED"),
+    el("div", { class: "verified-line" }, levelBadge,
+      el("span", { class: "dim" }, reason || "No evidence recorded.")));
+
+  const body = [verifiedBlock];
+
+  if (primary) {
+    body.push(el("div", { class: "intel-best" },
+      el("h3", {}, "BEST OUTREACH ROUTE"),
+      routeRow(primary),
+      el("div", { class: "dim intel-why" },
+        el("strong", {}, "Why: "), rec.why || primary.why || "",
+        " · Confidence: ", el("strong", {}, rec.confidence || "—")),
+      Array.isArray(rec.evidence) && rec.evidence.length
+        ? el("div", { class: "dim evidence-row" },
+          "Evidence: ", el("span", {}, rec.evidence.join("; ")))
+        : null));
+  } else {
+    body.push(el("div", { class: "intel-none" },
+      el("h3", {}, "BEST OUTREACH ROUTE"),
+      el("p", { class: "dim" }, unverifiedLabel() + " for this station yet. "
+        + "The record has been inspected; no verified path to invite music "
+        + "was found, so no route is staged.")));
+  }
+
+  const shownAlts = alternatives.slice(0, 5);
+  if (shownAlts.length) {
+    body.push(el("div", { class: "intel-alts" },
+      el("h3", {}, "ALTERNATIVE ROUTES"),
+      el("div", {}, shownAlts.map(routeRow))));
+  }
+
+  body.push(el("div", { class: "intel-unknown" },
+    el("h3", {}, "WHAT IS UNKNOWN"),
+    unknownList(rec && rec.unknown)
+    || el("p", { class: "dim" }, "Nothing else outstanding is documented.")));
+
+  return el("section", { class: "card", id: "station-outreach-intel" },
+    el("h2", {}, "Outreach intelligence"),
+    el("p", { class: "dim" },
+      "Evidence-backed picture of how this station accepts music outreach — "
+      + "what the engine verified, the best recorded route, and what is still "
+      + "unknown."),
+    el("div", { class: "intel-body" }, body));
+}
+
+/* ---------------------------------------------------------------------------
+ * Section 3 — Best Actions
  * ------------------------------------------------------------------------- */
 
 function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
@@ -249,25 +389,60 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
   const emailContact = ranked.find((c) => verifiedEmail(c));
   const contactPage = bestOfCategory(usefulPages, "contact");
   const djDirectory = bestOfCategory(usefulPages, "dj_directory");
+  const status = String(intel.submission_status || "");
+  const backendAction = intel.best_action || null;
 
   const tiles = [];
 
-  tiles.push(route
-    ? externalLink(route.url,
+  /* Primary tile — the single best evidence-backed submission route.
+   * DIRECT: backend submit action, else canonical route.
+   * CONTACT: the backend's contact/browse action IS the submission route,
+   *   shown as "Submission information found" (per the evidence model),
+   *   never a false "No route found" claim.
+   * NONE probed/UNKNOWN: honest muted copy. */
+  if (backendAction && backendAction.kind === "submit" && backendAction.url) {
+    tiles.push(externalLink(backendAction.url,
+      el("span", { class: "action-tile primary-tile" },
+        el("strong", {}, backendAction.label || "Send music"),
+        el("span", { class: "dim action-sub" },
+          backendAction.detail || "submission page on station site"))));
+  } else if (route) {
+    tiles.push(externalLink(route.url,
       el("span", { class: "action-tile primary-tile" },
         el("strong", {}, "Send music"),
-        el("span", { class: "dim action-sub" }, route.label)))
-    : el("span", { class: "action-tile action-muted" },
+        el("span", { class: "dim action-sub" }, route.label)));
+  } else if (backendAction
+    && (backendAction.kind === "contact" || backendAction.kind === "browse")
+    && backendAction.url) {
+    tiles.push(externalLink(backendAction.url,
+      el("span", { class: "action-tile primary-tile" },
+        el("strong", {}, "Submission information found"),
+        el("span", { class: "dim action-sub" },
+          backendAction.reason || backendAction.label)));
+  } else if (backendAction && backendAction.kind === "contact"
+    && backendAction.detail) {
+    tiles.push(el("span", { class: "action-tile action-muted" },
+      el("strong", {}, backendAction.label),
+      el("span", { class: "dim action-sub" }, backendAction.detail)));
+  } else {
+    tiles.push(el("span", { class: "action-tile action-muted" },
       el("strong", {}, "Send music"),
       el("span", { class: "dim action-sub" },
-        "No verified submission route found.")));
+        status === "NO_PUBLIC_SUBMISSION_ROUTE_FOUND"
+          ? "No public submission route found after investigation."
+          : "No verified submission route found.")));
+  }
 
+  /* Contact decision-maker: verified email when present; otherwise a station
+   * contact page (unless it already served as the primary browse route). */
   if (emailContact) {
     tiles.push(externalLink(`mailto:${emailContact.email}`,
       el("span", { class: "action-tile" },
         el("strong", {}, contactActionLabel(emailContact)),
         el("span", { class: "dim action-sub" }, emailContact.email))));
-  } else if (contactPage) {
+  } else if (contactPage
+    && !(backendAction && backendAction.kind === "browse"
+      && backendAction.url === contactPage.url)) {
     tiles.push(externalLink(contactPage.url,
       el("span", { class: "action-tile" },
         el("strong", {}, "Contact station"),
@@ -275,7 +450,9 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
           contactPage.label || "station contact page"))));
   }
 
-  if (djDirectory) {
+  if (djDirectory
+    && !(backendAction && backendAction.kind === "browse"
+      && backendAction.url === djDirectory.url)) {
     tiles.push(externalLink(djDirectory.url,
       el("span", { class: "action-tile" },
         el("strong", {}, "DJ directory"),
@@ -290,16 +467,25 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
         el("span", { class: "dim action-sub" }, detail.domain ?? website))));
   }
 
-  tiles.push(el("span", { class: "action-tile action-staged" },
-    el("button", {
-      class: "primary inline",
-      id: "station-add-campaign",
-    }, "Add to campaign")));
+  /* Add-to-campaign is only actionable when a real outreach route exists
+   * (verified email decision-maker or verified web-form submission route). */
+  if (ranked.some((c) => isActionable(c)) || (route && route.verified)) {
+    tiles.push(el("span", { class: "action-tile action-staged" },
+      el("button", {
+        class: "primary inline",
+        id: "station-add-campaign",
+      }, "Add to campaign")));
+  } else {
+    tiles.push(el("span", { class: "action-tile action-muted" },
+      el("strong", {}, "Add to campaign"),
+      el("span", { class: "dim action-sub" },
+        "No verified email or web-form outreach route yet.")));
+  }
 
   return el("section", { class: "card action-bar", id: "station-actions" },
     el("h2", {}, "Best actions"),
     el("p", { class: "dim" },
-      "Verified, high-value next steps from backend evidence — nothing here "
+      "Evidence-backed next steps from the station site — nothing here "
       + "is guessed."),
     el("div", { class: "action-grid" }, tiles));
 }
@@ -374,10 +560,10 @@ function rankedContacts(contacts) {
   });
 }
 
-/* A decision-role or backend-preferred person counts as a key contact, but
- * the actionable set only includes people with a verified outreach route.
- * Unreachable (no-email) contacts never occupy the top-3; their role still
- * powers the Best-Actions fallback, never fabricated. */
+/* A decision-role or backend-preferred person counts as a key contact. The
+ * actionable set for campaign staging is narrower: a person needs a verified
+ * email route. No-email decision-makers still SHOW in Key Contacts with
+ * honest "no verified outreach route" copy — their role is evidence. */
 function isActionable(contact) {
   return isKeyContact(contact) && Boolean(verifiedEmail(contact));
 }
@@ -387,6 +573,12 @@ function roleTitle(role) {
   return String(role).replace(/_/g, " ");
 }
 
+function evidenceStateLabel(state) {
+  if (state === "VERIFIED") return "verified email";
+  if (state === "EVIDENCE-BACKED") return "phone on record";
+  return "on record";
+}
+
 function keyContactCard(contact, payload, identityKey, basket) {
   const uid = String(contact.contact_uid);
   const email = verifiedEmail(contact);
@@ -394,6 +586,8 @@ function keyContactCard(contact, payload, identityKey, basket) {
   const title = contact.name
     || roleTitle(contact.role)
     || "(unnamed contact)";
+  const foundOn = contact.source_url
+    || ((contact.sources && contact.sources[0]) || null);
 
   const routeStatus = email
     ? el("span", { class: "route-status ok" },
@@ -445,16 +639,24 @@ function keyContactCard(contact, payload, identityKey, basket) {
     el("div", { class: "head" },
       el("span", { class: "name" }, title),
       contact.role && contact.role !== "unknown"
-        ? el("span", { class: "chip" }, contact.role) : null,
+        ? el("span", { class: "chip", title: contact.role_reason || "" },
+          contact.role) : null,
+      contact.evidence_state
+        ? el("span", { class: "chip evidence",
+          title: contact.role_reason || "" },
+          evidenceStateLabel(contact.evidence_state)) : null,
+      contact.route_class && contact.route_class !== "UNKNOWN_ROLE"
+        ? el("span", { class: "chip", title: "backend route classification" },
+          contact.route_class) : null,
       contact.preferred_for_submissions
         ? el("span", { class: "preferred-star",
           title: "backend-flagged preferred_for_submissions" },
           "★ preferred")
         : null),
     el("div", { class: "route-status-line" }, routeStatus),
-    contact.source_url
+    foundOn
       ? el("div", { class: "dim evidence-row" }, "Found on: ",
-        externalLink(contact.source_url))
+        externalLink(foundOn))
       : null,
     el("div", { class: "actions-row" },
       el("span", { class: "dim" },
@@ -466,7 +668,7 @@ function keyContactCard(contact, payload, identityKey, basket) {
 
 function keyContactsCard(contacts, payload, identityKey, basket) {
   const ranked = rankedContacts(contacts);
-  const keys = ranked.filter(isActionable);
+  const keys = ranked.filter(isKeyContact);
   const more = ranked.filter(isMoreRelevantContact);
   const shown = keys.slice(0, 3);
   const extraKeys = keys.slice(3);
@@ -500,8 +702,8 @@ function keyContactsCard(contacts, payload, identityKey, basket) {
   return el("section", { class: "card", id: "station-contacts" },
     el("h2", {}, "Key contacts"),
     el("p", { class: "dim" },
-      "The people most likely to decide about music, ranked by evidence. "
-      + "Only verified, music-relevant contacts appear."),
+      "Decision-makers and verified music-relevant people, ranked by "
+      + "evidence. No outreach route is invented."),
     cards.length
       ? cards
       : el("p", { class: "dim" },
@@ -531,6 +733,36 @@ function addAllToCampaign(detail, contactsPayload, identityKey, basket) {
     }
   }
   return staged;
+}
+
+/* A URL-only station (no verified email decision-maker, e.g. WFMU) is still
+ * selectable for outreach through its VERIFIED music-submission/contact web
+ * form. This computes a stable selection uid (never a fabricated contact —
+ * the real artifact is the verified submission_url). */
+function webformCampaignRecipient(contactsPayload, identityKey, intel,
+  usefulPages, basket) {
+  const anyVerifiedEmail = (contactsPayload.contacts || [])
+    .some((c) => isKeyContact(c) && verifiedEmail(c));
+  if (anyVerifiedEmail) return null;          // email route exists: prefer it
+
+  const route = bestSubmissionRoute(intel, usefulPages);
+  if (!route || !route.verified) return null; // only a VERIFIED exact URL counts
+  const uid = "wf_" + String(route.url).replace(/[^a-z0-9]+/gi, "_");
+  if (basket.has(uid)) return { contact_uid: uid, added: false };
+  const added = basket.add({
+    contact_uid: uid,
+    identity_key: identityKey,
+    station_name: contactsPayload.station_name,
+    name: typeof route.label === "string"
+      ? route.label.replace(/^official /, "") : "station submission page",
+    role: "musical_submission",
+    email: "",
+    source_url: route.source && route.source.source_url
+      ? route.source.source_url : null,
+    outreach_class: "webform",
+    submission_url: route.url,
+  });
+  return { contact_uid: uid, added };
 }
 
 /* ---------------------------------------------------------------------------
@@ -719,6 +951,7 @@ export function renderStationView(root, identityKey, basket) {
     const route = bestSubmissionRoute(intel, intel.useful_pages);
     root.replaceChildren(
       overviewSection(detail),
+      outreachIntelligenceCard(detail, intel),
       bestActionsCard(detail, intel, intel.useful_pages, contactsPayload),
       keyContactsCard(contactsPayload.contacts, contactsPayload,
         identityKey, basket),
@@ -731,21 +964,37 @@ export function renderStationView(root, identityKey, basket) {
       addCampaign.addEventListener("click", () => {
         const added = addAllToCampaign(detail, contactsPayload, identityKey,
           basket);
-        if (added.length === 0) {
-          addCampaign.textContent = "no selectable contacts";
+        // For a URL-only station (no verified email decision-maker), fall
+        // back to its VERIFIED submission/contact web form so it is still a
+        // selectable outreach route — never a fabricated email.
+        const webform = webformCampaignRecipient(contactsPayload, identityKey,
+          intel, intel.useful_pages, basket);
+        const addedUids = [
+          ...added.map((c) => String(c.contact_uid)),
+          ...(webform && webform.added ? [webform.contact_uid] : []),
+        ];
+        if (addedUids.length === 0) {
+          addCampaign.textContent = webform
+            ? "no verified route"
+            : "no selectable contacts";
           return;
         }
-        addCampaign.textContent = `staged ${added.length} recipient(s)`;
+        addCampaign.textContent =
+          `staged ${addedUids.length} recipient(s)`;
         const addedNames = added
           .map((c) => c.name || c.role || "contact").filter(Boolean);
+        if (webform && webform.added) {
+          addedNames.push(typeof webform.name === "string"
+            ? webform.name : "station web form");
+        }
         addCampaign.disabled = true;
 
         const confirm = el("div", { class: "banner-info station-confirm" },
-          "Added ", el("strong", {}, `${added.length} recipient(s)`),
+          "Added ", el("strong", {}, `${addedUids.length} recipient(s)`),
           " to your list (", el("span", {}, addedNames.join(", ")), ").");
         const start = el("a", {
           class: "primary",
-          href: outreachHref(added.map((c) => String(c.contact_uid))),
+          href: outreachHref(addedUids),
         }, "Start outreach →");
         const actionsCard = document.getElementById("station-actions");
         if (actionsCard) {

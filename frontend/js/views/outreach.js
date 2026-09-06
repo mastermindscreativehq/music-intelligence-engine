@@ -85,6 +85,8 @@ export function renderOutreachView(root, uids, basket) {
   };
   const recipientCards = recipients.map((item) => {
     const email = (item.email && item.email.trim()) || null;
+    const webformUrl = (item.outreach_class === "webform" && item.submission_url)
+      ? item.submission_url : null;
     return el("div", { class: "recipient-evidence" },
       el("div", { class: "recipient-tags" },
         el("span", { class: "chip recipient-tag" },
@@ -96,7 +98,11 @@ export function renderOutreachView(root, uids, basket) {
         }, "Remove recipient")),
       el("div", { class: "dim context-line" },
         item.role ? `${item.role} · ` : "",
-        email ? `Verified email · ${email}` : "no verified email"));
+        email ? `Verified email · ${email}`
+          : (webformUrl
+            ? "No verified email · verified submission web form · "
+              + externalLink(webformUrl, new URL(webformUrl).host)
+            : "no verified email")));
   });
 
   // --- track-to-pitch state ---------------------------------------------------
@@ -262,6 +268,16 @@ export function renderOutreachView(root, uids, basket) {
   async function doOpenEmail() {
     const to = recipients.map((r) => r.email).filter(Boolean);
     if (to.length === 0) {
+      const webformUrl = (recipients[0] && recipients[0].outreach_class === "webform"
+        && recipients[0].submission_url)
+        ? recipients[0].submission_url : null;
+      if (webformUrl) {
+        statusLine.textContent =
+          "No verified email — opening the station's verified submission page. "
+          + "This application never sends email.";
+        window.open(webformUrl, "_blank", "noopener");
+        return;
+      }
       statusLine.textContent = "No verified email on the recipient — draft it yourself.";
       return;
     }
@@ -293,6 +309,9 @@ export function renderOutreachView(root, uids, basket) {
           organization: recipient.station_name,
           email: recipient.email,
           source_url: recipient.source_url,
+          outreach_class: recipient.outreach_class
+            || (recipient.submission_url ? "webform" : "email"),
+          submission_url: recipient.submission_url || undefined,
         },
         track: trackRecord
           ? { track_id: trackRecord.track_id,
@@ -357,8 +376,12 @@ export function renderOutreachView(root, uids, basket) {
       statusLine.textContent = "Nothing to copy — generate or write a message first.";
       return;
     }
-    const head = ["To: " + recipients.map((r) => r.email).filter(Boolean).join(", "),
-      "Subject: " + subjectInput.value];
+    const emails = recipients.map((r) => r.email).filter(Boolean);
+    const toLine = emails.length > 0
+      ? "To: " + emails.join(", ")
+      : "Submit via: " + recipients.filter((r) => r.submission_url)
+        .map((r) => r.submission_url).join(", ");
+    const head = [toLine, "Subject: " + subjectInput.value];
     const text = [head.join("\n"), messageInput.value.trim()].join("\n\n");
     try {
       await navigator.clipboard.writeText(text + "\n");

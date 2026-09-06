@@ -231,13 +231,14 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                       country: str | None = None,
                       min_confidence: float | None = Query(None, ge=0.0,
                                                            le=1.0)):
-        rows, total = storage.list_stations(
+        rows, total, dev_excluded = storage.list_stations(
             limit=limit, offset=offset, q=q, status=status, genre=genre,
             format_filter=format, country=country,
-            min_confidence=min_confidence)
+            min_confidence=min_confidence, exclude_dev=True)
         return success_body({
             "stations": [station_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,
+            "dev_fixtures_excluded": dev_excluded,
         })
 
     @app.get("/api/v1/stations/{key}")
@@ -398,15 +399,22 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
 
 def build_storage(db_path: str | None = None,
                   pg_dsn: str | None = None):
-    """SQLite offline/tests by default; PostgreSQL via explicit DSN."""
+    """SQLite via --db/MIE_DATABASE_PATH; PostgreSQL via --dsn/MIE_PG_DSN.
+
+    Precedence is deterministic: an explicit ``db_path`` ALWAYS wins over a
+    PostgreSQL DSN, so an operator who asks for a local SQLite database never
+    silently connects to PostgreSQL just because ``MIE_PG_DSN`` is present in
+    the environment. A configured DSN is used only when no local database was
+    requested.
+    """
+    if db_path:
+        from database.service import PersistenceService
+        return PersistenceService(db_path)
     if pg_dsn:
         from database.pg_store import PostgresStorage
         return PostgresStorage(dsn=pg_dsn)
-    from database.service import PersistenceService
-    if not db_path:
-        raise SystemExit(
-            "--db or MIE_DATABASE_PATH (or --dsn / MIE_PG_DSN) is required")
-    return PersistenceService(db_path)
+    raise SystemExit(
+        "--db or MIE_DATABASE_PATH (or --dsn / MIE_PG_DSN) is required")
 
 
 def main(argv: list[str] | None = None) -> int:

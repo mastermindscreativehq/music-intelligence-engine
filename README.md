@@ -4,18 +4,25 @@ A production-oriented **music industry intelligence & outreach platform**, desig
 discover, enrich, verify, and score legitimate music-industry contacts — starting with
 **radio stations** — and to support careful, human-approved music outreach.
 
-> **Current phase: PHASE 7 — FRONTEND (complete).**
-> Phases 1–6 are complete (foundation; radio discovery; website intelligence
-> with bounded opt-in fetching; contact extraction; SQLite storage + API;
-> cross-source comparison, verification workflow, optional Ollama layer;
-> dual-backend persistence + FastAPI application).
+> **Current state: PHASES 1–11 COMPLETE (next: Phase 12 — Expansion).**
+> Phases 1–6: foundational architecture + docs; radio discovery engine;
+> radio website intelligence with bounded opt-in fetching; contact
+> extraction; SQLite storage + API; cross-source comparison, verification
+> workflow, optional Ollama layer; dual-backend (SQLite + PostgreSQL)
+> persistence and the FastAPI application.
 > Phase 7 adds the **zero-dependency operator console** (`frontend/`),
-> served same-origin by `backend.webapp` against the real Phase 4–6 API:
-> search & filter stations, inspect intelligence with confidence and
-> source attribution, review verification history, and select recipients
-> (selection only — the console never sends anything).
-> No crawling of live sites has been performed by this repo yet; no outreach
-> exists.
+> served same-origin by `backend.webapp` against the real API: search &
+> filter stations, inspect intelligence with confidence and source
+> attribution, review verification history, and select recipients.
+> Phase 8 — music submission with opaque-key asset addressing and accessible
+> reference links. Phase 9 — personalized, human-approved outreach.
+> Phase 10 — outreach tracking/history plus the intelligence-repair contract
+> set. Phase 11 — evidence-driven outreach intelligence: per-item evidence
+> states, the ranked P1–P4 route hierarchy, contact-route classes, per-useful-
+> page intelligence, honest station levels, a primary recommendation with
+> provenance, and dev-fixture quarantine from production display.
+> Phase 12 (next) reuses the same infrastructure for playlist curators, DJs,
+> blogs, publications, labels, A&R, festivals, events, and influencers.
 
 ---
 
@@ -52,7 +59,7 @@ DISCOVER → CRAWL → EXTRACT → NORMALIZE → ENRICH → VERIFY → SCORE
 | `enrichment/` | Contact extraction/normalization, classification, dedup, confidence, formats/submissions intelligence | Phase 2–3 ✓ |
 | `backend/`    | Application/API layer: organizations, contacts, search, ingestion API, shared route table, operator server | Phase 6–7 ✓ |
 | `frontend/`   | Operator console: search, filter, inspect intelligence, select recipients | Phase 7 ✓   |
-| `outreach/`   | Campaign preparation, personalized messages, approval-gated sending   | Phase 8–10  |
+| `outreach/`   | Campaign preparation, personalized messages, approval-gated sending, evidence-driven route intelligence | Phase 8–11 ✓ |
 | `database/`   | Dual-backend persistence (SQLite + PostgreSQL migrations)             | Phase 6 ✓   |
 | `n8n/`        | Workflow orchestration (small logical workflows, never one monolith)  | Phase 2+    |
 | `prompts/`    | Versioned LLM prompt templates                                        | Phase 5+    |
@@ -62,7 +69,10 @@ DISCOVER → CRAWL → EXTRACT → NORMALIZE → ENRICH → VERIFY → SCORE
 Phase history: PHASE 1 — FOUNDATION (architecture/docs/config/test baseline);
 PHASE 2 — RADIO DISCOVERY ENGINE; PHASE 3 — RADIO INTELLIGENCE / ENRICHMENT;
 PHASE 4 — STORAGE + API (SQLite); PHASE 5 — ENRICHMENT & VERIFICATION;
-PHASE 6 — DATABASE / API (current).
+PHASE 6 — DATABASE / API (dual-backend + FastAPI);
+PHASE 7 — FRONTEND (operator console); PHASE 8 — MUSIC SUBMISSION;
+PHASE 9 — PERSONALIZED OUTREACH; PHASE 10 — OUTREACH TRACKING &
+INTELLIGENCE REPAIRS; PHASE 11 — EVIDENCE-DRIVEN OUTREACH INTELLIGENCE.
 
 ## Technology stack
 
@@ -103,11 +113,12 @@ See [`docs/roadmap.md`](docs/roadmap.md). Summary:
 4. Contact Extraction ✓
 5. Enrichment & Verification ✓
 6. Database/API ✓
-7. Frontend ✓ (current)
-8. Music Submission
-9. Personalized Outreach
-10. Outreach Tracking
-11. Expansion (curators, DJs, blogs, labels, A&R, festivals, influencers)
+7. Frontend ✓
+8. Music Submission ✓
+9. Personalized Outreach ✓
+10. Outreach Tracking ✓
+11. Evidence-Driven Outreach Intelligence ✓
+12. Expansion (curators, DJs, blogs, publications, labels, A&R, festivals, events, influencers) — next
 
 ## Documentation
 

@@ -194,15 +194,22 @@ def create_server(db_path, host: str, port: int,
 
 def build_storage(db_path: str | None = None,
                   pg_dsn: str | None = None):
-    """PostgreSQL via explicit DSN; SQLite offline/tests as fallback."""
+    """SQLite via --db/MIE_DATABASE_PATH; PostgreSQL via --dsn/MIE_PG_DSN.
+
+    Precedence is deterministic: an explicit ``db_path`` ALWAYS wins over a
+    PostgreSQL DSN, so an operator who asks for a local SQLite database never
+    silently connects to PostgreSQL just because ``MIE_PG_DSN`` is present in
+    the environment. A configured DSN is used only when no local database was
+    requested.
+    """
+    if db_path:
+        from database.service import PersistenceService
+        return PersistenceService(db_path)
     if pg_dsn:
         from database.pg_store import PostgresStorage
         return PostgresStorage(dsn=pg_dsn)
-    from database.service import PersistenceService
-    if not db_path:
-        raise SystemExit(
-            "--db or MIE_DATABASE_PATH (or --dsn / MIE_PG_DSN) is required")
-    return PersistenceService(db_path)
+    raise SystemExit(
+        "--db or MIE_DATABASE_PATH (or --dsn / MIE_PG_DSN) is required")
 
 
 def main(argv: list[str] | None = None) -> int:
