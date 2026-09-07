@@ -410,7 +410,7 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
     tiles.push(externalLink(route.url,
       el("span", { class: "action-tile primary-tile" },
         el("strong", {}, "Send music"),
-        el("span", { class: "dim action-sub" }, route.label)));
+        el("span", { class: "dim action-sub" }, route.label))));
   } else if (backendAction
     && (backendAction.kind === "contact" || backendAction.kind === "browse")
     && backendAction.url) {
@@ -418,7 +418,7 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
       el("span", { class: "action-tile primary-tile" },
         el("strong", {}, "Submission information found"),
         el("span", { class: "dim action-sub" },
-          backendAction.reason || backendAction.label)));
+          backendAction.reason || backendAction.label))));
   } else if (backendAction && backendAction.kind === "contact"
     && backendAction.detail) {
     tiles.push(el("span", { class: "action-tile action-muted" },
