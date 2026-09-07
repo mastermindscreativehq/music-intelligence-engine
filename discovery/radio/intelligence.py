@@ -49,11 +49,14 @@ _SUBMISSION_ROLE_RANK = {
 }
 
 # Roles that justify keeping a name-only contact (no email) — these are
-# music-programming-relevant positions worth preserving for later enrichment.
+# music-programming-relevant positions worth preserving for later enrichment,
+# plus station/leadership decision-makers (general/station managers) who are
+# legitimate organizational contacts even without a music title.
 _CONTACT_MUSIC_ROLES = {
     "music_director", "program_director", "music_programmer",
     "music_submission", "programming", "music_scheduler",
     "music_coordinator", "host", "dj",
+    "station_manager", "general_manager",
 }
 
 # Relevance ordering for presentation: music-submission decision-makers
@@ -73,8 +76,10 @@ _CONTACT_RELEVANCE = {
     "media": 9,
     "booking": 10,
     "producer": 11,
-    "advertising": 12,
-    "general": 13,
+    "station_manager": 12,
+    "general_manager": 12,
+    "advertising": 13,
+    "general": 14,
 }
 _RELEVANCE_DEFAULT = 20
 

@@ -715,6 +715,28 @@ class TestContactQualityGate(unittest.TestCase):
         by_email = {c.email: c for c in record.contacts if c.email}
         self.assertIn("md@wfmu.org", by_email)
 
+    def test_station_manager_name_only_contact_preserved(self):
+        # A name-only contact with a leadership role (no email) must survive
+        # the qualification gate and be deduplicated across pages, carrying
+        # exact source-URL evidence.
+        pages = [
+            _wfmu_staff_page(
+                "https://wfmu.org/reachout.html",
+                "Assistant General Manager<br>Michele Colomer"),
+            _wfmu_staff_page(
+                "https://wfmu.org/about",
+                "Michele Colomer<br>Assistant General Manager"),
+        ]
+        record = build_intelligence_record(_bare_station(), pages)
+        micheles = [c for c in record.contacts if c.name == "Michele Colomer"]
+        self.assertEqual(len(micheles), 1,
+                         "station_manager contact should be preserved")
+        self.assertEqual(micheles[0].role, "station_manager")
+        # Exact source URLs preserved as provenance evidence.
+        sources = {p.get("source_url") for p in micheles[0].provenance}
+        self.assertIn("https://wfmu.org/reachout.html", sources)
+        self.assertIn("https://wfmu.org/about", sources)
+
 
 if __name__ == "__main__":
     unittest.main()
