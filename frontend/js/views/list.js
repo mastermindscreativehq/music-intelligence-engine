@@ -6,9 +6,107 @@
 
 import { api, ApiError } from "../api.js";
 import { chips, el } from "../dom.js";
-import { stationHref } from "../router.js";
+import { outreachHref, stationHref } from "../router.js";
 
 const LIMIT_CHOICES = [25, 50, 100, 200];
+
+/* Best available route for sending music to a station, in priority order
+ * (submission page -> verified email -> contact page -> program/DJ page).
+ * Only discovered URLs and verified emails are used; nothing is guessed. */
+function submissionPages(usefulPages) {
+  return (usefulPages || []).filter((p) => p
+    && typeof p.url === "string" && /^https?:\/\//i.test(p.url)
+    && (p.category === "send_music"
+      || p.category === "submission_guidelines"));
+}
+
+function bestCategoryPage(usefulPages, category) {
+  const pages = (usefulPages || []).filter((p) => p
+    && p.category === category
+    && typeof p.url === "string" && /^https?:\/\//i.test(p.url));
+  const usable = pages.filter((p) => (p.label && p.label.trim().length > 2));
+  return usable[0] || null;
+}
+
+function resolveBestRoute(intel, contactsPayload) {
+  const canonical = intel && intel.submission && intel.submission.submission_url;
+  if (canonical && canonical.value
+    && /^https?:\/\//i.test(String(canonical.value))) {
+    return {
+      url: canonical.value,
+      label: canonical.source_type === "official_website_page"
+        ? "official submission page" : "verified submission page",
+      role: "music_submission",
+    };
+  }
+  const submissionPage = submissionPages(intel && intel.useful_pages)[0] || null;
+  if (submissionPage) {
+    return {
+      url: submissionPage.url,
+      label: submissionPage.label || "submission page",
+      role: "music_submission",
+    };
+  }
+  const withEmail = (contactsPayload && contactsPayload.contacts || [])
+    .filter((c) => c && c.email && String(c.email).trim());
+  const firstEmail = withEmail[0] || null;
+  if (firstEmail) {
+    return {
+      contact: firstEmail,
+      label: (firstEmail.role && firstEmail.role.replace(/_/g, " "))
+        || "station contact",
+      role: "email",
+    };
+  }
+  const contactPage = bestCategoryPage(intel && intel.useful_pages, "contact");
+  if (contactPage) {
+    return {
+      url: contactPage.url,
+      label: contactPage.label || "contact page",
+      role: "station_contact",
+    };
+  }
+  const djPage = bestCategoryPage(intel && intel.useful_pages, "dj_directory")
+    || bestCategoryPage(intel && intel.useful_pages, "programming");
+  if (djPage) {
+    return {
+      url: djPage.url,
+      label: djPage.label || "program page",
+      role: "station_program_page",
+    };
+  }
+  return null;
+}
+
+/* Add the station's best route to the outreach list and open it. */
+async function sendMusic(identityKey, stationName, basket) {
+  const [intel, contactsPayload] = await Promise.all([
+    api.intelligence(identityKey),
+    api.contacts(identityKey),
+  ]);
+  const route = resolveBestRoute(intel, contactsPayload);
+  if (!route) return null;
+  const uid = `st_${identityKey.replace(/[^a-z0-9]+/gi, "_")}`;
+  const recipient = {
+    contact_uid: uid,
+    identity_key: identityKey,
+    station_name: stationName,
+    name: (typeof route.label === "string"
+      ? route.label.replace(/^official /, "") : "route") || "route",
+    role: route.role,
+    email: route.contact ? String(route.contact.email).trim() : "",
+    source_url: route.contact
+      ? (route.contact.source_url || null) : null,
+    outreach_class: route.role === "email" ? "email" : "webform",
+    submission_url: route.url || null,
+    route_kind: route.role === "email" ? "email"
+      : route.role === "station_contact" ? "contact"
+      : route.role === "station_program_page" ? "dj" : "webform",
+    route_label: route.label,
+  };
+  basket.add(recipient);
+  return recipient;
+}
 
 function errorBanner(error) {
   const detail = error instanceof ApiError
@@ -74,7 +172,27 @@ function locationOf(station) {
     .filter(Boolean).join(", ") || "—";
 }
 
-function resultRow(station) {
+function resultRow(station, basket) {
+  let sendButton;
+  const onClick = async () => {
+    if (sendButton.disabled) return;
+    sendButton.disabled = true;
+    sendButton.textContent = "adding…";
+    try {
+      const recipient = await sendMusic(
+        station.identity_key, station.name, basket);
+      if (recipient) {
+        window.location.hash = outreachHref([recipient.contact_uid]);
+        return;
+      }
+      /* No route: land on the station page where the honest state is shown. */
+      window.location.hash = stationHref(station.identity_key);
+    } catch (error) {
+      window.location.hash = stationHref(station.identity_key);
+    }
+  };
+  sendButton = el("button", { class: "subtle buttonish", onClick },
+    "Send music");
   return el(
     "tr",
     { class: "station-row" },
@@ -86,8 +204,7 @@ function resultRow(station) {
     el("td", {}, chips(station.formats)),
     el("td", { class: "dim" }, locationOf(station)),
     el("td", { class: "actions-cell" },
-      el("a", { class: "subtle buttonish", href: stationHref(station.identity_key) },
-        "Send music")),
+      sendButton),
   );
 }
 
@@ -113,7 +230,7 @@ export function renderListView(root, basket) {
             el("th", {}, "formats"), el("th", {}, "location"),
             el("th", {}, "submit"))),
           el("tbody", {},
-            (data.stations || []).map((station) => resultRow(station)))),
+            (data.stations || []).map((station) => resultRow(station, basket)))),
         pagination(data));
     } catch (error) {
       resultsCard.replaceChildren(el("h2", {}, "Stations"), errorBanner(error));

@@ -122,6 +122,23 @@ function bestSubmissionRoute(intel, usefulPages) {
   return null;
 }
 
+/* When a station publishes no submission page, its official contact page (or
+ * program/DJ page) is the honest available route — staged for outreach
+ * instead of a misleading "no route" state. Same shape as
+ * bestSubmissionRoute. Never constructs a route. */
+function fallbackStationRoute(usefulPages) {
+  const page = bestOfCategory(usefulPages, "contact")
+    || bestOfCategory(usefulPages, "dj_directory")
+    || bestOfCategory(usefulPages, "programming");
+  if (!page) return null;
+  return {
+    url: page.url,
+    label: page.label || "station contact page",
+    source: page,
+    verified: page.reachable === true,
+  };
+}
+
 /* Junk rejection for curated useful pages. Each category only surfaces a
  * page whose label/URL genuinely belongs to that category — never donate/
  * blog/news/about/events/merch/personal-profile/archive/random-dir pages. */
@@ -320,9 +337,13 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
         el("span", { class: "dim action-sub" }, detail.domain ?? website))));
   }
 
-  /* Add-to-campaign is only actionable when a real outreach route exists
-   * (verified email decision-maker or verified web-form submission route). */
-  if (ranked.some((c) => isActionable(c)) || (route && route.verified)) {
+  /* Add-to-campaign is actionable when any real station-published route
+   * exists: a verified email decision-maker, a verified submission page,
+   * an official contact page, or a program/DJ page. */
+  const campaignRoute = route && route.verified
+    ? route
+    : fallbackStationRoute(usefulPages);
+  if (ranked.some((c) => isActionable(c)) || campaignRoute) {
     tiles.push(el("span", { class: "action-tile action-staged" },
       el("button", {
         class: "primary inline",
@@ -572,17 +593,19 @@ function addAllToCampaign(detail, contactsPayload, identityKey, basket) {
   return staged;
 }
 
-/* A URL-only station (no verified email decision-maker, e.g. WFMU) is still
- * selectable for outreach through its VERIFIED music-submission/contact web
- * form. This computes a stable selection uid (never a fabricated contact —
- * the real artifact is the verified submission_url). */
+/* A URL-only station (no verified email decision-maker, e.g. WFMU/WXYC) is
+ * still selectable for outreach through a VERIFIED station-published route:
+ * its music-submission web form, or failing that its official contact page.
+ * This computes a stable selection uid (never a fabricated contact — the
+ * real artifact is the verified route URL). */
 function webformCampaignRecipient(contactsPayload, identityKey, intel,
   usefulPages, basket) {
   const anyVerifiedEmail = (contactsPayload.contacts || [])
     .some((c) => isKeyContact(c) && verifiedEmail(c));
   if (anyVerifiedEmail) return null;          // email route exists: prefer it
 
-  const route = bestSubmissionRoute(intel, usefulPages);
+  const route = bestSubmissionRoute(intel, usefulPages)
+    || fallbackStationRoute(usefulPages);
   if (!route || !route.verified) return null; // only a VERIFIED exact URL counts
   const uid = "wf_" + String(route.url).replace(/[^a-z0-9]+/gi, "_");
   if (basket.has(uid)) return { contact_uid: uid, added: false };
@@ -591,7 +614,7 @@ function webformCampaignRecipient(contactsPayload, identityKey, intel,
     identity_key: identityKey,
     station_name: contactsPayload.station_name,
     name: typeof route.label === "string"
-      ? route.label.replace(/^official /, "") : "station submission page",
+      ? route.label.replace(/^official /, "") : "station web form",
     role: "musical_submission",
     email: "",
     source_url: route.source && route.source.source_url

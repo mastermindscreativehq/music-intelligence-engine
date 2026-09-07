@@ -534,3 +534,27 @@ a.open-route:hover { filter: brightness(1.08); }
 .table-card-actions a { margin-left: auto; }
 .table-card-body { margin-top: 6px; }
 
+/* Outreach list (action-first saved stations) */
+button.buttonish {
+  display: inline-block;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--accent);
+  background: var(--panel-2);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+}
+button.buttonish:hover { border-color: var(--accent); background: var(--panel-2); }
+.outreach-card { display: grid; gap: 6px; }
+.outreach-head {
+  display: flex; gap: 8px; align-items: baseline;
+  justify-content: space-between; flex-wrap: wrap;
+}
+.outreach-head .station-name { font-size: 16px; font-weight: 600; color: var(--accent); text-decoration: none; }
+.outreach-head .station-name:hover { text-decoration: underline; }
+.outreach-detail { display: grid; gap: 4px; }
+.outreach-route { font-size: 13px; word-break: break-word; }
+

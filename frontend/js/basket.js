@@ -77,6 +77,9 @@ export class Basket {
       outreach_class: recipient.outreach_class
         || (recipient.submission_url ? "webform" : "email"),
       submission_url: recipient.submission_url ?? null,
+      route_kind: recipient.route_kind ?? null,
+      route_label: recipient.route_label ?? null,
+      website: recipient.website ?? null,
     });
     this._save();
     return true;
