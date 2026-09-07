@@ -97,7 +97,7 @@ function emptyView() {
         "Your outreach list is empty. Search for a station and click ",
         "\"Send music\" to get started."),
       el("div", { class: "actions-row" },
-        el("a", { class: "primary", href: "#/" }, "Find stations")));
+        el("a", { class: "primary", href: "#/" }, "Find stations")))
   ];
 }
 
