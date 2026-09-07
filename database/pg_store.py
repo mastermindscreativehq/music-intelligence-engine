@@ -60,10 +60,14 @@ from database.service import (
 # on a reserved-TLD suffix or is absent.
 _DEV_HOST_SUFFIXES = (".example", ".test", ".invalid", ".localhost", ".local")
 _DEV_HOST = "LOWER(COALESCE(NULLIF(domain, ''), NULLIF(website, '')))"
+# psycopg parses ``%`` in statement text as a placeholder marker; a literal
+# LIKE wildcard must be escaped as ``%%`` (which psycopg passes through as a
+# single ``%`` to the server). The SQLite twin in database.service carries the
+# same patterns with single ``%`` because sqlite3 has no placeholder grammar.
 _DEV_FIXTURE_EXCLUSION_SQL = (
-    "identity_key NOT LIKE 'namegeo:%' AND "
+    "identity_key NOT LIKE 'namegeo:%%' AND "
     + " AND ".join(
-        f"{_DEV_HOST} IS NOT NULL AND {_DEV_HOST} NOT LIKE '%{suffix}' "
+        f"{_DEV_HOST} IS NOT NULL AND {_DEV_HOST} NOT LIKE '%%{suffix}' "
         "ESCAPE '\\'"
         for suffix in _DEV_HOST_SUFFIXES))
 
