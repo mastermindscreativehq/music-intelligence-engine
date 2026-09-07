@@ -900,6 +900,100 @@ class TestStaffDirectoryIntegration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Real-page regression: WFMU reachout/mailus/about contact-labels
+# ---------------------------------------------------------------------------
+
+class TestReachoutHeadingsNotContacts(unittest.TestCase):
+    """Page headings / navigation labels in the navigation sidebar must
+    never become decision-maker contacts, while real staff are preserved.
+
+    Regression for the stale production rows such as "Swag Inquiries" ->
+    music_director, "Our Esteemed Staff" -> program_director, and
+    "Advanced Search" / "Pledge Page." -> dj that were accidentally
+    persisted by an earlier run.
+    """
+
+    def _page_from_lines(self, lines):
+        return _page("https://wfmu.org/reachout.html",
+                     title="Staff", text="\n".join(lines))
+
+    def test_navigation_heading_labels_rejected(self):
+        text = (
+            "Our Esteemed Staff\n"
+            "Station Manager & Program Director\n"
+            "Ken Freedman\n"
+            "Assistant General Manager\n"
+            "Michele Colomer\n"
+            "Listener Services Director &\n"
+            "Swag Inquiries\n"
+            "Joe McGasko\n"
+        )
+        page = self._page_from_lines(text.splitlines())
+        entries = extract_staff_entries(page)
+        names = {e["name"] for e in entries}
+        self.assertIn("Ken Freedman", names)
+        self.assertIn("Michele Colomer", names)
+        # Heading / label strings must never surface as named contacts.
+        for bad in ("Our Esteemed Staff", "Swag Inquiries",
+                    "Listener Services Director &"):
+            self.assertNotIn(bad, names)
+
+    def test_assistant_general_manager_role_recognized(self):
+        """'Assistant General Manager' is a single pure role line, so
+        Michele Colomer below it is preserved with a leadership role."""
+        page = self._page_from_lines(
+            "Assistant General Manager\nMichele Colomer\n".splitlines())
+        entries = extract_staff_entries(page)
+        by_name = {e["name"]: e for e in entries}
+        self.assertIn("Michele Colomer", by_name)
+        self.assertEqual(by_name["Michele Colomer"]["role"],
+                         "station_manager")
+
+    def test_swag_inquiries_never_a_music_director(self):
+        """The nav-label 'Swag Inquiries' next to a DJ/role context must not
+        be classified music_director (as it was in stale prod data)."""
+        page = self._page_from_lines(
+            "Swag Inquiries\nJessica Romoff\nMusic Director\n".splitlines())
+        entries = extract_staff_entries(page)
+        names = {e["name"] for e in entries if e.get("name")}
+        self.assertNotIn("Swag Inquiries", names)
+
+    def test_nbsp_and_trailing_punctuation_names_normalized(self):
+        """Unicode non-breaking spaces and trailing periods must not create
+        distinct-looking duplicates of the same person."""
+        from enrichment.staff_directory import _clean_name
+        self.assertEqual(_clean_name("Ken\xa0Freedman."), "Ken Freedman")
+        self.assertEqual(_clean_name("Ken\xa0Freedman"),
+                         "Ken Freedman")
+        self.assertEqual(_clean_name("Ken Freedman,"), "Ken Freedman")
+
+
+class TestContactUidNormalization(unittest.TestCase):
+    """contact_uid must treat NBSP/trailing-punctuation variants of the same
+    name as the same contact so storage dedups them."""
+
+    def test_nbsp_variant_same_uid(self):
+        from database.service import contact_uid
+        a = contact_uid("domain:wfmu.org",
+                        {"name": "Ken\xa0Freedman.", "role": "program_director",
+                         "email": None, "source_url": "https://wfmu.org/x"})
+        b = contact_uid("domain:wfmu.org",
+                        {"name": "Ken Freedman", "role": "program_director",
+                         "email": None, "source_url": "https://wfmu.org/x"})
+        self.assertEqual(a, b)
+
+    def test_trailing_period_variant_same_uid(self):
+        from database.service import contact_uid
+        a = contact_uid("domain:wfmu.org",
+                        {"name": "Jessica Romoff.", "role": "music_director",
+                         "email": None, "source_url": "https://wfmu.org/x"})
+        b = contact_uid("domain:wfmu.org",
+                        {"name": "Jessica Romoff", "role": "music_director",
+                         "email": None, "source_url": "https://wfmu.org/x"})
+        self.assertEqual(a, b)
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 

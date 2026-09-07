@@ -195,11 +195,13 @@ def normalize_intelligence_record(record: dict) -> tuple[dict, str, str]:
 
 def contact_uid(identity: str, contact: dict) -> str:
     """Deterministic content identity for one contact row."""
+    name = str(contact.get("name") or "")
+    name = name.replace("\xa0", " ").replace("\u200b", "")
     parts = [
         identity,
         str(contact.get("email") or "").strip().lower(),
         str(contact.get("phone") or "").strip(),
-        str(contact.get("name") or "").strip().lower(),
+        " ".join(name.split()).strip().lower().rstrip(",."),
         str(contact.get("role") or ""),
         str(contact.get("source_url") or "").strip(),
     ]

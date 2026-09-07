@@ -29,6 +29,21 @@ from enrichment.roles import (
 )
 from enrichment.staff_directory import _NAVIGATION_WORDS
 
+def normalize_contact_name(name: str) -> str:
+    """Normalize a contact name for dedup and storage.
+
+    Replaces unicode whitespace (NBSP, thin space, etc.) with a regular
+    space, strips trailing punctuation (periods, commas, semicolons),
+    and collapses runs of whitespace.  This prevents duplicate rows from
+    minor textual variants such as "Ken\\xa0Freedman." vs "Ken Freedman".
+    """
+    name = re.sub(r"[\xa0\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u202f\u205f\u3000]+",
+                  " ", name)
+    name = name.rstrip(".,;:!?")
+    name = " ".join(name.split())
+    return name.strip()
+
+
 NAME_PATTERN = re.compile(
     r"\b([A-Z][a-z]+(?:'(?:[A-Za-z])+)?(?:[- ][A-Za-z]+)*"
     r"(?:\s+(?:de|van|von|del|da|di|le)\s+[A-Z][a-z]+(?:[- ][A-Za-z]+)*)*"
@@ -89,7 +104,7 @@ def extract_contact_names(text: str) -> list[tuple[str, str]]:
     results: list[tuple[str, str]] = []
 
     def clean(name: str) -> str | None:
-        name = " ".join(name.strip(" .,-").split())
+        name = normalize_contact_name(name)
         # Reject obvious non-person matches (e.g., "The Station", ALLCAPS).
         if not 2 <= len(name.split()) <= 4:
             return None

@@ -166,9 +166,22 @@ _NAME_RE = re.compile(
 )
 
 
+def _clean_name(name: str) -> str:
+    """Normalize a person-name string: unicode NBSP -> space, strip
+    trailing punctuation, collapse whitespace.  Prevents duplicate rows
+    from minor textual variants (e.g. ``Ken\\xa0Freedman.`` == `` Ken
+    Freedman``) and keeps the dedup key stable."""
+    name = re.sub(
+        r"[\xa0\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+        r"\u200b\u202f\u205f\u3000]+",
+        " ", name)
+    name = name.rstrip(".,;:!?")
+    return " ".join(name.split()).strip()
+
+
 def _looks_like_person_name(text: str) -> bool:
     """Conservative check: does *text* look like a person's name?"""
-    text = text.strip().rstrip(",.")
+    text = _clean_name(text).rstrip(",.")
     if not text:
         return False
     words = text.split()
@@ -211,6 +224,13 @@ def _is_role_only_line(text: str) -> bool:
     # Strip all role-keyword matches and check whether only connectors /
     # punctuation / whitespace remain.
     remaining = _ROLE_KEYWORDS.sub("", text)
+    # Role qualifiers / modifiers (assistant, associate, senior, deputy,
+    # co-, etc.) are role words, not person names — like "Assistant General
+    # Manager", which is a single pure role label.
+    remaining = re.sub(r"\b(?:assistant|associate|senior|junior|deputy|"
+                       r"principal|lead|chief|head|alternate|co-?|"
+                       r"guest|resident|emeritus|interim|acting)\b",
+                       " ", remaining, flags=re.I)
     remaining = re.sub(r"[&/|,;:\s]+", "", remaining)
     remaining = re.sub(r"[-\u2013\u2014()]", "", remaining)
     return not remaining
@@ -294,7 +314,7 @@ def extract_staff_entries(page: ParsedPage) -> list[dict]:
 
         # --- Pattern C: Name on its own line, role + contact below -------
         if _looks_like_person_name(line):
-            name = line
+            name = _clean_name(line)
             role_text = None
             email = None
             phone = None
@@ -389,7 +409,7 @@ def _entry_from_name_role(
     Scans nearby lines for email (primary) and phone (secondary, only
     when an email is also found) to complete the entry.
     """
-    name = name.strip().rstrip(",.")
+    name = _clean_name(name)
     if not name or name.lower() in used_names:
         return None
     role = classify_role(role_text)
@@ -430,11 +450,14 @@ def _format_phone(raw: str) -> str:
 
 
 # Roles that justify keeping a name-only entry (no email) — these are
-# music-programming-relevant positions worth preserving for future passes.
+# music-programming-relevant positions worth preserving for future passes,
+# plus station/leadership decision-makers (general/station managers) who are
+# legitimate organizational contacts even without a music title.
 _MUSIC_RELEVANT_ROLES = {
     "music_director", "program_director", "music_programmer",
     "music_submission", "programming", "music_scheduler",
     "music_coordinator", "host", "dj",
+    "station_manager", "general_manager",
 }
 
 
