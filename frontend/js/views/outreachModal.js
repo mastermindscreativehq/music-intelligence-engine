@@ -138,7 +138,7 @@ function recipientContext(recipient, email) {
     el("span", { class: "oc-label" }, "Email"),
     el("span", { class: "email-readonly" },
       el("span", { class: "verified" }, email),
-      el("span", { class: "verified-badge", title: "Exact address stored in verified backend evidence" },
+      el("span", { class: "verified-badge", title: "Exact address published by the station" },
         "✓ verified"),
       el("span", { class: "dim" }, "read-only")));
 
@@ -154,7 +154,7 @@ function recipientContext(recipient, email) {
       el("span", {}, station)),
     emailLine,
     el("div", { class: "oc-line" },
-      el("span", { class: "oc-label" }, "Evidence"),
+      el("span", { class: "oc-label" }, "Source"),
       evidence
         ? el("a", { href: evidence, target: "_blank",
           rel: "noopener noreferrer" }, evidence)
@@ -163,8 +163,8 @@ function recipientContext(recipient, email) {
 
   return el("section", { class: "oc-panel" },
     el("div", { class: "oc-panel-title" },
-      el("span", {}, "Verified recipient"),
-      el("span", { class: "dim" }, "evidence-backed, read-only")),
+      el("span", {}, "Recipient"),
+      el("span", { class: "dim" }, "read-only")),
     el("div", { class: "outreach-context" }, ...lines));
 }
 
@@ -273,7 +273,7 @@ export function openOutreachModal(recipient) {
         el("span", {}, "Your message"),
         el("span", { class: "dim" }, "edit freely before handing off")),
       el("button", { class: "oc-greeting-btn", onClick: addGreeting },
-        "Add personalized greeting from verified evidence"),
+        "Add personalized greeting"),
       el("label", { class: "field" },
         el("span", {}, "From (your email)"),
         fromInput,

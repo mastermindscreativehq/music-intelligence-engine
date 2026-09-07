@@ -1,10 +1,8 @@
-/* Operator console bootstrap.
+/* Music Intelligence Engine bootstrap.
  *
- * Wires the hash router, the recipient basket panel, and the schema badge
- * from the live /api/v1/health endpoint. No configuration, no secrets, no
- * mock data: every number and label on screen comes from the backend. */
+ * Wires the hash router and the outreach basket panel. No configuration,
+ * no secrets, no mock data: every station shown comes from the backend. */
 
-import { api, ApiError } from "./api.js";
 import { Basket } from "./basket.js";
 import { el } from "./dom.js";
 import { outreachHref, startRouter } from "./router.js";
@@ -17,22 +15,21 @@ import { renderTracksView } from "./views/tracks.js";
 const viewRoot = document.getElementById("view");
 const basketPanel = document.getElementById("basket-panel");
 const basketCount = document.getElementById("basket-count");
-const schemaBadge = document.getElementById("schema-badge");
 
 const basket = new Basket(window.sessionStorage);
 
 function renderHeader(items) {
-  basketCount.textContent = `recipients: ${items.length}`;
+  basketCount.textContent = `outreach list: ${items.length}`;
 }
 
 function renderBasketPanel(items) {
   if (items.length === 0) {
     basketPanel.replaceChildren(
       el("section", { class: "card" },
-        el("h2", {}, "Selected recipients"),
+        el("h2", {}, "Your outreach list"),
         el("p", { class: "dim" },
-          "Open a station to add contacts. Selection is local to this ",
-          "browser session; nothing is sent by this application.")));
+          "Open a station and pick a verified way to send your music. ",
+          "Stations you add show up here.")));
     return;
   }
 
@@ -46,15 +43,14 @@ function renderBasketPanel(items) {
 
   basketPanel.replaceChildren(
     el("section", { class: "card" },
-      el("h2", {}, `Recipients (${items.length})`),
+      el("h2", {}, `Outreach list (${items.length})`),
       items.map((item) =>
         el("div", { class: "recipient-item" },
           el("span", {},
-            item.name || "(unnamed contact)",
+            item.station_name || item.name || "(unnamed station)",
             el("div", { class: "recipient-meta" },
-              `${item.station_name ?? ""}`
-              + `${item.role ? " · " + item.role : ""}`,
-              item.email ? item.email : "")),
+              item.email ? item.email
+                : (item.submission_url ? "submission page" : ""))),
           el("span", {},
             el("button", {
               class: "linkish",
@@ -65,22 +61,6 @@ function renderBasketPanel(items) {
 
 basket.subscribe(renderBasketPanel);
 basket.subscribe(renderHeader);
-
-async function refreshSchemaBadge() {
-  try {
-    const data = await api.health();
-    schemaBadge.textContent =
-      `API online · storage schema v${data.schema_version}`;
-    schemaBadge.className = "badge badge-accent";
-    schemaBadge.title = "GET /api/v1/health";
-  } catch (error) {
-    const detail = error instanceof ApiError ? error.message : String(error);
-    schemaBadge.textContent = `API unreachable (${detail})`;
-    schemaBadge.className = "badge badge-fail";
-    schemaBadge.title = "GET /api/v1/health failed — see message";
-  }
-}
-refreshSchemaBadge();
 
 startRouter(viewRoot, {
   list(root) {

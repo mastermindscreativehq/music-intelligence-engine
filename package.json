@@ -1,0 +1,11 @@
+{
+  "name": "music-intelligence-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Find radio stations, find real music submission/contact routes, and run music outreach.",
+  "scripts": {
+    "dev": "python -m backend.webapp --db data/music-intelligence.db",
+    "start": "python -m backend.webapp --db data/music-intelligence.db",
+    "test": "python -m unittest discover -s tests -v"
+  }
+}

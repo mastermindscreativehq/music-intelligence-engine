@@ -20,7 +20,6 @@
 import { api, ApiError } from "../api.js";
 import {
   chips,
-  confidenceBar,
   el,
   fmtList,
   fmtPct,
@@ -41,12 +40,6 @@ function errorBanner(error) {
     "Could not load this station. ", el("strong", {}, detail));
 }
 
-function statusSpan(status) {
-  return el("span",
-    { class: `status-${STATUS_CLASSES.includes(status) ? status : "unverified"}` },
-    String(status ?? "unknown"));
-}
-
 function externalLink(url, text) {
   return el("a", {
     href: url,
@@ -65,8 +58,6 @@ function locationOf(detail) {
  * ------------------------------------------------------------------------- */
 
 function overviewSection(detail) {
-  const lowIntel = typeof detail.confidence_score !== "number"
-    || detail.confidence_score <= 0;
   const location = locationOf(detail);
   return el("section", { class: "card detail-head" },
     el("h1", {}, detail.name || "(unnamed station)"),
@@ -74,18 +65,9 @@ function overviewSection(detail) {
       detail.website
         ? externalLink(detail.website, detail.domain ?? detail.website)
         : el("span", { class: "dim" }, "no website on record"),
-      location ? el("span", {}, ` · ${location}`) : null),
+      detail.website && location ? el("span", {}, ` · ${location}`) : null),
     el("div", { class: "overview-row" },
-      chips(detail.genres), " ", chips(detail.formats)),
-    el("div", { class: "actions-row" },
-      confidenceBar(detail.confidence_score),
-      el("span", {}, `overall ${fmtPct(detail.confidence_score)} · `),
-      statusSpan(detail.status)),
-    lowIntel
-      ? el("p", { class: "dim note-honest" },
-        "Limited intelligence available — no enrichment has been recorded "
-        + "for this station yet.")
-      : null);
+      chips(detail.genres), " ", chips(detail.formats)));
 }
 
 /* ---------------------------------------------------------------------------
@@ -236,150 +218,21 @@ function usefulPagesCard(usefulPages, canonicalRoute) {
   const rows = curatedUsefulPages(usefulPages, canonicalRoute);
   const suppressedSubmission = submissionPageSuppressed(canonicalRoute);
   return el("section", { class: "card" },
-    el("h2", {}, "Useful pages"),
+    el("h2", {}, "Pages on this station's site"),
     el("p", { class: "dim" },
-      "The few highest-value station pages the engine verified — each opens "
-      + "the exact discovered URL, never a guessed route."),
+      "Submission, DJ, programming, and contact pages we found on the ",
+      "station's own website."),
     rows.length
       ? el("div", { class: "up-list" },
         rows.map((r) => usefulPageRow(r.best)))
       : el("p", { class: "dim" },
         suppressedSubmission
-          ? "No verified useful pages beyond the best submission route "
-            + "already shown above."
-          : "No verified useful pages were discovered."));
+          ? "No additional pages beyond the submission route already shown."
+          : "No submission or contact pages were found."));
 }
 
 /* ---------------------------------------------------------------------------
- * Section 2 — Outreach intelligence (evidence model, Phase 11)
- *
- * Renders the station's derived intelligence exactly as computed by the
- * backend: level, the single best outreach route, alternatives, and — always
- * — what is still unknown. Nothing here invents a route; when no verified
- * route exists the no-route state is shown head-on (differs from the
- * best-action tiles by design).
- * ------------------------------------------------------------------------- */
-
-const PRIORITY_LABEL = {
-  1: "P1 · Direct music submission",
-  2: "P2 · Music contact",
-  3: "P3 · General contact",
-  4: "P4 · DJ / program directory",
-};
-const LEVEL_BADGE_CLASS = {
-  ACTIONABLE: "intel-actionable",
-  LIMITED: "intel-limited",
-  INSUFFICIENT_EVIDENCE: "intel-insufficient",
-  VERIFIED: "intel-verified",
-  RAW: "intel-raw",
-  UNKNOWN: "intel-raw",
-};
-
-function routeLink(route) {
-  const value = String(route.value || "");
-  if (/^https?:/i.test(value)) {
-    return externalLink(value, route.title || value);
-  }
-  if (/^mailto:/i.test(value)) {
-    return externalLink(value, route.title || value.replace(/^mailto:/, ""));
-  }
-  return el("span", {}, route.title || value || "—");
-}
-
-function routeChip(route) {
-  return el("span", {
-    class: "chip evidence",
-    title: route.evidence || "",
-  }, route.verification_state || route.evidence_state || "UNKNOWN");
-}
-
-function routeRow(route) {
-  return el("div", { class: "route-row" },
-    el("span", { class: "route-priority" },
-      PRIORITY_LABEL[route.priority] || `P${route.priority} · Route`),
-    el("div", { class: "route-body" },
-      el("div", { class: "route-title" },
-        routeLink(route),
-        routeChip(route)),
-      el("div", { class: "dim route-why" }, route.why || "")));
-}
-
-function unknownList(unknowns) {
-  if (!unknowns || !unknowns.length) return null;
-  return el("div", { class: "unknown-list" },
-    el("span", { class: "dim unknown-label" }, "Still unknown: "),
-    unknowns.map((item) => el("span", { class: "chip" }, item)));
-}
-
-/* Re-exported label kept as its own function so the honest copy stays
- * pinned at one spelling across cases. */
-function unverifiedLabel() {
-  return "No verified outreach route";
-}
-
-function outreachIntelligenceCard(detail, intel) {
-  const level = String(intel.intelligence_level || "UNKNOWN");
-  const reason = intel.intelligence_level_reason || "";
-  const rec = intel.outreach_recommendation || null;
-  const routes = intel.outreach_routes || [];
-  const primary = rec && rec.route ? rec.route : null;
-  const alternatives = (primary ? routes.filter((r) => r !== primary)
-    : routes).filter((r) => Boolean(r.value)
-      || r.verification_state === "ACTIONABLE");
-
-  const levelBadge = el("span", {
-    class: `chip intel-level ${LEVEL_BADGE_CLASS[level] || "intel-raw"}`,
-  }, level);
-
-  const verifiedBlock = el("div", { class: "intel-verified" },
-    el("h3", {}, "WHAT WE VERIFIED"),
-    el("div", { class: "verified-line" }, levelBadge,
-      el("span", { class: "dim" }, reason || "No evidence recorded.")));
-
-  const body = [verifiedBlock];
-
-  if (primary) {
-    body.push(el("div", { class: "intel-best" },
-      el("h3", {}, "BEST OUTREACH ROUTE"),
-      routeRow(primary),
-      el("div", { class: "dim intel-why" },
-        el("strong", {}, "Why: "), rec.why || primary.why || "",
-        " · Confidence: ", el("strong", {}, rec.confidence || "—")),
-      Array.isArray(rec.evidence) && rec.evidence.length
-        ? el("div", { class: "dim evidence-row" },
-          "Evidence: ", el("span", {}, rec.evidence.join("; ")))
-        : null));
-  } else {
-    body.push(el("div", { class: "intel-none" },
-      el("h3", {}, "BEST OUTREACH ROUTE"),
-      el("p", { class: "dim" }, unverifiedLabel() + " for this station yet. "
-        + "The record has been inspected; no verified path to invite music "
-        + "was found, so no route is staged.")));
-  }
-
-  const shownAlts = alternatives.slice(0, 5);
-  if (shownAlts.length) {
-    body.push(el("div", { class: "intel-alts" },
-      el("h3", {}, "ALTERNATIVE ROUTES"),
-      el("div", {}, shownAlts.map(routeRow))));
-  }
-
-  body.push(el("div", { class: "intel-unknown" },
-    el("h3", {}, "WHAT IS UNKNOWN"),
-    unknownList(rec && rec.unknown)
-    || el("p", { class: "dim" }, "Nothing else outstanding is documented.")));
-
-  return el("section", { class: "card", id: "station-outreach-intel" },
-    el("h2", {}, "Outreach intelligence"),
-    el("p", { class: "dim" },
-      "Evidence-backed picture of how this station accepts music outreach — "
-      + "what the engine verified, the best recorded route, and what is still "
-      + "unknown."),
-    el("div", { class: "intel-body" }, body));
-}
-
-/* ---------------------------------------------------------------------------
- * Section 3 — Best Actions
+ * Section 2 — Best Actions
  * ------------------------------------------------------------------------- */
 
 function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
@@ -483,10 +336,10 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
   }
 
   return el("section", { class: "card action-bar", id: "station-actions" },
-    el("h2", {}, "Best actions"),
+    el("h2", {}, "Send your music"),
     el("p", { class: "dim" },
-      "Evidence-backed next steps from the station site — nothing here "
-      + "is guessed."),
+      "Real submission routes and contact points this station actually ",
+      "publishes."),
     el("div", { class: "action-grid" }, tiles));
 }
 
@@ -573,12 +426,6 @@ function roleTitle(role) {
   return String(role).replace(/_/g, " ");
 }
 
-function evidenceStateLabel(state) {
-  if (state === "VERIFIED") return "verified email";
-  if (state === "EVIDENCE-BACKED") return "phone on record";
-  return "on record";
-}
-
 function keyContactCard(contact, payload, identityKey, basket) {
   const uid = String(contact.contact_uid);
   const email = verifiedEmail(contact);
@@ -641,16 +488,9 @@ function keyContactCard(contact, payload, identityKey, basket) {
       contact.role && contact.role !== "unknown"
         ? el("span", { class: "chip", title: contact.role_reason || "" },
           contact.role) : null,
-      contact.evidence_state
-        ? el("span", { class: "chip evidence",
-          title: contact.role_reason || "" },
-          evidenceStateLabel(contact.evidence_state)) : null,
-      contact.route_class && contact.route_class !== "UNKNOWN_ROLE"
-        ? el("span", { class: "chip", title: "backend route classification" },
-          contact.route_class) : null,
       contact.preferred_for_submissions
         ? el("span", { class: "preferred-star",
-          title: "backend-flagged preferred_for_submissions" },
+          title: "flagged as the station's preferred submission contact" },
           "★ preferred")
         : null),
     el("div", { class: "route-status-line" }, routeStatus),
@@ -659,9 +499,6 @@ function keyContactCard(contact, payload, identityKey, basket) {
         externalLink(foundOn))
       : null,
     el("div", { class: "actions-row" },
-      el("span", { class: "dim" },
-        "Confidence ", el("strong", {}, fmtPct(contact.confidence_score))),
-      confidenceBar(contact.confidence_score),
       el("span", { class: "grow" }, null),
       reachControl));
 }
@@ -700,14 +537,14 @@ function keyContactsCard(contacts, payload, identityKey, basket) {
   }
 
   return el("section", { class: "card", id: "station-contacts" },
-    el("h2", {}, "Key contacts"),
+    el("h2", {}, "Music contacts"),
     el("p", { class: "dim" },
-      "Decision-makers and verified music-relevant people, ranked by "
-      + "evidence. No outreach route is invented."),
+      "Contact points this station actually publishes. We only show what we ",
+      "found on the station's own site."),
     cards.length
       ? cards
       : el("p", { class: "dim" },
-        "No verified music decision-maker found."));
+        "No published music contact found."));
 }
 
 /* ---------------------------------------------------------------------------
@@ -951,7 +788,6 @@ export function renderStationView(root, identityKey, basket) {
     const route = bestSubmissionRoute(intel, intel.useful_pages);
     root.replaceChildren(
       overviewSection(detail),
-      outreachIntelligenceCard(detail, intel),
       bestActionsCard(detail, intel, intel.useful_pages, contactsPayload),
       keyContactsCard(contactsPayload.contacts, contactsPayload,
         identityKey, basket),

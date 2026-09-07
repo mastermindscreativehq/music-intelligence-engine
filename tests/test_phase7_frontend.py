@@ -411,7 +411,7 @@ class TestStationUsefulPagesContract(unittest.TestCase):
         # The card must NEVER vanish on empty data; it must say so honestly.
         self.assertNotIn("if (pages.length === 0) return null",
                          self.src)
-        self.assertIn("No verified useful pages were discovered.", self.src)
+        self.assertIn("No submission or contact pages were found.", self.src)
         self.assertIn("function usefulPagesCard(usefulPages", self.src)
 
     def test_useful_pages_are_curated_to_a_handful_of_strict_categories(self):

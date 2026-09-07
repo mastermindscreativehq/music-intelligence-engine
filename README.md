@@ -1,173 +1,103 @@
 # Music Intelligence Engine
 
-A production-oriented **music industry intelligence & outreach platform**, designed to
-discover, enrich, verify, and score legitimate music-industry contacts — starting with
-**radio stations** — and to support careful, human-approved music outreach.
+Find a radio station → find a **real** way to send it your music → submit or
+start an outreach campaign → move to the next station.
 
-> **Current state: PHASES 1–11 COMPLETE (next: Phase 12 — Expansion).**
-> Phases 1–6: foundational architecture + docs; radio discovery engine;
-> radio website intelligence with bounded opt-in fetching; contact
-> extraction; SQLite storage + API; cross-source comparison, verification
-> workflow, optional Ollama layer; dual-backend (SQLite + PostgreSQL)
-> persistence and the FastAPI application.
-> Phase 7 adds the **zero-dependency operator console** (`frontend/`),
-> served same-origin by `backend.webapp` against the real API: search &
-> filter stations, inspect intelligence with confidence and source
-> attribution, review verification history, and select recipients.
-> Phase 8 — music submission with opaque-key asset addressing and accessible
-> reference links. Phase 9 — personalized, human-approved outreach.
-> Phase 10 — outreach tracking/history plus the intelligence-repair contract
-> set. Phase 11 — evidence-driven outreach intelligence: per-item evidence
-> states, the ranked P1–P4 route hierarchy, contact-route classes, per-useful-
-> page intelligence, honest station levels, a primary recommendation with
-> provenance, and dev-fixture quarantine from production display.
-> Phase 12 (next) reuses the same infrastructure for playlist curators, DJs,
-> blogs, publications, labels, A&R, festivals, events, and influencers.
+The engine discovers radio stations, records what the station itself publishes
+(website, location, genres, submission pages, contact emails), and **never
+invents** an email address, contact person, or submission route. If a route
+isn't published, the app says so plainly.
 
 ---
 
-## Mission
+## INSTALL
 
-Build a reusable intelligence platform for music-industry contacts. `radio_station` is the
-first target type plugged into the platform; playlist curators, DJs, blogs, publications,
-labels, A&R representatives, festivals, and influencers will reuse the same infrastructure.
-
-The core pipeline every target type passes through:
-
-```
-DISCOVER → CRAWL → EXTRACT → NORMALIZE → ENRICH → VERIFY → SCORE
-        → STORE → SEARCH → PERSONALIZE → APPROVE → OUTREACH → TRACK
-```
-
-## Core principles
-
-- **Modular by target type.** The pipeline is generic; radio is implementation #1.
-- **Deterministic first.** Normal code does crawling, normalization, validation, storage.
-  The local LLM (Ollama) is used only where semantic reasoning adds real value.
-- **Intelligence, not scraping.** Every fact keeps its source, extraction method,
-  confidence, verification status, and timestamp. *Found* ≠ *verified* ≠ *relevant*.
-- **Human in the loop.** No message is ever sent without review and approval.
-- **No premature infrastructure.** Dependencies and services are added per phase.
-
-## Directory structure
-
-| Directory     | Responsibility                                                        | Active from |
-|---------------|-----------------------------------------------------------------------|-------------|
-| `discovery/`  | Reusable discovery subsystem: requests, queries, providers, events    | Phase 2 ✓   |
-| `discovery/radio/` | Radio pipeline + enrichment engine + normalized intelligence schema | Phase 2–3 ✓ |
-| `crawler/`    | Deterministic HTTP retrieval, URL handling, focused page discovery    | Phase 2 ✓   |
-| `enrichment/` | Contact extraction/normalization, classification, dedup, confidence, formats/submissions intelligence | Phase 2–3 ✓ |
-| `backend/`    | Application/API layer: organizations, contacts, search, ingestion API, shared route table, operator server | Phase 6–7 ✓ |
-| `frontend/`   | Operator console: search, filter, inspect intelligence, select recipients | Phase 7 ✓   |
-| `outreach/`   | Campaign preparation, personalized messages, approval-gated sending, evidence-driven route intelligence | Phase 8–11 ✓ |
-| `database/`   | Dual-backend persistence (SQLite + PostgreSQL migrations)             | Phase 6 ✓   |
-| `n8n/`        | Workflow orchestration (small logical workflows, never one monolith)  | Phase 2+    |
-| `prompts/`    | Versioned LLM prompt templates                                        | Phase 5+    |
-| `docs/`       | Architecture, data model, roadmap, AI + radio-discovery docs          | now         |
-| `tests/`      | Test foundation (stdlib `unittest`; pytest may be adopted later)      | now         |
-
-Phase history: PHASE 1 — FOUNDATION (architecture/docs/config/test baseline);
-PHASE 2 — RADIO DISCOVERY ENGINE; PHASE 3 — RADIO INTELLIGENCE / ENRICHMENT;
-PHASE 4 — STORAGE + API (SQLite); PHASE 5 — ENRICHMENT & VERIFICATION;
-PHASE 6 — DATABASE / API (dual-backend + FastAPI);
-PHASE 7 — FRONTEND (operator console); PHASE 8 — MUSIC SUBMISSION;
-PHASE 9 — PERSONALIZED OUTREACH; PHASE 10 — OUTREACH TRACKING &
-INTELLIGENCE REPAIRS; PHASE 11 — EVIDENCE-DRIVEN OUTREACH INTELLIGENCE.
-
-## Technology stack
-
-| Layer          | Technology                                   | Status      |
-|----------------|----------------------------------------------|-------------|
-| Intelligence   | Python 3.14                                  | chosen      |
-| Local AI       | Ollama `0.32.14`, model `qwen2.5-coder:7b` @ `http://localhost:11434` | configured |
-| Backend API    | FastAPI 0.135 + Uvicorn (installed); stdlib reference server retained | Phase 6 ✓   |
-| Database       | SQLite reference backend; PostgreSQL / Supabase via psycopg (optional)| Phase 6 ✓   |
-| Frontend       | Zero-dependency vanilla ES modules; stdlib `backend.webapp`; strict CSP; no build step | Phase 7 ✓   |
-| Orchestration  | n8n                                          | Phase 2+    |
-
-## Local development
-
-Verified environment (Windows 11, PowerShell):
-
-- Python 3.14.0 — `C:\Python314\python.exe`
-- Node.js v24.10.0 / npm 11.6.1 (not required for Phases 1–7; the frontend is dependency-free)
-- Git 2.53.0 · Docker 29.6.2
-- Ollama 0.32.14 listening on `localhost:11434`
-
-Run the Phase 1 test suite (zero external dependencies required):
+Python 3.11+ is required. Everything else is pinned in `requirements.txt`:
 
 ```powershell
+python -m pip install -r requirements.txt
+```
+
+No `npm install` is needed — the frontend is dependency-free (no build step).
+
+## RUN
+
+From this directory:
+
+```powershell
+npm run dev
+```
+
+which is exactly the same as:
+
+```powershell
+python -m backend.webapp --db data\music-intelligence.db
+```
+
+The server runs on `127.0.0.1` on port **8788**.
+
+## OPEN
+
+    http://127.0.0.1:8788/
+
+From there:
+
+1. **Stations** — search and open a radio station.
+2. On a station page — see its website, location, genres, and the real
+   submission/contact pages and emails the engine found.
+3. **Send music** opens the station's own submission page; **Add to campaign**
+   stages a verified route for outreach.
+4. **My music** uploads the MP3 you want to pitch; **Outreach** drafts a
+   message and hands it to your own email client (the app never sends email).
+
+## Tests
+
+```powershell
+npm test
+# or
 python -m unittest discover -s tests -v
 ```
 
-Configuration lives in `.env` (create it from `.env.example`). `.env` is git-ignored;
-`.env.example` contains placeholders only.
+---
 
-## Roadmap
+## Environment variables (all optional)
 
-See [`docs/roadmap.md`](docs/roadmap.md). Summary:
+| Variable           | Purpose                                                          |
+|--------------------|------------------------------------------------------------------|
+| `MIE_DATABASE_PATH`| Path to a SQLite database (default used by `npm run dev`).      |
+| `MIE_PG_DSN`       | PostgreSQL/Supabase DSN when running against Postgres.           |
+| `MIE_WEB_HOST`     | Bind host (default `127.0.0.1`).                                |
+| `MIE_WEB_PORT`     | Port (default `8788`).                                          |
+| `MIE_API_BASE_URL` | Remote backend origin substituted at deploy time for the frontend (Vercel). |
 
-1. Foundation ✓
-2. Radio Discovery ✓
-3. Radio Website Intelligence ✓
-4. Contact Extraction ✓
-5. Enrichment & Verification ✓
-6. Database/API ✓
-7. Frontend ✓
-8. Music Submission ✓
-9. Personalized Outreach ✓
-10. Outreach Tracking ✓
-11. Evidence-Driven Outreach Intelligence ✓
-12. Expansion (curators, DJs, blogs, publications, labels, A&R, festivals, events, influencers) — next
+See `.env.example`. Copy it to `.env` only if you need to override defaults;
+the local app works with no `.env` at all.
 
-## Documentation
-
-- [Architecture](docs/architecture.md) — system boundaries, data flow, module responsibilities
-- [Radio Discovery Engine](docs/radio-discovery.md) — Phase 2 pipeline, retrieval rules, provider abstraction
-- [Radio Enrichment](docs/radio-enrichment.md) — Phase 3 enrichment engine, intelligence records, submission paths
-- [Data Model](docs/data-model.md) — entities, radio mapping, dedup strategy, confidence semantics
-- [AI Architecture](docs/ai-architecture.md) — Ollama role, deterministic-vs-AI rules, prompt conventions
-
-## Running the discovery engine (Phase 2)
-
-Discovery runs against local seed files (legitimate public source exports).
-No credentials or live search APIs are involved:
+## Discovery / enrichment CLI (optional)
 
 ```powershell
-python -m discovery.radio.pipeline --request request.json --seed seeds.json
+python -m discovery.radio.pipeline --request data\request.json --seed data\seeds.json
+python -m discovery.radio.enrich --input <result.json> --output enriched.json
 ```
 
-`request.json` example: `{"query": "independent radio stations",
-"state_or_region": "New York", "limit": 25}`. Output: one JSON document with
-normalized station records, per-fact provenance, confidence reasons, and a
-failure ledger. See `docs/radio-discovery.md`.
+## About unrelated projects in this workspace
 
-## Running the enrichment engine (Phase 3)
+This is a **Python** project — its frontend is plain HTML/JS served by the
+Python backend. If `npm run dev` once started a server on **port 3000**
+("RecoverX API Server", using `C:\Users\user\database.json`), that came from a
+**different project in another folder** (the Node app in
+`C:\Users\user\recovery service file`). That app is not part of the Music
+Intelligence Engine and is left untouched.
 
-Enrichment consumes discovery output and is **offline by default** — it
-re-assembles facts without touching the network:
+## Layout
 
-```powershell
-python -m discovery.radio.enrich --input result.json --output enriched.json
-```
-
-Add `--fetch` to opt in to bounded live page reads (robots.txt respected,
-per-station URL budget, rate limiting). Output adds genres, formats, market
-area, enriched contacts with explainable confidence, and an evidenced
-submission path (instructions, restrictions, inferred methods labeled as
-inference). See `docs/radio-enrichment.md`.
-
-## Running the operator console (Phase 7)
-
-Single-origin UI + API over a stored database — no build step:
-
-```powershell
-python -m backend.webapp --db path\to\db.sqlite --port 8000
-```
-
-Browse `http://127.0.0.1:8000/#/`: search & filter stations
-(genre/format/country/status/confidence), inspect intelligence with
-confidence and source attribution, review verification history, stage
-recipients in the basket and export the selection as JSON. The console
-renders live API responses only (no mocks) and never sends anything;
-see [`frontend/README.md`](frontend/README.md).
+| Directory    | Purpose                                                  |
+|--------------|----------------------------------------------------------|
+| `backend/`   | API + web server (`backend.webapp`)                      |
+| `frontend/`  | Dependency-free browser UI (served same-origin)          |
+| `database/`  | SQLite + PostgreSQL persistence and migrations           |
+| `discovery/` | Radio station discovery pipeline                         |
+| `enrichment/`| Contact / submission extraction and normalization        |
+| `outreach/`  | Campaign records and email-provider abstraction          |
+| `crawler/`   | Bounded, robots-respecting HTTP retrieval                |
+| `tests/`     | Test suite (stdlib `unittest`)                           |

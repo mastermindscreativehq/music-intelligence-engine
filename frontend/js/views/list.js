@@ -1,12 +1,11 @@
-/* Station search / filter / selection view.
+/* Station list view — find a radio station.
  *
- * Filters map 1:1 onto the real backend listing endpoint
- * GET /api/v1/stations?limit&offset&q&status&genre&format&country&
- * min_confidence — the backend owns interpretation; this view only
- * collects operator input and renders the response. */
+ * Provides search + optional filters and a clear, action-first list of the
+ * stations the engine has discovered. Filters map onto the real backend
+ * listing endpoint; the backend owns interpretation. */
 
 import { api, ApiError } from "../api.js";
-import { chips, confidenceBar, el, fmtPct } from "../dom.js";
+import { chips, el } from "../dom.js";
 import { stationHref } from "../router.js";
 
 const LIMIT_CHOICES = [25, 50, 100, 200];
@@ -17,13 +16,12 @@ function errorBanner(error) {
     : String(error);
   return el("div", { class: "banner-error", role: "alert" },
     "Could not reach station data. ", el("strong", {}, detail),
-    " — adjust filters or verify the API server is running.");
+    " — check that the engine server is running.");
 }
 
 function emptyState() {
   return el("div", { class: "banner-info" },
-    "No stations match the current filters. Storage is populated by the ",
-    "discovery/enrichment CLI pipeline; this console never invents rows.");
+    "No stations match the current search. Try clearing the search box.");
 }
 
 function filterForm(current, onApply) {
@@ -37,19 +35,6 @@ function filterForm(current, onApply) {
     });
     return node;
   };
-
-  const statusSelect = el(
-    "select", { name: "status" },
-    el("option", { value: "" }, "any status"),
-    ["enriched", "new", "broken"].map((value) =>
-      el("option", { value, selected: current.status === value }, value)),
-  );
-
-  const confidenceInput = el("input", {
-    type: "number", name: "min_confidence", min: "0", max: "1",
-    step: "0.05", placeholder: "0 – 1",
-    value: current.min_confidence ?? "",
-  });
 
   const limitSelect = el(
     "select", { name: "limit" },
@@ -65,14 +50,11 @@ function filterForm(current, onApply) {
       const data = new FormData(form);
       onApply(Object.fromEntries(data.entries()));
     } },
-    field("search name / domain", text("q", "e.g. kzow", current.q)),
-    field("status", statusSelect),
-    field("genre", text("genre", "e.g. news", current.genre)),
-    field("format", text("format", "e.g. talk", current.format)),
+    field("search station", text("q", "e.g. KEXP", current.q)),
+    field("genre", text("genre", "e.g. rock", current.genre)),
     field("country", text("country", "e.g. US", current.country)),
-    field("min confidence", confidenceInput),
     field("page size", limitSelect),
-    el("button", { class: "primary", type: "submit" }, "Apply filters"),
+    el("button", { class: "primary", type: "submit" }, "Search"),
     el("button", {
       class: "subtle", type: "button",
       onClick: () => onApply({}),
@@ -84,7 +66,12 @@ function filterForm(current, onApply) {
 function summaryLine(total, limit, offset) {
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + limit, total);
-  return `showing ${from}–${to} of ${total} stations`;
+  return `${total} station${total === 1 ? "" : "s"} found`;
+}
+
+function locationOf(station) {
+  return [station.city, station.state_or_region, station.country]
+    .filter(Boolean).join(", ") || "—";
 }
 
 function resultRow(station) {
@@ -93,19 +80,14 @@ function resultRow(station) {
     { class: "station-row" },
     el("td", {},
       el("a", { class: "station-name", href: stationHref(station.identity_key) },
-        station.name || "(unnamed)"),
+        station.name || "(unnamed station)"),
       el("div", { class: "dim" }, station.domain ?? "—")),
     el("td", {}, chips(station.genres)),
     el("td", {}, chips(station.formats)),
-    el("td", {},
-      confidenceBar(station.confidence_score),
-      el("div", { class: "dim" }, fmtPct(station.confidence_score))),
-    el("td", {}, String(station.status ?? "—")),
-    el("td", { class: "dim" },
-      [station.city, station.state_or_region, station.country]
-        .filter(Boolean).join(", ") || "—"),
-    el("td", {},
-      el("a", { href: stationHref(station.identity_key) }, "inspect")),
+    el("td", { class: "dim" }, locationOf(station)),
+    el("td", { class: "actions-cell" },
+      el("a", { class: "subtle buttonish", href: stationHref(station.identity_key) },
+        "Send music")),
   );
 }
 
@@ -117,19 +99,21 @@ export function renderListView(root, basket) {
     resultsCard.replaceChildren(el("p", { class: "dim" }, "Loading…"));
     try {
       const data = await api.stations(state);
+      if ((data.stations || []).length === 0) {
+        resultsCard.replaceChildren(
+          el("h2", {}, "Stations"), emptyState());
+        return;
+      }
       resultsCard.replaceChildren(
         el("h2", {}, "Stations"),
-        el("p", { class: "dim" },
-          summaryLine(data.total, data.limit, data.offset)),
+        el("p", { class: "dim" }, summaryLine(data.total, data.limit, data.offset)),
         el("table", { class: "results" },
           el("thead", {}, el("tr", {},
             el("th", {}, "station"), el("th", {}, "genres"),
-            el("th", {}, "formats"), el("th", {}, "confidence"),
-            el("th", {}, "status"), el("th", {}, "location"),
-            el("th", {}, "actions"))),
+            el("th", {}, "formats"), el("th", {}, "location"),
+            el("th", {}, "submit"))),
           el("tbody", {},
-            (data.stations || []).map((station) =>
-              resultRow(station)))),
+            (data.stations || []).map((station) => resultRow(station)))),
         pagination(data));
     } catch (error) {
       resultsCard.replaceChildren(el("h2", {}, "Stations"), errorBanner(error));
@@ -149,17 +133,15 @@ export function renderListView(root, basket) {
   }
 
   const card = el("section", { class: "card" },
-    el("h2", {}, "Search & filter"),
+    el("h2", {}, "Find a radio station"),
+    el("p", { class: "dim" },
+      "Search the stations we know about, open one, and find a real way ",
+      "to send your music."),
     filterForm(state, (applied) => {
       state = { ...state, offset: 0 };
-      for (const key of ["q", "status", "genre", "format", "country"]) {
+      for (const key of ["q", "genre", "country"]) {
         if (applied[key]) state[key] = applied[key];
         else delete state[key];
-      }
-      if (applied.min_confidence !== undefined && applied.min_confidence !== "") {
-        state.min_confidence = applied.min_confidence;
-      } else {
-        delete state.min_confidence;
       }
       if (applied.limit) state.limit = Number(applied.limit);
       load();
