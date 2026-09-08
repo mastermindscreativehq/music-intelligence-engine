@@ -236,6 +236,23 @@ tr.station-row:hover { background: var(--panel-2); }
 .contact-card .head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .contact-card .name { font-weight: 600; }
 .preferred-star { color: var(--warn); }
+.relevance-high { color: var(--ok); border-color: var(--ok); }
+.relevance-medium { color: var(--warn); border-color: var(--warn); }
+.relevance-low { color: var(--text-dim); }
+.best-line { font-size: 12.5px; margin: 2px 0 4px; }
+.best-line a { font-weight: 600; }
+.contact-routes-box { margin: 4px 0 2px; }
+.contact-routes-title { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+.contact-routes { list-style: none; margin: 2px 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.contact-route {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 3px 8px; font-size: 12px; background: var(--panel-2);
+}
+.route-kind-chip {
+  color: var(--text-dim); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
 .provenance-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-dim); font-size: 12px; }
 
 .result-row {
@@ -557,4 +574,5 @@ button.buttonish:hover { border-color: var(--accent); background: var(--panel-2)
 .outreach-head .station-name:hover { text-decoration: underline; }
 .outreach-detail { display: grid; gap: 4px; }
 .outreach-route { font-size: 13px; word-break: break-word; }
+.outreach-queue-status { font-size: 12.5px; margin: 6px 0 0; min-height: 16px; }
 

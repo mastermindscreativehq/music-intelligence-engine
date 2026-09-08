@@ -338,12 +338,15 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
   }
 
   /* Add-to-campaign is actionable when any real station-published route
-   * exists: a verified email decision-maker, a verified submission page,
-   * an official contact page, or a program/DJ page. */
+   * exists: a verified email decision-maker, a named decision-maker
+   * reachable through the station's verified submission/contact route, or
+   * an official station route (submission page / contact page / DJ page). */
   const campaignRoute = route && route.verified
     ? route
     : fallbackStationRoute(usefulPages);
-  if (ranked.some((c) => isActionable(c)) || campaignRoute) {
+  const anyStagedContact = ranked.some((c) =>
+    isKeyContact(c) && contactActionable(c));
+  if (anyStagedContact || campaignRoute) {
     tiles.push(el("span", { class: "action-tile action-staged" },
       el("button", {
         class: "primary inline",
@@ -353,7 +356,7 @@ function bestActionsCard(detail, intel, usefulPages, contactsPayload) {
     tiles.push(el("span", { class: "action-tile action-muted" },
       el("strong", {}, "Add to campaign"),
       el("span", { class: "dim action-sub" },
-        "No verified email or web-form outreach route yet.")));
+        "No route found — marked for further investigation.")));
   }
 
   return el("section", { class: "card action-bar", id: "station-actions" },
@@ -434,12 +437,21 @@ function rankedContacts(contacts) {
   });
 }
 
-/* A decision-role or backend-preferred person counts as a key contact. The
- * actionable set for campaign staging is narrower: a person needs a verified
- * email route. No-email decision-makers still SHOW in Key Contacts with
- * honest "no verified outreach route" copy — their role is evidence. */
+/* A key contact is actionable when ANY sendable route exists through the
+ * backend contract: their own verified email, or — when the station
+ * publishes no email decision-maker — a verified official station route
+ * (submission page / contact page / program / DJ page). The contact and the
+ * route stay separate: a named music director with no email is still
+ * reachable through the station's verified route. */
+function contactActionable(contact) {
+  if (typeof contact.can_add_to_campaign === "boolean") {
+    return contact.can_add_to_campaign;
+  }
+  return Boolean(verifiedEmail(contact));   // pre-annotation safety fallback
+}
+
 function isActionable(contact) {
-  return isKeyContact(contact) && Boolean(verifiedEmail(contact));
+  return isKeyContact(contact) && contactActionable(contact);
 }
 
 function roleTitle(role) {
@@ -447,46 +459,112 @@ function roleTitle(role) {
   return String(role).replace(/_/g, " ");
 }
 
+const ROUTE_KIND_LABELS = {
+  email: "email",
+  webform: "submission page",
+  contact: "contact page",
+  phone: "phone",
+  dj: "DJ / program page",
+};
+
+function routeKindLabel(kind) {
+  return ROUTE_KIND_LABELS[kind] || kind || "route";
+}
+
+/* Stage ONE recipient for a single key contact. The recipient always points
+ * at a real, station-published route: the person's own verified email when
+ * recorded, otherwise the best verified station route (submission page /
+ * contact page / program / DJ page). Never fabricates an address. */
+function addKeyContactToCampaign(contact, payload, identityKey, basket) {
+  const uid = String(contact.contact_uid);
+  if (basket.has(uid)) return false;
+  const email = verifiedEmail(contact);
+  const best = contact.best_outreach_route || null;
+  const routeUrl = best && /^https?:\/\//i.test(String(best.value || ""))
+    ? best.value : null;
+  const kind = email ? "email"
+    : (best && best.kind) || "webform";
+  return basket.add({
+    contact_uid: uid,
+    identity_key: identityKey,
+    station_name: payload.station_name,
+    name: contact.name,
+    role: contact.role,
+    email: email || "",
+    source_url: contact.source_url || null,
+    outreach_class: email ? "email" : kind,
+    submission_url: routeUrl,
+    route_kind: kind,
+    route_label: email ? null : (best && best.title)
+      || routeKindLabel(kind),
+  });
+}
+
 function keyContactCard(contact, payload, identityKey, basket) {
   const uid = String(contact.contact_uid);
   const email = verifiedEmail(contact);
-  const selected = basket.has(uid);
   const title = contact.name
     || roleTitle(contact.role)
     || "(unnamed contact)";
   const foundOn = contact.source_url
     || ((contact.sources && contact.sources[0]) || null);
+  const best = contact.best_outreach_route || null;
+  const routes = contact.outreach_routes || [];
+  const relevance = contact.relevance || null;
 
   const routeStatus = email
     ? el("span", { class: "route-status ok" },
       "Verified email · ", el("strong", {}, email))
-    : el("span", { class: "route-status none" },
-      contact.phone
-        ? `phone only: ${contact.phone}`
-        : "No verified outreach route found");
+    : best
+      ? el("span", { class: "route-status ok" },
+        "Reachable via ", el("strong", {},
+          best.title || routeKindLabel(best.kind)),
+        best.channel === "station" ? " (station route)" : "")
+      : el("span", { class: "route-status none" },
+        contact.phone
+          ? `phone channel only: ${contact.phone}`
+          : "No route found — marked for further investigation");
 
-  let reachControl;
+  const routeRows = routes.slice(0, 4).map((route) => {
+    const value = route.value || route.detail;
+    const label = route.title || routeKindLabel(route.kind) || value;
+    return el("li", { class: "contact-route" },
+      el("span", { class: "route-kind-chip" },
+        routeKindLabel(route.kind)),
+      value && /^(https?:|mailto:)/i.test(value)
+        ? externalLink(value, label)
+        : el("span", {}, label),
+      route.channel === "station"
+        ? el("span", { class: "dim" }, "station route") : null);
+  });
+  const bestLine = best === null ? null : el("div", { class: "dim best-line" },
+    "Best route: ",
+    best.value && /^(https?:|mailto:)/i.test(best.value)
+      ? externalLink(best.value, best.title || routeKindLabel(best.kind))
+      : el("span", {}, best.title || routeKindLabel(best.kind)));
+
+  const removeControl = () => el("span", {},
+    el("button", {
+      class: "subtle",
+      onClick: () => { basket.remove(uid); },
+    }, "✓ added"),
+    " ",
+    el("span", { class: "linkish", role: "button" },
+      email ? "Reach Out" : "In outreach list"));
+
+let reachControl;
   if (email) {
-    if (selected) {
-      reachControl = el("span", {},
-        el("button", {
-          class: "subtle",
-          onClick: () => basket.remove(uid),
-        }, "✓ added"),
-        " ",
-        el("span", { class: "linkish", role: "button" }, "Reach Out"));
-    } else {
+    reachControl = el("span", {}, null);
+    const render = () => {
+      if (basket.has(uid)) {
+        reachControl.replaceChildren(removeControl());
+        return;
+      }
       const reach = el("button", { class: "primary inline" }, "Reach Out");
       reach.addEventListener("click", () => {
-        basket.add({
-          contact_uid: uid,
-          identity_key: identityKey,
-          station_name: payload.station_name,
-          name: contact.name,
-          role: contact.role,
-          email: contact.email,
-          source_url: contact.source_url || null,
-        });
+        const added = addKeyContactToCampaign(contact, payload, identityKey,
+          basket);
+        if (!added && !basket.has(uid)) return;
         openOutreachModal({
           contact_uid: uid,
           identity_key: identityKey,
@@ -496,11 +574,28 @@ function keyContactCard(contact, payload, identityKey, basket) {
           email: contact.email,
           source_url: contact.source_url || null,
         });
+        render();
       });
-      reachControl = reach;
-    }
+      reachControl.replaceChildren(reach);
+    };
+    render();
+  } else if (best && contactActionable(contact)) {
+    reachControl = el("span", {}, null);
+    const render = () => {
+      if (basket.has(uid)) {
+        reachControl.replaceChildren(removeControl());
+        return;
+      }
+      const add = el("button", { class: "primary inline" }, "Add to campaign");
+      add.addEventListener("click", () => {
+        addKeyContactToCampaign(contact, payload, identityKey, basket);
+        render();
+      });
+      reachControl.replaceChildren(add);
+    };
+    render();
   } else {
-    reachControl = el("span", { class: "dim" }, "not reachable");
+    reachControl = el("span", { class: "dim" }, "marked for investigation");
   }
 
   return el("article", { class: "contact-card key" },
@@ -509,12 +604,24 @@ function keyContactCard(contact, payload, identityKey, basket) {
       contact.role && contact.role !== "unknown"
         ? el("span", { class: "chip", title: contact.role_reason || "" },
           contact.role) : null,
+      relevance
+        ? el("span", {
+          class: `chip relevance-${String(relevance.label).toLowerCase()}`,
+          title: relevance.reason || "",
+        }, `Relevance: ${relevance.label}`) : null,
       contact.preferred_for_submissions
         ? el("span", { class: "preferred-star",
           title: "flagged as the station's preferred submission contact" },
           "★ preferred")
         : null),
     el("div", { class: "route-status-line" }, routeStatus),
+    bestLine,
+    routes.length
+      ? el("div", { class: "contact-routes-box" },
+        el("div", { class: "dim contact-routes-title" },
+          "Available outreach routes"),
+        el("ul", { class: "contact-routes" }, routeRows))
+      : null,
     foundOn
       ? el("div", { class: "dim evidence-row" }, "Found on: ",
         externalLink(foundOn))
@@ -552,7 +659,7 @@ function keyContactsCard(contacts, payload, identityKey, basket) {
         },
       }, `View ${extraNet.length} more relevant contacts +`),
       el("p", { class: "dim" },
-        "Additional music-relevant people with verified contact routes. "
+        "Additional music-relevant people with a reachable route. "
         + "Not a full directory."));
     cards.push(extraBody, toggle);
   }
@@ -577,16 +684,9 @@ function addAllToCampaign(detail, contactsPayload, identityKey, basket) {
   const staged = [];
   for (const contact of contactsPayload.contacts || []) {
     if (!isKeyContact(contact)) continue;
-    if (!verifiedEmail(contact)) continue;
-    if (basket.add({
-      contact_uid: String(contact.contact_uid),
-      identity_key: identityKey,
-      station_name: contactsPayload.station_name,
-      name: contact.name,
-      role: contact.role,
-      email: contact.email,
-      source_url: contact.source_url || null,
-    })) {
+    if (!contactActionable(contact)) continue;
+    if (addKeyContactToCampaign(contact, contactsPayload, identityKey,
+      basket)) {
       staged.push(contact);
     }
   }
@@ -823,11 +923,14 @@ export function renderStationView(root, identityKey, basket) {
       addCampaign.addEventListener("click", () => {
         const added = addAllToCampaign(detail, contactsPayload, identityKey,
           basket);
-        // For a URL-only station (no verified email decision-maker), fall
-        // back to its VERIFIED submission/contact web form so it is still a
-        // selectable outreach route — never a fabricated email.
-        const webform = webformCampaignRecipient(contactsPayload, identityKey,
-          intel, intel.useful_pages, basket);
+        // The generic station-web-form recipient is a last resort ONLY when
+        // no named key contact could be staged (e.g. a station with zero
+        // extracted contacts). When a person is staged, never duplicate a
+        // redundant anonymous "station web form" entry.
+        const webform = added.length > 0
+          ? null
+          : webformCampaignRecipient(contactsPayload, identityKey,
+            intel, intel.useful_pages, basket);
         const addedUids = [
           ...added.map((c) => String(c.contact_uid)),
           ...(webform && webform.added ? [webform.contact_uid] : []),

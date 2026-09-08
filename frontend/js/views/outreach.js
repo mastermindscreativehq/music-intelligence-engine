@@ -11,6 +11,7 @@
 import { api } from "../api.js";
 import { el } from "../dom.js";
 import { stationHref } from "../router.js";
+import { openOutreachModal } from "./outreachModal.js";
 
 const ROUTE_LABELS = {
   webform: "submission page",
@@ -33,26 +34,6 @@ function routeLabel(item) {
   return ROUTE_LABELS[item.route_kind] || "station page";
 }
 
-function routeAction(item) {
-  const email = (item.email && item.email.trim()) || null;
-  if (email) {
-    return el("a", {
-      class: "buttonish",
-      href: `mailto:${email}`,
-    }, "Email station");
-  }
-  const url = item.submission_url || item.source_url || null;
-  if (url) {
-    return el("a", {
-      class: "buttonish",
-      href: url,
-      target: "_blank",
-      rel: "noopener noreferrer",
-    }, "Open route");
-  }
-  return el("span", { class: "dim" }, "No route on file");
-}
-
 function routeDetail(item) {
   const email = (item.email && item.email.trim()) || null;
   const url = item.submission_url || item.source_url || null;
@@ -62,9 +43,35 @@ function routeDetail(item) {
   return el("div", { class: "dim outreach-route" }, parts.join(" · "));
 }
 
+/* Queue this recipient as a draft record in the outreach activity ledger.
+ * The recipient payload is the exact basket evidence: a verified email XOR a
+ * verified submission/contact URL — never both, never fabricated. */
+function queueOutreach(item) {
+  return api.createOutreach({
+    recipient: {
+      contact_uid: item.contact_uid,
+      identity_key: item.identity_key,
+      name: item.name || null,
+      role: item.role || null,
+      organization: item.station_name || item.name || null,
+      email: (item.email && item.email.trim()) || "",
+      submission_url: item.submission_url || null,
+      source_url: item.source_url || null,
+    },
+    subject: "",
+    message: "",
+  });
+}
+
 function stationCard(item, basket, onRemoveAll) {
   const stationName = item.station_name || item.name || "Saved station";
   const website = item.website || null;
+  const email = (item.email && item.email.trim()) || null;
+  const routeUrl = item.submission_url
+    || (email ? null : item.source_url) || null;
+  const statusRow = el("div",
+    { class: "outreach-queue-status", role: "status" });
+
   const head = el("div", { class: "outreach-head" },
     el("a", { class: "station-name", href: stationHref(item.identity_key) },
       stationName),
@@ -73,18 +80,63 @@ function stationCard(item, basket, onRemoveAll) {
       : null);
   const detail = el("div", { class: "outreach-detail" },
     routeDetail(item));
+
   const removeBtn = el("button", { class: "linkish" }, "remove");
   removeBtn.addEventListener("click", () => {
     basket.remove(item.contact_uid);
     onRemoveAll();
   });
+
+  /* Primary hand-off: verified email opens the personalized-outreach
+   * composer; a URL route opens the station's real page/form. */
+  let primary;
+  if (email) {
+    primary = el("button", { class: "buttonish" }, "Reach out");
+    primary.addEventListener("click", () => {
+      openOutreachModal({
+        contact_uid: item.contact_uid,
+        identity_key: item.identity_key,
+        name: item.name,
+        role: item.role,
+        station_name: item.station_name || item.name,
+        email,
+        source_url: item.source_url || null,
+      });
+    });
+  } else {
+    primary = externalLink(routeUrl || "#",
+      el("span", { class: "buttonish" }, "Open route"));
+    if (!routeUrl) primary.classList.add("dim");
+  }
+
+  const queueBtn = el("button", { class: "subtle" }, "Queue");
+  queueBtn.addEventListener("click", async () => {
+    if (queueBtn.disabled) return;
+    queueBtn.disabled = true;
+    queueBtn.textContent = "queuing…";
+    try {
+      const record = await queueOutreach(item);
+      statusRow.replaceChildren(
+        "Queued as ", el("strong", {}, record.status || "draft"),
+        " — ", el("a", { class: "linkish", href: "#/outreach-history" },
+          "view activity log"));
+    } catch (error) {
+      statusRow.replaceChildren(
+        "Could not queue: ", el("strong", {},
+          error && error.message ? error.message : String(error)),
+        " — open the route yourself instead.");
+      queueBtn.disabled = false;
+      queueBtn.textContent = "Queue";
+    }
+  });
+
   const actions = el("div", { class: "actions-row" },
-    routeAction(item),
+    primary, queueBtn,
     el("a", { class: "linkish", href: stationHref(item.identity_key) },
       "View station"),
     removeBtn);
   return el("section", { class: "card outreach-card" },
-    head, detail, actions);
+    head, detail, statusRow, actions);
 }
 
 function emptyView() {
@@ -105,7 +157,11 @@ function fullView(basket, rerender) {
   return [
     el("h1", {}, "Outreach list"),
     el("p", { class: "dim" },
-      "Stations you saved and the real route each station publishes."),
+      "Stations you saved, the real route each publishes, and the queue for ",
+      "your outreach activity log."),
+    el("div", { class: "actions-row" },
+      el("a", { class: "linkish", href: "#/outreach-history" },
+        "Outreach activity log →")),
     ...basket.items.map((item) => stationCard(item, basket, rerender)),
   ];
 }

@@ -119,19 +119,22 @@ def intelligence_payload(station: dict, emails: list[dict],
         station, _raw_useful_pages(station), submission, contacts)
     recommendation = outreach_intel.primary_recommendation(
         station, _raw_useful_pages(station), submission, contacts)
+    routes = outreach_intel.build_outreach_routes(
+        _raw_useful_pages(station), submission, contacts)
+    contact_views = [dict(c) for c in contacts]
+    _annotate_contact_routes(contact_views, routes)
     payload = {
         "station": station_detail(station),
         "intelligence_level": level,
         "intelligence_level_reason": level_reason,
         "emails": [dict(fact) for fact in emails],      # Fact dicts verbatim
         "phone_numbers": [dict(fact) for fact in phones],
-        "contacts": [dict(c) for c in contacts],
+        "contacts": contact_views,
         "submission": dict(submission) if submission else None,
         "submission_status": submission_status,
         "submission_status_reason": submission_status_reason,
         "best_action": best_action,
-        "outreach_routes": outreach_intel.build_outreach_routes(
-            _raw_useful_pages(station), submission, contacts),
+        "outreach_routes": routes,
         "outreach_recommendation": recommendation,
         "fetches": [dict(f) for f in (fetches or [])],
         "useful_pages": useful_pages,
@@ -162,18 +165,21 @@ def contacts_payload(station: dict, contacts: list[dict],
         station, raw_pages, submission, contacts)
     recommendation = outreach_intel.primary_recommendation(
         station, raw_pages, submission, contacts)
+    routes = outreach_intel.build_outreach_routes(
+        raw_pages, submission, contacts)
+    contact_views = _contact_views(contacts)
+    _annotate_contact_routes(contact_views, routes)
     payload = {
         "station_identity_key": station["identity_key"],
         "station_name": station["name"],
         "intelligence_level": level,
         "intelligence_level_reason": level_reason,
-        "contacts": _contact_views(contacts),
+        "contacts": contact_views,
         "submission": dict(submission) if submission else None,
         "submission_status": submission_status,
         "submission_status_reason": submission_status_reason,
         "best_action": best_action,
-        "outreach_routes": outreach_intel.build_outreach_routes(
-            raw_pages, submission, contacts),
+        "outreach_routes": routes,
         "outreach_recommendation": recommendation,
         "preferred_submission_contacts": [
             {"contact_uid": c["contact_uid"], "role": c.get("role"),
@@ -297,6 +303,31 @@ def _prov_token(prov: object) -> str:
 def _contact_views(contacts: list[dict]) -> list[dict]:
     return _merge_unattributed(
         [_annotate_contact(c) for c in contacts])
+
+
+def _annotate_contact_routes(views: list[dict],
+                             station_routes: list[dict]) -> None:
+    """Attach per-contact reachability (read-path only, in place on copies).
+
+    A contact and its routes stay separate concepts: ``relevance`` is the
+    person's role weight, ``outreach_routes`` is every way to actually reach
+    them (their own channel first, then verified station routes), and
+    ``best_outreach_route`` is the single recommended one. ``can_add_to_campaign``
+    is true exactly when a sendable route (verified email or http(s) station
+    route) exists — a route-less person stays honest and markable, never
+    falsely "reachable".
+    """
+    for view in views:
+        view["relevance"] = outreach_intel.contact_relevance(view)
+        view["outreach_routes"] = outreach_intel.contact_outreach_routes(
+            view, station_routes)
+        best = outreach_intel.best_contact_outreach_route(
+            view, station_routes)
+        view["best_outreach_route"] = best
+        view["can_add_to_campaign"] = bool(
+            best and best.get("value")
+            and best.get("verification_state") in (outreach_intel.VERIFIED,
+                                                   outreach_intel.ACTIONABLE))
 
 
 # -- Evidence-state model (Phase 10 repairs) -------------------------------

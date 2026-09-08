@@ -70,6 +70,215 @@ def contact_route_class(role) -> str:
     return CONTACT_ROUTE_CLASS_MAP.get(str(role or "").strip(), "UNKNOWN_ROLE")
 
 
+# ---------------------------------------------------------------------------
+# Per-contact reachability (station-independent).
+#
+# A CONTACT is who to reach; a ROUTE is how. The two are kept separate on
+# purpose: a named decision-maker without their own verified channel is
+# still reachable through an official station route, so nobody is labeled
+# "not reachable" while a verified station route exists.
+#
+# Contact route levels (explicit hierarchy the UI must present):
+#   1  verified direct email
+#   2  official music submission route
+#   3  official contact page / form
+#   4  department / programming contact page
+#   5  DJ / program directory page
+#   6  no route found -> marked for further investigation
+# ---------------------------------------------------------------------------
+
+CONTACT_ROUTE_LEVEL_LABELS = {
+    1: "Verified direct email",
+    2: "Official music submission route",
+    3: "Official contact page / form",
+    4: "Department / programming contact page",
+    5: "DJ / program directory page",
+    6: "No route found — marked for further investigation",
+}
+
+_RELEVANCE_HIGH = "High"
+_RELEVANCE_MEDIUM = "Medium"
+_RELEVANCE_LOW = "Low"
+
+CONTACT_RELEVANCE_REASONS = {
+    "music_director": "Music director role decides what music the station plays.",
+    "program_director": "Program director role oversees music and programming decisions.",
+    "music_submission": "Dedicated music-submission role on the station site.",
+    "music_programmer": "Music programming role selects music for airplay.",
+    "music_scheduler": "Music scheduling role controls what reaches air.",
+    "music_coordinator": "Music coordination role handles track intake.",
+    "programming": "Programming role involved in music decisions.",
+}
+
+
+def contact_relevance(contact: dict) -> dict:
+    """Relevance of a contact to a music-submission outreach.
+
+    Returns ``{"label", "score", "reason"}`` derived purely from recorded
+    evidence (role, the backend-preferred flag, a published name) — never a
+    guess about who matters.
+    """
+    role = str(contact.get("role") or "").strip().lower()
+    score = 0.0
+    reasons: list[str] = []
+    if role in SUBMISSION_ROUTE_INTEREST_ROLES:
+        score += 0.8
+        reasons.append(CONTACT_RELEVANCE_REASONS.get(
+            role, "Music-relevant role on the station site."))
+    elif role in ("host", "dj"):
+        score += 0.5
+        reasons.append("Show host / DJ named on the station site.")
+    elif role == "general":
+        score += 0.3
+        reasons.append("General station contact (mention music submission).")
+    if contact.get("preferred_for_submissions"):
+        score = max(score, 0.9)
+        reasons.append("Flagged as the station's preferred submission contact.")
+    if str(contact.get("name") or "").strip():
+        score = min(score + 0.05, 1.0)
+    label = (_RELEVANCE_HIGH if score >= 0.75
+             else _RELEVANCE_MEDIUM if score >= 0.45 else _RELEVANCE_LOW)
+    return {
+        "label": label,
+        "score": round(score, 2),
+        "reason": "; ".join(reasons) or (
+            "Role relevance to music outreach not stated on the station site."),
+    }
+
+
+_CONTACT_KIND_FROM_ROUTE = {
+    "submission_url": "webform",
+    "submission_page": "webform",
+    "submission_email": "email",
+    "contact_email": "email",
+    "contact_page": "contact",
+    "contact_phone": "phone",
+    "named_contact": "contact",
+}
+
+
+def _contact_own_route(contact: dict) -> dict | None:
+    """The contact's own published channel (a verified email is the strong
+    case; a published phone is channel evidence but not an app-sendable
+    route). Never invents an address for a channel that was not observed."""
+    email = contact.get("email")
+    if email and "@" in str(email) and \
+            not reserved_host(str(email).rsplit("@", 1)[-1]):
+        return {
+            "kind": "email",
+            "channel": "own",
+            "level": 1,
+            "label": "Verified direct email",
+            "title": contact.get("name") or (
+                str(contact.get("role") or "contact").replace("_", " ")),
+            "value": f"mailto:{email}",
+            "detail": str(email),
+            "verification_state": VERIFIED,
+            "evidence_state": VERIFIED,
+            "source_url": contact.get("source_url"),
+        }
+    phone = contact.get("phone")
+    if phone:
+        return {
+            "kind": "phone",
+            "channel": "own",
+            "level": 1,
+            "label": "Published phone channel",
+            "title": contact.get("name") or "phone",
+            "value": None,
+            "detail": str(phone),
+            "verification_state": DISCOVERED,
+            "evidence_state": DISCOVERED,
+            "source_url": contact.get("source_url"),
+        }
+    return None
+
+
+def _is_submission_route(r: dict) -> bool:
+    return r.get("priority") == P1_DIRECT_SUBMISSION and r.get("value")
+
+
+def _is_general_contact_route(r: dict) -> bool:
+    return r.get("priority") == P3_GENERAL_CONTACT and r.get("value")
+
+
+def _is_department_route(r: dict) -> bool:
+    return (r.get("class") == "DJ_PROGRAM_DIRECTORY"
+            and r.get("category") == "programming" and r.get("value"))
+
+
+def _is_dj_directory_route(r: dict) -> bool:
+    return (r.get("class") == "DJ_PROGRAM_DIRECTORY"
+            and r.get("category") == "dj_directory" and r.get("value"))
+
+
+# Station-route fallback levels for a contact without their own channel.
+_CONTACT_FALLBACK_LEVELS = (
+    (2, _is_submission_route),
+    (3, _is_general_contact_route),
+    (4, _is_department_route),
+    (5, _is_dj_directory_route),
+)
+
+
+def _station_route_view(route: dict, level: int) -> dict:
+    """Shape one station route as a contact-route entry, honestly attributed
+    as a station route (``channel: "station"``) rather than the contact's."""
+    kind = _CONTACT_KIND_FROM_ROUTE.get(str(route.get("type") or ""),
+                                        "webform")
+    return {
+        "kind": kind,
+        "channel": "station",
+        "level": level,
+        "label": CONTACT_ROUTE_LEVEL_LABELS[level],
+        "title": route.get("title") or CONTACT_ROUTE_LEVEL_LABELS[level],
+        "value": route.get("value"),
+        "detail": route.get("value"),
+        "verification_state": route.get("verification_state"),
+        "evidence_state": route.get("evidence_state"),
+        "source_url": route.get("source_url"),
+    }
+
+
+def contact_outreach_routes(contact: dict,
+                            station_routes: list[dict]) -> list[dict]:
+    """Every route available to reach *this* contact, best first.
+
+    The contact's own channel comes first (a verified direct email, or a
+    published phone when that is all that exists); the station's official
+    routes then cover the levels of the explicit hierarchy. Routes are
+    deduped by value so the same URL/address appears once.
+    """
+    routes: list[dict] = []
+    seen: set[str] = set()
+    own = _contact_own_route(contact)
+    if own:
+        routes.append(own)
+        if own.get("value"):
+            seen.add(own["value"].lower())
+    for level, predicate in _CONTACT_FALLBACK_LEVELS:
+        for route in _sorted_by_priority(station_routes or []):
+            if not predicate(route):
+                continue
+            value = route.get("value")
+            if not value or str(value).lower() in seen:
+                continue
+            seen.add(str(value).lower())
+            routes.append(_station_route_view(route, level))
+    return routes
+
+
+def best_contact_outreach_route(contact: dict,
+                                station_routes: list[dict]) -> dict | None:
+    """The single recommended route for this contact: their own verified
+    email first, else the strongest verified official station route."""
+    for route in contact_outreach_routes(contact, station_routes):
+        if route.get("value") and route.get("verification_state") in (
+                VERIFIED, ACTIONABLE):
+            return route
+    return None
+
+
 # Useful-page route semantics (Sixth requirement): why it was discovered, what
 # kind of route it is, what evidence it holds, whether it is actionable now,
 # and the concrete next step for the artist. The URL itself is never touched.
