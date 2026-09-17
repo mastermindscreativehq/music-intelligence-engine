@@ -44,6 +44,10 @@ const TEXT_FILES = [
   "js/views/outreachHistory.js",
   "js/views/outreachRecords.js",
   "js/views/dashboard.js",
+  "js/views/djProfile.js",
+  "js/views/djs.js",
+  "js/views/opportunities.js",
+  "js/views/stationLocation.js",
   "js/draftGenerator.js",
   "js/views/outreachModal.js",
 ];
