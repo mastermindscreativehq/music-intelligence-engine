@@ -47,12 +47,33 @@ def station_summary(row: dict) -> dict:
         row.get("country"), row.get("state_or_region"),
         row.get("city"), row.get("market_area"),
         row.get("last_verified_at"))
+    summary["research_status"] = derive_station_research_status(row)
     summary["links"] = {
         "self": f"/api/v1/stations/{row['identity_key']}",
         "intelligence": f"/api/v1/stations/{row['identity_key']}/intelligence",
         "contacts": f"/api/v1/stations/{row['identity_key']}/contacts",
     }
     return summary
+
+
+def derive_station_research_status(row: dict) -> str:
+    """Plain-language research status for a station row.
+
+    - ``verified`` — the station passed verification (status ``verified``,
+      or a high confidence score with a source-backed URL set).
+    - ``partially_researched`` — some source-backed facts exist, but the
+      picture is incomplete (enrichment never erases previously stored facts).
+    - ``needs_research`` — public evidence is still to be gathered.
+    """
+    has_grounding = bool(row.get("source_urls") or row.get("genres")
+                         or row.get("formats") or row.get("description")
+                         or row.get("raw_metadata"))
+    if row.get("status") == "verified" or (
+            (row.get("confidence_score") or 0) >= 0.7 and has_grounding):
+        return "verified"
+    if has_grounding:
+        return "partially_researched"
+    return "needs_research"
 
 
 def station_detail(row: dict) -> dict:
@@ -62,6 +83,7 @@ def station_detail(row: dict) -> dict:
         row.get("country"), row.get("state_or_region"),
         row.get("city"), row.get("market_area"),
         row.get("last_verified_at"))
+    detail["research_status"] = derive_station_research_status(row)
     detail["links"] = {
         "self": f"/api/v1/stations/{row['identity_key']}",
         "intelligence": f"/api/v1/stations/{row['identity_key']}/intelligence",
@@ -106,6 +128,28 @@ def dj_channel_view(channel: dict) -> dict:
     }
 
 
+def derive_dj_classification_status(row: dict) -> str:
+    """Plain-language DJ status derived from stored classification evidence.
+
+    - ``verified`` — the discovery gate classified this profile with positive
+      DJ evidence (personal/agency/radio/profile page).
+    - ``needs_verification`` — no verified classification evidence yet
+      (operator-entered or legacy record).
+    - ``not_qualified`` — evidence shows this is NOT a DJ profile (reserved
+      for reviewed outliers; ingest-time rejects are never stored).
+    """
+    verification = row.get("verification")
+    classification = (verification or {}).get("classification") \
+        if isinstance(verification, dict) else None
+    if isinstance(classification, dict):
+        verdict = classification.get("verdict")
+        if verdict == "qualified":
+            return "verified"
+        if verdict == "rejected":
+            return "not_qualified"
+    return "needs_verification"
+
+
 def dj_summary(row: dict) -> dict:
     """Compact projection for list responses."""
     summary = {key: row.get(key) for key in DJ_SUMMARY_FIELDS}
@@ -113,6 +157,7 @@ def dj_summary(row: dict) -> dict:
         row.get("country"), row.get("state_or_region"),
         row.get("city"), None, None)
     summary["has_contact"] = bool(row.get("has_contact"))
+    summary["classification_status"] = derive_dj_classification_status(row)
     summary["links"] = {"self": f"/api/v1/djs/{row['dj_id']}"}
     return summary
 
@@ -121,6 +166,13 @@ def dj_detail(row: dict, channels: list[dict] | None = None,
               outreach: list[dict] | None = None) -> dict:
     """Full DJ view: identity, source-backed channels, outreach history."""
     detail = dict(row)   # every stored column is part of the contract
+    detail["location_status"] = derive_location_status(
+        row.get("country"), row.get("state_or_region"),
+        row.get("city"), None, None)
+    verification = row.get("verification") if isinstance(
+        row.get("verification"), dict) else {}
+    detail["classification"] = verification.get("classification")
+    detail["classification_status"] = derive_dj_classification_status(row)
     detail["location_status"] = derive_location_status(
         row.get("country"), row.get("state_or_region"),
         row.get("city"), None, None)

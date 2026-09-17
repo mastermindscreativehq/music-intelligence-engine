@@ -77,6 +77,68 @@ _DEV_FIXTURE_EXCLUSION_SQL = (
 _FLOAT_UNIT_FIELDS = ("confidence_score", "classification_confidence")
 
 
+def _dev_reserved_tld(expr: str, wildcard: str = "%") -> str:
+    """SQL fragment: ``expr`` contains a reserved-TLD host suffix.
+
+    NULLs normalise to an empty string so the marker is strictly FALSE (a
+    NULL result would propagate through ``OR`` and hide every row, including
+    legitimate ones). Works identically against SQLite (``wildcard="%"``)
+    and PostgreSQL (``wildcard="%%"``, because psycopg parses ``%`` as a
+    placeholder).
+    """
+    return "(" + " OR ".join(
+        f"LOWER(COALESCE(CAST({expr} AS TEXT), '')) "
+        f"LIKE '{wildcard}{suffix}{wildcard}'"
+        for suffix in _DEV_HOST_SUFFIXES) + ")"
+
+
+def _dj_dev_fixture_exclusion_sql(wildcard: str = "%") -> str:
+    """Read-path quarantine for DJ rows (mirrors ``_DEV_FIXTURE_EXCLUSION_SQL``).
+
+    A DJ is a dev artifact when any source-backed channel (value/source_url),
+    the stored source_urls, or the identity name carries a reserved-TLD
+    suffix or an unmistakable test marker (``test-dj-``, ``e2e``). Storage is
+    never mutated — the row simply never surfaces in the production listing.
+    """
+    channel_value = _dev_reserved_tld("dc.value", wildcard)
+    channel_source = _dev_reserved_tld("dc.source_url", wildcard)
+    source_urls = _dev_reserved_tld("djs.source_urls", wildcard)
+    return (
+        "NOT ("
+        f"EXISTS (SELECT 1 FROM dj_channels dc "
+        f"WHERE dc.dj_id = djs.dj_id AND ({channel_value} OR {channel_source})) "
+        f"OR {source_urls} "
+        f"OR LOWER(COALESCE(djs.name, '')) LIKE 'test-dj-{wildcard}' "
+        f"OR LOWER(COALESCE(djs.name, '')) LIKE '{wildcard} e2e {wildcard}' "
+        f"OR LOWER(COALESCE(djs.stage_name, '')) LIKE 'test-dj-{wildcard}')")
+
+
+def _outreach_dev_fixture_exclusion_sql(wildcard: str = "%") -> str:
+    """Read-path quarantine for outreach rows (mirrors the station rule).
+
+    An outreach row is a dev artifact when any destination/identity field
+    carries a reserved-TLD suffix or an unmistakable test marker (an ``e2e``
+    body/recipient, or a ``test-dj-`` recipient/organization). Storage is
+    never mutated — the row simply never surfaces in the production listing.
+    """
+    email = _dev_reserved_tld("email", wildcard)
+    source = _dev_reserved_tld("source_url", wildcard)
+    submission = _dev_reserved_tld("submission_url", wildcard)
+    body = ("LOWER(COALESCE(subject, '') || ' ' || "
+            "COALESCE(message, '') || ' ' || COALESCE(recipient_name, ''))")
+    return (
+        "NOT ("
+        f"{email} OR {source} OR {submission} "
+        f"OR ({body} LIKE '{wildcard} e2e {wildcard}' AND "
+        f"{body} LIKE '{wildcard}test{wildcard}') "
+        f"OR LOWER(COALESCE(recipient_name, '')) LIKE 'test-dj-{wildcard}' "
+        f"OR LOWER(COALESCE(organization, '')) LIKE 'test-dj-{wildcard}')")
+
+
+_DEV_DJ_FIXTURE_EXCLUSION_SQL = _dj_dev_fixture_exclusion_sql("%")
+_DEV_OUTREACH_FIXTURE_EXCLUSION_SQL = _outreach_dev_fixture_exclusion_sql("%")
+
+
 class ValidationError(Exception):
     """Raised per-record during validation; captured into the report."""
 
@@ -480,12 +542,15 @@ class PersistenceService:
                     first_stored, now,
                 ))
             count += 1
-        # Full-replace reconciliation: an intake delivers the COMPLETE,
-        # freshly enriched contact set. Any contact_uid already stored for
-        # this station that is NOT in the fresh result is stale (superseded
-        # extraction, garbage from older code, a DJ-list flood) and is
-        # removed so a re-enrich never re-surfaces obsolete rows. Mirrors
-        # PostgresStorage._upsert_contacts exactly.
+        # Reconciliation preserves stored facts: an intake delivers the
+        # COMPLETE, freshly enriched contact set, so any contact_uid already
+        # stored for this station that is NOT in the fresh result is stale
+        # (superseded extraction, garbage from older code, a DJ-list flood)
+        # and is removed — but ONLY when the fresh set is non-empty. A
+        # partial/empty intake (fetch failure, robots-blocked page, budget
+        # limit) must NEVER erase previously stored contact facts; if the
+        # intake genuinely has zero contacts it simply leaves the stored set
+        # untouched. Mirrors PostgresStorage._upsert_contacts exactly.
         incoming_uids = {contact_uid(stable_id, c) for c in contacts}
         if incoming_uids:
             marks = ",".join(["?"] * len(incoming_uids))
@@ -493,10 +558,6 @@ class PersistenceService:
                 f"DELETE FROM contacts WHERE identity_key=? "
                 f"AND contact_uid NOT IN ({marks})",
                 [stable_id, *sorted(incoming_uids)])
-        else:
-            self._conn.execute(
-                "DELETE FROM contacts WHERE identity_key=?",
-                (stable_id,))
         return count
 
     def _upsert_submission(self, stable_id: str, payload: dict,
@@ -1011,12 +1072,32 @@ class PersistenceService:
         return self._outreach_from_row(row) if row else None
 
     def list_outreach(self, limit: int = 50, offset: int = 0,
-                      status: str | None = None) -> tuple[list[dict], int]:
+                      status: str | None = None,
+                      exclude_dev: bool = False
+                      ) -> tuple[list[dict], int] \
+            | tuple[list[dict], int, int]:
         clauses, params = [], []
         if status:
             clauses.append("status = ?")
             params.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        if exclude_dev:
+            dev_clause = "(" + _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL + ")"
+            dev_where = (f"WHERE {' AND '.join(clauses)} AND {dev_clause}"
+                         if clauses else f"WHERE {dev_clause}")
+            with self._lock:
+                visible_total = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM outreach_messages {dev_where}",
+                    params).fetchone()["n"]
+                full_total = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM outreach_messages {where}",
+                    params).fetchone()["n"]
+                rows = self._conn.execute(
+                    f"SELECT * FROM outreach_messages {dev_where} "
+                    "ORDER BY created_at DESC, outreach_id LIMIT ? OFFSET ?",
+                    [*params, int(limit), int(offset)]).fetchall()
+            return ([self._outreach_from_row(r) for r in rows],
+                    int(visible_total), int(full_total - visible_total))
         with self._lock:
             total = self._conn.execute(
                 f"SELECT COUNT(*) AS n FROM outreach_messages {where}",
@@ -1082,8 +1163,9 @@ class PersistenceService:
                  platform: str | None = None,
                  has_contact: bool | None = None,
                  sort: str | None = None,
-                 order: str | None = None
-                 ) -> tuple[list[dict], int]:
+                 order: str | None = None,
+                 exclude_dev: bool = False
+                 ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
         clauses, params = [], []
         if q:
             clauses.append(
@@ -1135,6 +1217,25 @@ class PersistenceService:
             f"{col} {direction}" for col in order_by.split(", "))
         where = " AND ".join(clauses)
         where_sql = f"WHERE {where}" if where else ""
+        if exclude_dev:
+            dev_clause = "(" + _DEV_DJ_FIXTURE_EXCLUSION_SQL + ")"
+            dev_where = (f"WHERE {where} AND {dev_clause}"
+                         if where else f"WHERE {dev_clause}")
+            with self._lock:
+                visible_total = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM djs {dev_where}",
+                    params).fetchone()["n"]
+                full_total = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM djs {where_sql}",
+                    params).fetchone()["n"]
+                rows = self._conn.execute(
+                    f"SELECT * FROM djs {dev_where} "
+                    f"ORDER BY {order_clause} "
+                    "LIMIT ? OFFSET ?",
+                    [*params, int(limit), int(offset)]).fetchall()
+            djs = [self._dj_from_row(r) for r in rows]
+            self._decorate_dj_contact_flag(djs)
+            return djs, int(visible_total), int(full_total - visible_total)
         with self._lock:
             total = self._conn.execute(
                 f"SELECT COUNT(*) AS n FROM djs {where_sql}",

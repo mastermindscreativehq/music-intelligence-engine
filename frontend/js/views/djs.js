@@ -10,6 +10,7 @@ import { api, ApiError } from "../api.js";
 import { chips, el } from "../dom.js";
 import { djHref } from "../router.js";
 import { stationLocation } from "./stationLocation.js";
+import { djStatusChip } from "./status.js";
 
 const LIMIT_CHOICES = [25, 50, 100, 200];
 
@@ -82,8 +83,9 @@ function filterForm(current, onApply) {
   return form;
 }
 
-function summaryLine(total) {
-  return `${total} DJ${total === 1 ? "" : "s"} found`;
+function summaryLine(total, devExcluded) {
+  return `${total} DJ${total === 1 ? "" : "s"} found`
+    + (devExcluded ? ` · ${devExcluded} development/test fixture${devExcluded === 1 ? "" : "s"} hidden` : "");
 }
 
 function resultRow(dj) {
@@ -96,7 +98,8 @@ function resultRow(dj) {
     el("td", {},
       el("a", { class: "station-name", href: djHref(dj.dj_id) },
         dj.stage_name || dj.name || "(unnamed DJ)"),
-      el("div", { class: "dim" }, subtitle)),
+      el("div", { class: "dim" }, subtitle),
+      el("div", { class: "overview-row" }, djStatusChip(dj))),
     el("td", {}, chips(dj.genres)),
     el("td", {}, chips(dj.formats)),
     el("td", { class: "dim" }, stationLocation(dj) || "—"),
@@ -144,7 +147,7 @@ export function renderDJsView(root) {
       }
       resultsCard.replaceChildren(
         el("h2", {}, "DJs"),
-        el("p", { class: "dim" }, summaryLine(data.total)),
+        el("p", { class: "dim" }, summaryLine(data.total, data.dev_fixtures_excluded)),
         el("table", { class: "results" },
           el("thead", {}, el("tr", {},
             el("th", {}, "DJ"), el("th", {}, "genres"),

@@ -34,14 +34,14 @@ INDEPENDENT_DJ = {
     "role": "open-format DJ",
     "country": "US",
     "genres": ["hip hop", "dancehall"],
-    "source_urls": ["https://djashanti.example/"],
+    "source_urls": ["https://djashanti.fm/"],
     "channels": [
         {"channel": "email",
-         "value": "booking@djashanti.example",
-         "source_url": "https://djashanti.example/contact"},
+         "value": "booking@djashanti.fm",
+         "source_url": "https://djashanti.fm/contact"},
         {"channel": "instagram",
          "value": "https://instagram.com/djashanti",
-         "source_url": "https://djashanti.example/contact"},
+         "source_url": "https://djashanti.fm/contact"},
     ],
 }
 

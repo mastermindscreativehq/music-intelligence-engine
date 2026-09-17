@@ -49,12 +49,12 @@ VALID_DJ = {
     "country": "NG",
     "city": "Lagos",
     "genres": ["afrobeats"],
-    "source_urls": ["https://profile.example/amara"],
+    "source_urls": ["https://djamara.fm/"],
     "channels": [
-        {"channel": "email", "value": "book@amara.example",
-         "source_url": "https://profile.example/amara"},
+        {"channel": "email", "value": "book@djamara.fm",
+         "source_url": "https://djamara.fm/"},
         {"channel": "instagram", "value": "@dj_amara",
-         "source_url": "https://profile.example/amara"},
+         "source_url": "https://djamara.fm/"},
     ],
 }
 

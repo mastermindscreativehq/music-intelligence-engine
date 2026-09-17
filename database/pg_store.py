@@ -52,6 +52,8 @@ from database.service import (
     load_records_file,
     normalize_intelligence_record,
     validate_intelligence_record,
+    _dj_dev_fixture_exclusion_sql,
+    _outreach_dev_fixture_exclusion_sql,
 )
 
 # Development-fixture quarantine, mirroring database.service so the
@@ -70,6 +72,11 @@ _DEV_FIXTURE_EXCLUSION_SQL = (
         f"{_DEV_HOST} IS NOT NULL AND {_DEV_HOST} NOT LIKE '%%{suffix}' "
         "ESCAPE '\\'"
         for suffix in _DEV_HOST_SUFFIXES))
+
+# DJ and outreach read-path quarantines mirror the station rule; psycopg
+# placeholder grammar requires the ``%%`` wildcard (see note above).
+_DEV_DJ_FIXTURE_EXCLUSION_SQL = _dj_dev_fixture_exclusion_sql("%%")
+_DEV_OUTREACH_FIXTURE_EXCLUSION_SQL = _outreach_dev_fixture_exclusion_sql("%%")
 
 _JSON = frozenset({
     "classification_evidence", "formats", "genres", "genre_evidence",
@@ -489,19 +496,20 @@ class PostgresStorage:
                  first_stored, now))
             count += 1
 
-        # Full-replace reconciliation: an intake delivers the COMPLETE, freshly
-        # enriched contact set for the station. Any contact_uid already stored
-        # for this station that is NOT in the fresh result is stale (superseded
-        # extraction, garbage from older code, a DJ-list flood) and is removed
-        # so a re-enrich never re-surfaces obsolete or fabricated rows.
+        # Reconciliation preserves stored facts: an intake delivers the
+        # COMPLETE, freshly enriched contact set, so any contact_uid already
+        # stored for this station that is NOT in the fresh result is stale
+        # (superseded extraction, garbage from older code, a DJ-list flood)
+        # and is removed — but ONLY when the fresh set is non-empty. A
+        # partial/empty intake (fetch failure, robots-blocked page, budget
+        # limit) must NEVER erase previously stored contact facts; if the
+        # intake genuinely has zero contacts it simply leaves the stored set
+        # untouched. Mirrors PersistenceService._upsert_contacts exactly.
         if incoming_uids:
             cur.execute(
                 "DELETE FROM contacts WHERE identity_key=%s "
                 "AND contact_uid != ALL(%s::text[])",
                 (stable_id, incoming_uids))
-        else:
-            cur.execute(
-                "DELETE FROM contacts WHERE identity_key=%s", (stable_id,))
         return count
 
     def _upsert_submission(self, cur, stable_id: str, payload: dict,
@@ -1044,12 +1052,35 @@ class PostgresStorage:
         return self._outreach_from_row(row) if row else None
 
     def list_outreach(self, limit: int = 50, offset: int = 0,
-                      status: str | None = None) -> tuple[list[dict], int]:
+                      status: str | None = None,
+                      exclude_dev: bool = False
+                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
         clauses, params = [], []
         if status:
             clauses.append("status = %s")
             params.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        if exclude_dev:
+            dev_clause = "(" + _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL + ")"
+            dev_where = (f"WHERE {' AND '.join(clauses)} AND {dev_clause}"
+                         if clauses else f"WHERE {dev_clause}")
+            with self._lock:
+                self._ensure_connection()
+                cur = self._conn.cursor()
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM outreach_messages {dev_where}",
+                    params)
+                visible_total = int(cur.fetchone()["n"])
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM outreach_messages {where}",
+                    params)
+                full_total = int(cur.fetchone()["n"])
+                cur.execute(
+                    f"SELECT * FROM outreach_messages {dev_where} "
+                    "ORDER BY created_at DESC, outreach_id LIMIT %s OFFSET %s",
+                    [*params, int(limit), int(offset)])
+                rows = [self._outreach_from_row(r) for r in cur.fetchall()]
+            return rows, visible_total, full_total - visible_total
         with self._lock:
             self._ensure_connection()
             cur = self._conn.cursor()
@@ -1131,8 +1162,9 @@ class PostgresStorage:
                  platform: str | None = None,
                  has_contact: bool | None = None,
                  sort: str | None = None,
-                 order: str | None = None
-                 ) -> tuple[list[dict], int]:
+                 order: str | None = None,
+                 exclude_dev: bool = False
+                 ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
         clauses, params = [], []
         if q:
             clauses.append(
@@ -1184,6 +1216,26 @@ class PostgresStorage:
             f"{col} {direction}" for col in order_by.split(", "))
         where = " AND ".join(clauses)
         where_sql = f"WHERE {where}" if where else ""
+        if exclude_dev:
+            dev_clause = "(" + _DEV_DJ_FIXTURE_EXCLUSION_SQL + ")"
+            dev_where = (f"WHERE {where} AND {dev_clause}"
+                         if where else f"WHERE {dev_clause}")
+            with self._guard() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM djs {dev_where}", params)
+                visible_total = int(cur.fetchone()["n"])
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM djs {where_sql}", params)
+                full_total = int(cur.fetchone()["n"])
+                cur.execute(
+                    f"SELECT * FROM djs {dev_where} "
+                    f"ORDER BY {order_clause} "
+                    "LIMIT %s OFFSET %s",
+                    [*params, int(limit), int(offset)])
+                rows = [_dj_from_row(r) for r in cur.fetchall()]
+            self._decorate_dj_contact_flag(rows)
+            return rows, visible_total, full_total - visible_total
         with self._guard() as conn:
             cur = conn.cursor()
             cur.execute(

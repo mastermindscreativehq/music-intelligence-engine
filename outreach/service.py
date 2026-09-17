@@ -164,12 +164,18 @@ def get_outreach(repository, outreach_id: str) -> dict | None:
 
 
 def list_outreach(repository, *, limit=50, offset=0,
-                  status: str | None = None) -> tuple[list, int]:
+                  status: str | None = None,
+                  exclude_dev: bool = False) -> tuple[list, int]:
     if status is not None and status not in OUTREACH_STATUSES:
         raise ValueError(
             "'status' must be one of: " + ", ".join(OUTREACH_STATUSES))
-    rows, total = repository.list_outreach(limit=limit, offset=offset,
-                                           status=status)
+    rows = repository.list_outreach(limit=limit, offset=offset,
+                                    status=status, exclude_dev=exclude_dev)
+    if exclude_dev:
+        rows, total, dev_excluded = rows
+        rows = [get_outreach(repository, r["outreach_id"]) for r in rows]
+        return rows, total, dev_excluded
+    rows, total = rows
     return [get_outreach(repository, r["outreach_id"]) for r in rows], total
 
 

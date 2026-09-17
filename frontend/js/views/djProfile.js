@@ -19,6 +19,7 @@ import { api, ApiError } from "../api.js";
 import { chips, el } from "../dom.js";
 import { djsHref, outreachHref } from "../router.js";
 import { stationLocation } from "./stationLocation.js";
+import { djStatusChip } from "./status.js";
 
 function errorBanner(error) {
   const detail = error instanceof ApiError
@@ -75,7 +76,8 @@ function overviewSection(detail) {
       stationLine ? el("span", { class: "dim" }, " · " + stationLine) : null,
       location ? el("span", { class: "dim" }, " · " + location) : null),
     el("div", { class: "overview-row" },
-      chips(detail.genres), " ", chips(detail.formats)));
+      chips(detail.genres), " ", chips(detail.formats),
+      " ", djStatusChip(detail)));
 }
 
 /* ---------------------------------------------------------------------------
@@ -339,6 +341,60 @@ function historySection(detail) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Intelligence Details (collapsed): classification evidence + source URLs.
+ * ------------------------------------------------------------------------- */
+
+function djKvCard(pairs) {
+  const rows = pairs
+    .filter(([, value]) => value !== null && value !== undefined)
+    .map(([key, value]) => [el("dt", {}, key), el("dd", {}, value)]);
+  if (rows.length === 0) return null;
+  return el("dl", { class: "kv" }, rows.flat());
+}
+
+function classificationCard(cls) {
+  if (!cls) return null;
+  return el("div", {},
+    el("h3", {}, "DJ classification"),
+    djKvCard([
+      ["classification", cls.verdict || null],
+      ["kind", cls.kind || null],
+      ["reason", cls.reason || null],
+      ["evidence", cls.evidence_url
+        ? externalLink(cls.evidence_url) : null],
+      ["evaluated at", cls.evaluated_at || null],
+    ]));
+}
+
+function sourceUrlsCard(detail) {
+  const sources = Array.isArray(detail.source_urls)
+    ? detail.source_urls.slice(0, 10) : [];
+  if (sources.length === 0) return null;
+  return el("div", {},
+    el("h3", {}, "Source URLs"),
+    el("ul", { class: "provenance-list" },
+      sources.map((url) => el("li", {}, externalLink(url)))));
+}
+
+function intelligenceDetails(detail) {
+  const cls = detail.classification
+    && typeof detail.classification === "object"
+    ? detail.classification : null;
+  const parts = [classificationCard(cls), sourceUrlsCard(detail)]
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return el("details", { class: "card detail-collapse" },
+      el("summary", {}, "Intelligence Details"),
+      el("div", { class: "detail-body" },
+        el("p", { class: "dim" },
+          "No classification evidence recorded for this DJ yet.")));
+  }
+  return el("details", { class: "card detail-collapse" },
+    el("summary", {}, "Intelligence Details"),
+    el("div", { class: "detail-body" }, parts));
+}
+
+/* ---------------------------------------------------------------------------
  * View assembly
  * ------------------------------------------------------------------------- */
 
@@ -353,7 +409,8 @@ export function renderDJProfileView(root, djId, basket) {
       channelsSection(detail),
       submissionSection(detail),
       outreachSection(detail, basket, onStagedChange),
-      historySection(detail));
+      historySection(detail),
+      intelligenceDetails(detail));
   }).catch((error) => {
     root.replaceChildren(errorBanner(error));
   });

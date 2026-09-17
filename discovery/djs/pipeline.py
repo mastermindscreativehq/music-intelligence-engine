@@ -181,12 +181,30 @@ class DjsDiscoveryEngine:
 
     def _process_candidate(self, candidate: Candidate, request: DiscoveryRequest,
                            result: DiscoveryResult) -> dict | None:
+        from discovery.djs.qualify import (
+            VERDICT_NEEDS_REVIEW,
+            VERDICT_REJECTED,
+            classify_candidate,
+        )
+
         try:
             homepage_url = normalize_url(candidate.url)
         except (InvalidUrlError, ValueError) as exc:
             result.failures.append(Failure(
                 stage="url_normalization", error_kind="invalid_url",
                 message=str(exc), url=candidate.url))
+            return None
+
+        # Qualification gate (pre-fetch): a candidate on an event/ticketing/
+        # playlist/listing page is rejected up front; its evidence URL is
+        # never even crawled.
+        classification = classify_candidate(
+            url=homepage_url, title=candidate.title or "",
+            snippet=candidate.snippet or "")
+        if classification.verdict == VERDICT_REJECTED:
+            result.failures.append(Failure(
+                stage="dj_qualification", error_kind="not_a_dj",
+                message=classification.reason, url=homepage_url))
             return None
 
         record = {
@@ -221,7 +239,17 @@ class DjsDiscoveryEngine:
                 message=fetch.error_message or "homepage fetch failed",
                 url=homepage_url,
             ))
+            # A page that could not be fetched cannot raise the candidate to
+            # qualified evidence; needs_review candidates are not ingested.
+            if classification.verdict == VERDICT_NEEDS_REVIEW:
+                result.failures.append(Failure(
+                    stage="dj_qualification",
+                    error_kind="needs_human_review",
+                    message=classification.reason, url=homepage_url))
+                return None
             record["verification"]["page_fetch"] = "failed"
+            record["verification"]["classification"] = \
+                classification.to_dict()
             return record
 
         page = parse_html(fetch.final_url or homepage_url, fetch.body or "")
@@ -232,6 +260,23 @@ class DjsDiscoveryEngine:
         if final not in record["source_urls"]:
             record["source_urls"].append(final)
 
+        # Qualification gate (post-fetch): the fetched page title is the
+        # ultimate evidence; downgraded verdicts (rejected / needs_review)
+        # are never ingested.
+        classification = classify_candidate(
+            url=homepage_url, title=candidate.title or "",
+            snippet=candidate.snippet or "", page_title=page.title)
+        if classification.verdict == VERDICT_REJECTED:
+            result.failures.append(Failure(
+                stage="dj_qualification", error_kind="not_a_dj",
+                message=classification.reason, url=homepage_url))
+            return None
+        if classification.verdict == VERDICT_NEEDS_REVIEW:
+            result.failures.append(Failure(
+                stage="dj_qualification", error_kind="needs_human_review",
+                message=classification.reason, url=homepage_url))
+            return None
+
         domain = canonical_domain(homepage_url)
         all_links = [link.href_absolute for link in page.links
                      if link.href_absolute]
@@ -239,6 +284,7 @@ class DjsDiscoveryEngine:
         record["channels"] = channels
         record["verification"]["page_fetch"] = "ok"
         record["verification"]["site_title"] = page_title or record["name"]
+        record["verification"]["classification"] = classification.to_dict()
         return record
 
     def _channel_facts(self, page, fetch: FetchResult,

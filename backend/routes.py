@@ -383,11 +383,12 @@ def _handle(service, method: str, match: re.Match, params: dict,
             return 201, success_body(record)
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
-        rows, total = outreach_service.list_outreach(
+        rows, total, dev_excluded = outreach_service.list_outreach(
             service, limit=limit, offset=offset,
-            status=_first(params, "status"))
+            status=_first(params, "status"), exclude_dev=True)
         return 200, success_body({"outreach": rows, "total": total,
-                                  "limit": limit, "offset": offset})
+                                  "limit": limit, "offset": offset,
+                                  "dev_fixtures_excluded": dev_excluded})
 
     if path.startswith("/api/v1/outreach/") and path.endswith("/event"):
         outreach_id = match.group("outreach_id")
@@ -525,7 +526,7 @@ def _handle(service, method: str, match: re.Match, params: dict,
             raise ValueError("'sort' must be name, station or discovered")
         if order not in ("asc", "desc"):
             raise ValueError("'order' must be asc or desc")
-        rows, total = dj_service.list_djs(
+        rows, total, dev_excluded = dj_service.list_djs(
             service, limit=limit, offset=offset, q=_first(params, "q"),
             genre=_first(params, "genre"), country=_first(params, "country"),
             location=_first(params, "location"),
@@ -533,10 +534,11 @@ def _handle(service, method: str, match: re.Match, params: dict,
             dj_type=_first(params, "dj_type"),
             platform=_first(params, "platform"),
             has_contact=_opt_bool(params, "has_contact"),
-            sort=sort, order=order)
+            sort=sort, order=order, exclude_dev=True)
         return 200, success_body({
             "djs": [dj_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,
+            "dev_fixtures_excluded": dev_excluded,
         })
 
     if path.startswith("/api/v1/djs/"):

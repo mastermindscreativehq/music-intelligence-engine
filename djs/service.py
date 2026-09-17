@@ -203,19 +203,24 @@ def list_djs(repository, *, limit: int = 50, offset: int = 0,
              country: str | None = None, location: str | None = None,
              station: str | None = None, dj_type: str | None = None,
              platform: str | None = None, has_contact: bool | None = None,
-             sort: str | None = None, order: str | None = None
-             ) -> tuple[list[dict], int]:
-    """Filtered DJ listing; returns (rows, total).
+             sort: str | None = None, order: str | None = None,
+             exclude_dev: bool = False
+             ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
+    """Filtered DJ listing; returns (rows, total) or, when ``exclude_dev``
+    is set, (rows, visible_total, dev_fixtures_excluded).
 
     ``station`` filters on the DJ's OPTIONAL station affiliation only —
     affiliation is metadata, never a discovery source. ``dj_type`` matches
     the stored role label (e.g. ``club_dj``); ``has_contact`` requires (or
-    excludes) DJs with at least one stored channel.
+    excludes) DJs with at least one stored channel. With ``exclude_dev``,
+    dev/test fixtures (reserved-TLD hosts, ``test-dj-``/``e2e`` markers) are
+    hidden from the read path — storage is never mutated.
     """
     return repository.list_djs(
         limit=limit, offset=offset, q=q, genre=genre, country=country,
         location=location, station=station, dj_type=dj_type,
-        platform=platform, has_contact=has_contact, sort=sort, order=order)
+        platform=platform, has_contact=has_contact, sort=sort, order=order,
+        exclude_dev=exclude_dev)
 
 
 def ingest_dj_discovery(repository, records: list[dict], *,

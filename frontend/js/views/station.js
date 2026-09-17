@@ -23,6 +23,11 @@ import {
 } from "../dom.js";
 import { outreachHref } from "../router.js";
 import { stationLocation } from "./stationLocation.js";
+import {
+  contactStatusChip,
+  stationResearchChip,
+  submissionStatusChip,
+} from "./status.js";
 
 const STATUS_CLASSES = ["verified", "conflicting", "failed", "stale",
   "unverified", "unsupported", "enriched", "new", "broken"];
@@ -60,7 +65,8 @@ function overviewSection(detail) {
         : el("span", { class: "dim" }, "no website on record"),
       detail.website && location ? el("span", {}, ` · ${location}`) : null),
     el("div", { class: "overview-row" },
-      chips(detail.genres), " ", chips(detail.formats)));
+      stationResearchChip(detail.research_status),
+      " ", chips(detail.genres), " ", chips(detail.formats)));
 }
 
 /* ---------------------------------------------------------------------------
@@ -304,6 +310,10 @@ function submissionInformationCard(detail, intel, usefulPages, contactsPayload) 
     el("p", { class: "dim" },
       "Real submission routes and contact points this station actually ",
       "publishes. Use these below when you prepare outreach."),
+    el("div", { class: "chips" },
+      submissionStatusChip(status),
+      " ",
+      contactStatusChip(emailContact, contactPage)),
     el("div", { class: "action-grid" }, tiles),
     usefulPagesCard(usefulPages, route));
 }
