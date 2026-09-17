@@ -7,11 +7,19 @@
 -- failed | closed). Non-destructive: legacy values are REMAPPED in place,
 -- never deleted ('draft' and 'opened_in_email' both become 'ready'; the
 -- mail-client handoff nuance stays verbatim in the attempts ledger).
--- The existing CHECK constraints are dropped and recreated (DEFAULT name for
--- a column CHECK on these tables is <table>_status_check / <table>_event_check).
+--
+-- ORDER MATTERS: the remap runs AFTER the old constraint is dropped (the
+-- new 'ready' value is not allowed by the legacy allowance) but BEFORE the
+-- new CHECK is added (PostgreSQL validates every existing row at
+-- ADD CONSTRAINT, so live legacy rows must already be canonical by then).
 
 ALTER TABLE outreach_messages
     DROP CONSTRAINT IF EXISTS outreach_messages_status_check;
+
+UPDATE outreach_messages
+    SET status = 'ready'
+    WHERE status IN ('draft', 'opened_in_email');
+
 ALTER TABLE outreach_messages
     ADD CONSTRAINT outreach_messages_status_check CHECK (status IN (
         'ready', 'sent', 'responded', 'follow_up', 'failed', 'closed'));
@@ -22,7 +30,3 @@ ALTER TABLE outreach_attempts
     ADD CONSTRAINT outreach_attempts_event_check CHECK (event IN (
         'opened_in_email', 'sent', 'responded', 'follow_up',
         'failed', 'closed'));
-
-UPDATE outreach_messages
-    SET status = 'ready'
-    WHERE status IN ('draft', 'opened_in_email');
