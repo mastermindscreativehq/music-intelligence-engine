@@ -104,6 +104,7 @@ class SerpApiSearchDjsProvider:
             fetcher = StdlibHttpFetcher(
                 timeout_seconds=timeout, max_bytes=1_500_000,
                 user_agent=DEFAULT_USER_AGENT, respect_robots=False,
+                allowed_content_types=("application/json",),
             )
         self._fetcher = fetcher
         self._host = self._derive_host()

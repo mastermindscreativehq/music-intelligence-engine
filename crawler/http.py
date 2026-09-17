@@ -154,12 +154,15 @@ class StdlibHttpFetcher:
         rate_limit_seconds: float = 1.0,
         respect_robots: bool = True,
         user_agent: str = DEFAULT_USER_AGENT,
+        allowed_content_types: tuple[str, ...] = (
+            "text/html", "application/xhtml+xml", "text/plain"),
     ) -> None:
         self.timeout = timeout_seconds
         self.max_bytes = max_bytes
         self.user_agent = user_agent
         self.rate_limiter = RateLimiter(rate_limit_seconds)
         self.robots = RobotsCache(user_agent, timeout_seconds, respect_robots)
+        self.allowed_content_types = tuple(allowed_content_types)
 
     def fetch(self, url: str, *, timeout: float | None = None) -> FetchResult:
         result = FetchResult(url=url)
@@ -228,7 +231,7 @@ class StdlibHttpFetcher:
             result.error_kind = "too_large"
             result.error_message = f"body exceeds {self.max_bytes} bytes"
             return result
-        if result.content_type not in ("text/html", "application/xhtml+xml", "text/plain"):
+        if result.content_type not in self.allowed_content_types:
             result.error_kind = "content_type"
             result.error_message = f"unsupported content type {result.content_type!r}"
             return result
