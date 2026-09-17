@@ -48,6 +48,7 @@ const TEXT_FILES = [
   "js/views/djs.js",
   "js/views/opportunities.js",
   "js/views/stationLocation.js",
+  "js/views/status.js",
   "js/draftGenerator.js",
   "js/views/outreachModal.js",
 ];
