@@ -141,7 +141,7 @@ function trackDetailPanel(data) {
     tech);
 }
 
-function trackRow(track, detailBox) {
+function trackRow(track, detailBox, reload) {
   let detailsShown = false;
   const detailsButton = el("button", { class: "linkish" }, "details");
   detailsButton.addEventListener("click", async () => {
@@ -167,6 +167,29 @@ function trackRow(track, detailBox) {
     }
   });
 
+  const remove = el("button", { class: "subtle" }, "Remove");
+  remove.addEventListener("click", () => {
+    if (remove.disabled) return;
+    const userConfirmed = window.confirm(
+      `Remove stored asset ${track.track_id} from the console? Only the `
+      + "stored record is deleted; the uploaded file bytes are untouched.");
+    if (!userConfirmed) return;
+    remove.disabled = true;
+    remove.textContent = "removing…";
+    api.deleteTrack(track.track_id)
+      .then(() => {
+        detailBox.replaceChildren();
+        if (typeof reload === "function") reload();
+      })
+      .catch((error) => {
+        remove.disabled = false;
+        remove.textContent = "Remove";
+        const message = error instanceof ApiError ? error.message : String(error);
+        remove.after(el("span", { class: "dim", role: "alert" },
+          `Could not remove: ${message}`));
+      });
+  });
+
   return el("tr", { class: "station-row" },
     el("td", {},
       el("div", {}, track.original_filename || "(unnamed upload)"),
@@ -178,7 +201,7 @@ function trackRow(track, detailBox) {
         : null),
     el("td", {}, String(track.size_bytes ?? "—")),
     el("td", { class: "dim" }, String(track.created_at ?? "—")),
-    el("td", {}, detailsButton));
+    el("td", { class: "actions-cell" }, detailsButton, " ", remove));
 }
 
 function summaryLine(total, limit, offset) {
@@ -264,7 +287,7 @@ export function renderTracksView(root) {
               el("th", {}, "actions"))),
             el("tbody", {},
               (data.tracks || []).map((track) =>
-                trackRow(track, detailBox)))),
+                trackRow(track, detailBox, load)))),
         pagination(data));
     } catch (error) {
       resultsCard.replaceChildren(

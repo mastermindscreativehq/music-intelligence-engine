@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -265,6 +265,170 @@ ALTER TABLE outreach_messages
     ADD COLUMN outreach_class TEXT NOT NULL DEFAULT 'email';
 ALTER TABLE outreach_messages
     ADD COLUMN submission_url TEXT;
+"""),
+
+    # Stabilization 2026-09: adopt the canonical outreach lifecycle
+    # ready -> sent -> responded -> follow_up -> closed (plus the honest
+    # terminal 'failed'). Non-destructive: legacy values are REMAPPED in
+    # place, never deleted ('draft' and 'opened_in_email' both become
+    # 'ready'; the mail-client handoff nuance is preserved verbatim in the
+    # attempts ledger, whose event vocabulary now covers the full set).
+    # SQLite cannot alter a CHECK constraint, so both tables are rebuilt
+    # with their full current shape (v4 columns + v5 additions) and a
+    # relaxed constraint, then the data is copied verbatim modulo the
+    # status/event remap.
+    (6, """
+PRAGMA foreign_keys=OFF;
+
+CREATE TABLE outreach_attempts_v6 (
+    attempt_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    outreach_id   TEXT NOT NULL REFERENCES outreach_messages(outreach_id)
+                  ON DELETE CASCADE,
+    event         TEXT NOT NULL CHECK (event IN
+                    ('opened_in_email', 'sent', 'responded', 'follow_up',
+                     'failed', 'closed')),
+    provider      TEXT NOT NULL DEFAULT 'local',
+    at            TEXT NOT NULL,
+    meta          TEXT                -- JSON object
+);
+INSERT INTO outreach_attempts_v6
+    (attempt_id, outreach_id, event, provider, at, meta)
+    SELECT attempt_id, outreach_id, event, provider, at, meta
+    FROM outreach_attempts;
+DROP TABLE outreach_attempts;
+ALTER TABLE outreach_attempts_v6 RENAME TO outreach_attempts;
+CREATE INDEX IF NOT EXISTS idx_outreach_attempts_msg
+    ON outreach_attempts(outreach_id);
+
+CREATE TABLE outreach_messages_v6 (
+    outreach_id      TEXT PRIMARY KEY,   -- 'om_<hex>'
+    contact_uid      TEXT,
+    identity_key     TEXT,
+    recipient_name   TEXT,
+    recipient_role   TEXT,
+    organization     TEXT,
+    email            TEXT NOT NULL,
+    source_url       TEXT,
+    track_id         TEXT,
+    track            TEXT,               -- JSON object (track metadata)
+    context          TEXT,               -- JSON object (artist/track context)
+    subject          TEXT,
+    message          TEXT,
+    from_email       TEXT,
+    sharing          TEXT,               -- JSON object (sharing options)
+    status           TEXT NOT NULL CHECK (status IN
+                       ('ready', 'sent', 'responded', 'follow_up',
+                        'failed', 'closed')),
+    provider         TEXT NOT NULL DEFAULT 'local',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    outreach_class   TEXT NOT NULL DEFAULT 'email',
+    submission_url   TEXT
+);
+INSERT INTO outreach_messages_v6
+    (outreach_id, contact_uid, identity_key, recipient_name, recipient_role,
+     organization, email, source_url, track_id, track, context, subject,
+     message, from_email, sharing, status, provider, created_at, updated_at,
+     outreach_class, submission_url)
+    SELECT outreach_id, contact_uid, identity_key, recipient_name,
+           recipient_role, organization, email, source_url, track_id, track,
+           context, subject, message, from_email, sharing,
+           CASE status
+               WHEN 'draft' THEN 'ready'
+               WHEN 'opened_in_email' THEN 'ready'
+               ELSE status
+           END,
+           provider, created_at, updated_at, outreach_class, submission_url
+    FROM outreach_messages;
+DROP TABLE outreach_messages;
+ALTER TABLE outreach_messages_v6 RENAME TO outreach_messages;
+CREATE INDEX IF NOT EXISTS idx_outreach_contact
+    ON outreach_messages(contact_uid);
+CREATE INDEX IF NOT EXISTS idx_outreach_status
+    ON outreach_messages(status);
+
+PRAGMA foreign_keys=ON;
+"""),
+
+    # Phase 4: DJ intelligence. DJs are discrete, source-backed outreach
+    # subjects, independent of the station registry (station links are an
+    # optional reference, never a required FK). Channels are per-fact rows
+    # with provenance (source_url) so nothing is ever invented: a value is
+    # stored only when observed. contact/submission routes distinguish a
+    # verified direct DJ contact (email), an official submission route,
+    # a generic contact route, and social routes — all presence-derived.
+    # Fully additive: existing tables are untouched.
+    (7, """
+CREATE TABLE IF NOT EXISTS djs (
+    dj_id            TEXT PRIMARY KEY,   -- 'dj_<24hex>' (opaque)
+    name             TEXT NOT NULL,
+    stage_name       TEXT,
+    role             TEXT,
+    program          TEXT,
+    station_key      TEXT,               -- stations.identity_key when mapped
+    station_name     TEXT,
+    platform         TEXT,
+    country          TEXT,
+    state_or_region  TEXT,
+    city             TEXT,
+    genres           TEXT,               -- JSON array
+    formats          TEXT,               -- JSON array
+    source_urls      TEXT,               -- JSON array (provenance)
+    verification     TEXT,               -- JSON object
+    discovered_at    TEXT,
+    last_observed_at TEXT,
+    first_stored_at  TEXT NOT NULL,
+    last_stored_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_djs_station ON djs(station_key);
+CREATE INDEX IF NOT EXISTS idx_djs_country ON djs(country);
+CREATE INDEX IF NOT EXISTS idx_djs_genres  ON djs(genres);
+
+CREATE TABLE IF NOT EXISTS dj_channels (
+    dj_id       TEXT NOT NULL REFERENCES djs(dj_id) ON DELETE CASCADE,
+    channel     TEXT NOT NULL CHECK (channel IN
+                  ('email', 'website', 'instagram', 'x', 'facebook',
+                   'youtube', 'submission_email', 'submission_page',
+                   'contact_page')),
+    value       TEXT NOT NULL,
+    source_url  TEXT NOT NULL,
+    verified_at TEXT,
+    PRIMARY KEY (dj_id, channel, value)
+);
+CREATE INDEX IF NOT EXISTS idx_dj_channels_dj ON dj_channels(dj_id);
+
+-- Outreach targets now identify their kind so DJ outreach stays isolated
+-- from station / opportunity history. Additive: existing rows default to
+-- the historic behavior ('station').
+ALTER TABLE outreach_messages
+    ADD COLUMN target_type TEXT NOT NULL DEFAULT 'station';
+"""),
+
+    # Phase 11: automation discovery jobs. One row per scheduled/automation
+    # discovery run so operators can answer WHEN a job ran, on what
+    # configuration, through which provider, and with what outcome — without
+    # re-deriving it from logs. Additive: no existing table is touched.
+    (8, """
+CREATE TABLE IF NOT EXISTS discovery_jobs (
+    run_id             TEXT PRIMARY KEY,   -- 'job_<24hex>' (opaque)
+    organization_type  TEXT NOT NULL,      -- 'dj' today; future target types
+    config             TEXT NOT NULL,      -- JSON job configuration
+    provider           TEXT,               -- 'serpapi_google' | 'djs_http_search:<host>' | ...
+    status             TEXT NOT NULL,      -- completed | completed_with_failures |
+                                           -- not_configured | failed
+    queries_run        INTEGER NOT NULL DEFAULT 0,
+    candidates_found   INTEGER NOT NULL DEFAULT 0,
+    records_ingested   INTEGER NOT NULL DEFAULT 0,
+    duplicates         INTEGER NOT NULL DEFAULT 0,
+    failures           INTEGER NOT NULL DEFAULT 0,
+    error_message      TEXT,
+    started_at         TEXT NOT NULL,
+    completed_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_jobs_started
+    ON discovery_jobs(started_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_jobs_org
+    ON discovery_jobs(organization_type);
 """),
 ]
 

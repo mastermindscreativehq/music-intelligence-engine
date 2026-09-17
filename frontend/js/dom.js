@@ -4,9 +4,7 @@
  * built anywhere in this application — values are attached as text nodes
  * or set as attribute values, so untrusted payload content cannot inject
  * elements. Event handlers are attached with addEventListener
- * (CSP-friendly); there are no inline handlers.
- * createDownload() is the single audited place that mints an element
- * outside el(), because anchor downloads need a detached node. */
+ * (CSP-friendly); there are no inline handlers. */
 
 export function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -50,14 +48,4 @@ export function chips(items, extraClass) {
     { class: "chips" },
     (items || []).map((item) => el("span", { class: extraClass ? `chip ${extraClass}` : "chip" }, item)),
   );
-}
-
-/* Trigger a client-side JSON file download (recipient export). */
-export function createDownload(filename, text) {
-  const blob = new Blob([text], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(link.href);
 }

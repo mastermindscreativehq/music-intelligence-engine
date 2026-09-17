@@ -52,6 +52,20 @@ class IntelligenceRepository(Protocol):
     def get_verification(self, identity_key: str) -> dict | None: ...
     def get_ingestion_run(self, run_id: str) -> dict | None: ...
 
+    # -- Phase 11: automation discovery jobs -----------------------------------
+
+    def record_discovery_job(self, report: dict) -> str:
+        """Persist one automation discovery job run; returns its run_id.
+
+        ``report`` is the same shape the discovery job endpoint returns so
+        stored metadata and API responses stay in sync.
+        """
+        ...
+
+    def get_discovery_job(self, run_id: str) -> dict | None:
+        """One stored automation discovery job run (or None)."""
+        ...
+
     # -- Phase 8: submission assets + link accessibility ----------------------
 
     def save_track(self, track: dict) -> dict:
@@ -63,6 +77,13 @@ class IntelligenceRepository(Protocol):
         ...
 
     def get_track(self, track_id: str) -> dict | None: ...
+    def delete_track(self, track_id: str) -> str | None:
+        """Delete one stored asset record; returns the deleted id or None.
+
+        Only the database record is removed — never the uploaded file bytes
+        in the asset store (the existing app defines no file-level removal).
+        """
+        ...
     def list_tracks(self, limit: int = ..., offset: int = ...,
                     status: str | None = ...) -> tuple[list[dict], int]:
         """Listing; returns (rows, total), newest first."""
@@ -85,6 +106,14 @@ class IntelligenceRepository(Protocol):
 
     def get_outreach(self, outreach_id: str) -> dict | None: ...
 
+    def delete_outreach(self, outreach_id: str) -> str | None:
+        """Delete one outreach record; returns the deleted id or None.
+
+        Any attempt history for the record is removed with it; the raw
+        station/contact data that produced the record is untouched.
+        """
+        ...
+
     def list_outreach(self, limit: int = ..., offset: int = ...,
                       status: str | None = ...) -> tuple[list[dict], int]:
         """Listing; returns (rows, total), newest first."""
@@ -102,6 +131,43 @@ class IntelligenceRepository(Protocol):
 
     def get_outreach_attempts(self, outreach_id: str) -> list[dict]:
         """All recorded events for a message, oldest first."""
+        ...
+
+    # -- Phase 4: DJ intelligence ---------------------------------------------
+
+    def list_djs(self, limit: int = ..., offset: int = ...,
+                 q: str | None = ..., genre: str | None = ...,
+                 country: str | None = ..., location: str | None = ...,
+                 station: str | None = ..., dj_type: str | None = ...,
+                 platform: str | None = ...,
+                 has_contact: bool | None = ...,
+                 sort: str | None = ...,
+                 order: str | None = ...) -> tuple[list[dict], int]:
+        """Filtered DJ listing; returns (rows, total), default order by name.
+
+        ``station`` matches the optional station AFFILIATION metadata only;
+        ``has_contact`` requires/excludes profiles with at least one stored
+        channel; rows include the read-path ``has_contact`` flag.
+        """
+        ...
+
+    def get_dj(self, dj_id: str) -> dict | None:
+        """One DJ row (JSON columns decoded) or None."""
+        ...
+
+    def get_dj_channels(self, dj_id: str) -> list[dict]:
+        """Source-backed channels for one DJ, grouped by channel name."""
+        ...
+
+    def save_dj(self, record: dict, channels: list[dict] | None = ...) -> None:
+        """Upsert one DJ row and replace its channel rows (transactional)."""
+        ...
+
+    def delete_dj(self, dj_id: str) -> str | None:
+        """Delete one DJ (channels cascade); returns the id or None.
+
+        Outreach records created for the DJ are preserved (target_type dj).
+        """
         ...
 
     def close(self) -> None: ...

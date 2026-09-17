@@ -98,6 +98,11 @@ class Candidate:
     snippet: str = ""
     source_type: SourceType = SourceType.SEARCH_SOURCE
     discovered_at: str = field(default_factory=utc_now_iso)
+    # Optional geography carried through from the discovery source (seed
+    # entry / request). Never fabricated here: only provided values are kept.
+    country: str | None = None
+    state_or_region: str | None = None
+    city: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.url, str) or not self.url.strip():
@@ -109,6 +114,13 @@ class Candidate:
                 self.source_type = SourceType(self.source_type)
             except ValueError:
                 self.source_type = SourceType.OTHER
+        for name in ("country", "state_or_region", "city"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{name} must be a string or None")
+            if isinstance(value, str):
+                cleaned = value.strip()
+                setattr(self, name, cleaned or None)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +130,9 @@ class Candidate:
             "snippet": self.snippet,
             "source_type": self.source_type.value,
             "discovered_at": self.discovered_at,
+            "country": self.country,
+            "state_or_region": self.state_or_region,
+            "city": self.city,
         }
 
 

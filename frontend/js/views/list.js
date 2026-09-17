@@ -1,112 +1,17 @@
-/* Station list view — find a radio station.
+/* Station list view (#/stations) — find and open a radio station.
  *
- * Provides search + optional filters and a clear, action-first list of the
+ * Provides search + optional filters and an action-first list of the
  * stations the engine has discovered. Filters map onto the real backend
- * listing endpoint; the backend owns interpretation. */
+ * listing endpoint; the backend owns interpretation. Each row opens the
+ * station page (the primary outreach intake) — there is no in-line
+ * "send music" shortcut here, so a single intended action governs. */
 
 import { api, ApiError } from "../api.js";
 import { chips, el } from "../dom.js";
-import { outreachHref, stationHref } from "../router.js";
+import { stationHref } from "../router.js";
+import { stationLocation } from "./stationLocation.js";
 
 const LIMIT_CHOICES = [25, 50, 100, 200];
-
-/* Best available route for sending music to a station, in priority order
- * (submission page -> verified email -> contact page -> program/DJ page).
- * Only discovered URLs and verified emails are used; nothing is guessed. */
-function submissionPages(usefulPages) {
-  return (usefulPages || []).filter((p) => p
-    && typeof p.url === "string" && /^https?:\/\//i.test(p.url)
-    && (p.category === "send_music"
-      || p.category === "submission_guidelines"));
-}
-
-function bestCategoryPage(usefulPages, category) {
-  const pages = (usefulPages || []).filter((p) => p
-    && p.category === category
-    && typeof p.url === "string" && /^https?:\/\//i.test(p.url));
-  const usable = pages.filter((p) => (p.label && p.label.trim().length > 2));
-  return usable[0] || null;
-}
-
-function resolveBestRoute(intel, contactsPayload) {
-  const canonical = intel && intel.submission && intel.submission.submission_url;
-  if (canonical && canonical.value
-    && /^https?:\/\//i.test(String(canonical.value))) {
-    return {
-      url: canonical.value,
-      label: canonical.source_type === "official_website_page"
-        ? "official submission page" : "verified submission page",
-      role: "music_submission",
-    };
-  }
-  const submissionPage = submissionPages(intel && intel.useful_pages)[0] || null;
-  if (submissionPage) {
-    return {
-      url: submissionPage.url,
-      label: submissionPage.label || "submission page",
-      role: "music_submission",
-    };
-  }
-  const withEmail = (contactsPayload && contactsPayload.contacts || [])
-    .filter((c) => c && c.email && String(c.email).trim());
-  const firstEmail = withEmail[0] || null;
-  if (firstEmail) {
-    return {
-      contact: firstEmail,
-      label: (firstEmail.role && firstEmail.role.replace(/_/g, " "))
-        || "station contact",
-      role: "email",
-    };
-  }
-  const contactPage = bestCategoryPage(intel && intel.useful_pages, "contact");
-  if (contactPage) {
-    return {
-      url: contactPage.url,
-      label: contactPage.label || "contact page",
-      role: "station_contact",
-    };
-  }
-  const djPage = bestCategoryPage(intel && intel.useful_pages, "dj_directory")
-    || bestCategoryPage(intel && intel.useful_pages, "programming");
-  if (djPage) {
-    return {
-      url: djPage.url,
-      label: djPage.label || "program page",
-      role: "station_program_page",
-    };
-  }
-  return null;
-}
-
-/* Add the station's best route to the outreach list and open it. */
-async function sendMusic(identityKey, stationName, basket) {
-  const [intel, contactsPayload] = await Promise.all([
-    api.intelligence(identityKey),
-    api.contacts(identityKey),
-  ]);
-  const route = resolveBestRoute(intel, contactsPayload);
-  if (!route) return null;
-  const uid = `st_${identityKey.replace(/[^a-z0-9]+/gi, "_")}`;
-  const recipient = {
-    contact_uid: uid,
-    identity_key: identityKey,
-    station_name: stationName,
-    name: (typeof route.label === "string"
-      ? route.label.replace(/^official /, "") : "route") || "route",
-    role: route.role,
-    email: route.contact ? String(route.contact.email).trim() : "",
-    source_url: route.contact
-      ? (route.contact.source_url || null) : null,
-    outreach_class: route.role === "email" ? "email" : "webform",
-    submission_url: route.url || null,
-    route_kind: route.role === "email" ? "email"
-      : route.role === "station_contact" ? "contact"
-      : route.role === "station_program_page" ? "dj" : "webform",
-    route_label: route.label,
-  };
-  basket.add(recipient);
-  return recipient;
-}
 
 function errorBanner(error) {
   const detail = error instanceof ApiError
@@ -161,38 +66,11 @@ function filterForm(current, onApply) {
   return form;
 }
 
-function summaryLine(total, limit, offset) {
-  const from = total === 0 ? 0 : offset + 1;
-  const to = Math.min(offset + limit, total);
+function summaryLine(total) {
   return `${total} station${total === 1 ? "" : "s"} found`;
 }
 
-function locationOf(station) {
-  return [station.city, station.state_or_region, station.country]
-    .filter(Boolean).join(", ") || "—";
-}
-
-function resultRow(station, basket) {
-  let sendButton;
-  const onClick = async () => {
-    if (sendButton.disabled) return;
-    sendButton.disabled = true;
-    sendButton.textContent = "adding…";
-    try {
-      const recipient = await sendMusic(
-        station.identity_key, station.name, basket);
-      if (recipient) {
-        window.location.hash = outreachHref([recipient.contact_uid]);
-        return;
-      }
-      /* No route: land on the station page where the honest state is shown. */
-      window.location.hash = stationHref(station.identity_key);
-    } catch (error) {
-      window.location.hash = stationHref(station.identity_key);
-    }
-  };
-  sendButton = el("button", { class: "subtle buttonish", onClick },
-    "Send music");
+function resultRow(station) {
   return el(
     "tr",
     { class: "station-row" },
@@ -202,13 +80,14 @@ function resultRow(station, basket) {
       el("div", { class: "dim" }, station.domain ?? "—")),
     el("td", {}, chips(station.genres)),
     el("td", {}, chips(station.formats)),
-    el("td", { class: "dim" }, locationOf(station)),
+    el("td", { class: "dim" }, stationLocation(station) || "—"),
     el("td", { class: "actions-cell" },
-      sendButton),
+      el("a", { class: "buttonish subtle", href: stationHref(station.identity_key) },
+        "Open station")),
   );
 }
 
-export function renderListView(root, basket) {
+export function renderListView(root) {
   let state = { limit: 50, offset: 0 };
   const resultsCard = el("section", { class: "card" });
 
@@ -223,14 +102,14 @@ export function renderListView(root, basket) {
       }
       resultsCard.replaceChildren(
         el("h2", {}, "Stations"),
-        el("p", { class: "dim" }, summaryLine(data.total, data.limit, data.offset)),
+        el("p", { class: "dim" }, summaryLine(data.total)),
         el("table", { class: "results" },
           el("thead", {}, el("tr", {},
             el("th", {}, "station"), el("th", {}, "genres"),
             el("th", {}, "formats"), el("th", {}, "location"),
-            el("th", {}, "submit"))),
+            el("th", {}, "open"))),
           el("tbody", {},
-            (data.stations || []).map((station) => resultRow(station, basket)))),
+            (data.stations || []).map((station) => resultRow(station)))),
         pagination(data));
     } catch (error) {
       resultsCard.replaceChildren(el("h2", {}, "Stations"), errorBanner(error));
@@ -252,8 +131,8 @@ export function renderListView(root, basket) {
   const card = el("section", { class: "card" },
     el("h2", {}, "Find a radio station"),
     el("p", { class: "dim" },
-      "Search the stations we know about, open one, and find a real way ",
-      "to send your music."),
+      "Search the stations we know about, open one, and prepare outreach ",
+      "for the people who decide about music."),
     filterForm(state, (applied) => {
       state = { ...state, offset: 0 };
       for (const key of ["q", "genre", "country"]) {

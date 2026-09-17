@@ -150,6 +150,40 @@ def _contact_from_row(row: dict) -> dict:
     }
 
 
+def _dj_from_row(row: dict) -> dict:
+    """Payload keys identical to PersistenceService._dj_from_row."""
+    return {
+        "dj_id": row["dj_id"],
+        "name": row["name"],
+        "stage_name": row["stage_name"],
+        "role": row["role"],
+        "program": row["program"],
+        "station_key": row["station_key"],
+        "station_name": row["station_name"],
+        "platform": row["platform"],
+        "country": row["country"],
+        "state_or_region": row["state_or_region"],
+        "city": row["city"],
+        "genres": _j(row["genres"], None),
+        "formats": _j(row["formats"], None),
+        "source_urls": _j(row["source_urls"], None),
+        "verification": _j(row["verification"], {}),
+        "discovered_at": row["discovered_at"],
+        "last_observed_at": row["last_observed_at"],
+        "first_stored_at": row["first_stored_at"],
+        "last_stored_at": row["last_stored_at"],
+    }
+
+
+def _dj_channel_from_row(row: dict) -> dict:
+    return {
+        "channel": row["channel"],
+        "value": row["value"],
+        "source_url": row["source_url"],
+        "verified_at": row["verified_at"],
+    }
+
+
 class PostgresStorage:
     """PostgreSQL backend for the shared intelligence repository surface."""
 
@@ -719,6 +753,66 @@ class PostgresStorage:
             "failures": [dict(f) for f in failures],
         }
 
+    # -- Phase 11: automation discovery jobs ----------------------------------
+
+    def record_discovery_job(self, report: dict) -> str:
+        """Persist one automation discovery job run; returns its run_id."""
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO discovery_jobs (
+                    run_id, organization_type, config, provider, status,
+                    queries_run, candidates_found, records_ingested,
+                    duplicates, failures, error_message, started_at,
+                    completed_at
+                ) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s)
+                """,
+                (str(report["run_id"]),
+                 str(report.get("organization_type") or "dj"),
+                 _dumps(report.get("config") or {}),
+                 report.get("provider"),
+                 str(report.get("status") or "failed"),
+                 int(report.get("queries_run") or 0),
+                 int(report.get("candidates_found") or 0),
+                 int(report.get("records_ingested") or 0),
+                 int(report.get("duplicates") or 0),
+                 int(report.get("failures") or 0),
+                 report.get("error"),
+                 str(report.get("started_at") or utc_now_iso()),
+                 str(report.get("completed_at") or "")))
+            self._conn.commit()
+        return str(report["run_id"])
+
+    def get_discovery_job(self, run_id: str) -> dict | None:
+        """One stored automation discovery job run (or None)."""
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute("SELECT * FROM discovery_jobs WHERE run_id=%s",
+                        (run_id,))
+            row = cur.fetchone()
+            self._conn.commit()
+        if not row:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "organization_type": row["organization_type"],
+            "config": _j(row["config"], {}),
+            "provider": row["provider"],
+            "status": row["status"],
+            "queries_run": int(row["queries_run"]),
+            "candidates_found": int(row["candidates_found"]),
+            "records_ingested": int(row["records_ingested"]),
+            "duplicates": int(row["duplicates"]),
+            "failures": int(row["failures"]),
+            "error": row["error_message"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"] or None,
+        }
+
     # -- submission assets + link accessibility (Phase 8) -----------------------
 
     @staticmethod
@@ -799,6 +893,18 @@ class PostgresStorage:
             rows = [self._track_from_row(r) for r in cur.fetchall()]
         return rows, total
 
+    def delete_track(self, track_id: str) -> str | None:
+        """Delete one stored asset RECORD; returns the deleted id or None.
+
+        Only the database record is removed — never the uploaded file bytes
+        in the asset store (the existing app defines no file-level removal).
+        """
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute("DELETE FROM tracks WHERE track_id=%s", (track_id,))
+        return track_id if cur.rowcount else None
+
     def record_link_check(self, identity_key: str, entry: dict) -> None:
         with self._lock:
             self._ensure_connection()
@@ -848,6 +954,7 @@ class PostgresStorage:
             "source_url": row["source_url"],
             "outreach_class": row["outreach_class"],
             "submission_url": row["submission_url"],
+            "target_type": row.get("target_type") or "station",
             "track_id": row["track_id"],
             "track": _j(row["track"], None),
             "context": _j(row["context"], None),
@@ -881,12 +988,12 @@ class PostgresStorage:
                         outreach_id, contact_uid, identity_key,
                         recipient_name, recipient_role, organization,
                         email, source_url, outreach_class, submission_url,
-                        track_id, track, context,
+                        target_type, track_id, track, context,
                         subject, message, from_email, sharing,
                         status, provider, created_at, updated_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb,
-                            %s, %s, %s, %s)
+                            %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s,
+                            %s::jsonb, %s, %s, %s, %s)
                     ON CONFLICT(outreach_id) DO UPDATE SET
                         contact_uid=EXCLUDED.contact_uid,
                         identity_key=EXCLUDED.identity_key,
@@ -897,6 +1004,7 @@ class PostgresStorage:
                         source_url=EXCLUDED.source_url,
                         outreach_class=EXCLUDED.outreach_class,
                         submission_url=EXCLUDED.submission_url,
+                        target_type=EXCLUDED.target_type,
                         track_id=EXCLUDED.track_id,
                         track=EXCLUDED.track,
                         context=EXCLUDED.context,
@@ -914,6 +1022,7 @@ class PostgresStorage:
                      record["email"], record.get("source_url"),
                      record.get("outreach_class") or "email",
                      record.get("submission_url"),
+                     record.get("target_type") or "station",
                      record.get("track_id"),
                      _dumps(record.get("track")),
                      _dumps(record.get("context")),
@@ -994,6 +1103,198 @@ class PostgresStorage:
             "event": r["event"], "provider": r["provider"],
             "at": r["at"], "meta": _j(r["meta"], None),
         } for r in rows]
+
+    def delete_outreach(self, outreach_id: str) -> str | None:
+        """Delete one outreach record; returns the deleted id or None.
+
+        The connected schema cascades the delete to the record's attempt
+        history (``outreach_attempts`` → ``outreach_messages``); the raw
+        station/contact data that produced the record is untouched.
+        """
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute(
+                "DELETE FROM outreach_messages WHERE outreach_id=%s",
+                (outreach_id,))
+        return outreach_id if cur.rowcount else None
+
+    # -- Phase 4: DJ intelligence ---------------------------------------------
+
+    def list_djs(self, limit: int = 50, offset: int = 0,
+                 q: str | None = None,
+                 genre: str | None = None,
+                 country: str | None = None,
+                 location: str | None = None,
+                 station: str | None = None,
+                 dj_type: str | None = None,
+                 platform: str | None = None,
+                 has_contact: bool | None = None,
+                 sort: str | None = None,
+                 order: str | None = None
+                 ) -> tuple[list[dict], int]:
+        clauses, params = [], []
+        if q:
+            clauses.append(
+                "(lower(name) ILIKE lower(%s) "
+                "OR lower(coalesce(stage_name,'')) ILIKE lower(%s) "
+                "OR lower(coalesce(program,'')) ILIKE lower(%s) "
+                "OR lower(coalesce(station_name,'')) ILIKE lower(%s))")
+            like = f"%{q}%"
+            params.extend([like, like, like, like])
+        if genre:
+            clauses.append("genres::text ILIKE %s")
+            params.append(f"%{genre}%")
+        if country:
+            clauses.append("country = %s")
+            params.append(country)
+        if location:
+            clauses.append(
+                "(lower(coalesce(city,'')) ILIKE lower(%s) "
+                "OR lower(coalesce(state_or_region,'')) ILIKE lower(%s))")
+            like = f"%{location}%"
+            params.extend([like, like])
+        if station:
+            # Station affiliation is optional metadata on an INDEPENDENT DJ
+            # record — searching it never adds or implies radio-station links.
+            clauses.append(
+                "(lower(coalesce(station_key,'')) ILIKE lower(%s) "
+                "OR lower(coalesce(station_name,'')) ILIKE lower(%s))")
+            like = f"%{station}%"
+            params.extend([like, like])
+        if dj_type:
+            clauses.append("lower(coalesce(role,'')) ILIKE lower(%s)")
+            params.append(f"%{dj_type}%")
+        if platform:
+            clauses.append("lower(coalesce(platform,'')) ILIKE lower(%s)")
+            params.append(f"%{platform}%")
+        has_contact_sql = (
+            "EXISTS (SELECT 1 FROM dj_channels c WHERE c.dj_id = djs.dj_id)")
+        if has_contact is True:
+            clauses.append(has_contact_sql)
+        elif has_contact is False:
+            clauses.append("NOT " + has_contact_sql)
+        order_by = "lower(name), dj_id"
+        if sort == "station":
+            order_by = "lower(coalesce(station_name,'')), lower(name), dj_id"
+        elif sort == "discovered":
+            order_by = "discovered_at, dj_id"
+        direction = "DESC" if order == "desc" else "ASC"
+        order_clause = ", ".join(
+            f"{col} {direction}" for col in order_by.split(", "))
+        where = " AND ".join(clauses)
+        where_sql = f"WHERE {where}" if where else ""
+        with self._guard() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT COUNT(*) AS n FROM djs {where_sql}", params)
+            total = int(cur.fetchone()["n"])
+            cur.execute(
+                f"SELECT * FROM djs {where_sql} "
+                f"ORDER BY {order_clause} "
+                "LIMIT %s OFFSET %s",
+                [*params, int(limit), int(offset)])
+            rows = [_dj_from_row(r) for r in cur.fetchall()]
+        self._decorate_dj_contact_flag(rows)
+        return rows, total
+
+    def get_dj(self, dj_id: str) -> dict | None:
+        with self._guard() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM djs WHERE dj_id=%s", (dj_id,))
+            row = cur.fetchone()
+        return _dj_from_row(row) if row else None
+
+    def get_dj_channels(self, dj_id: str) -> list[dict]:
+        with self._guard() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT channel, value, source_url, verified_at "
+                "FROM dj_channels WHERE dj_id=%s "
+                "ORDER BY channel, value", (dj_id,))
+            return [_dj_channel_from_row(r) for r in cur.fetchall()]
+
+    def _decorate_dj_contact_flag(self, djs: list[dict]) -> None:
+        """Set ``has_contact`` on each list row (batched, read-path only)."""
+        if not djs:
+            return
+        seen = [row["dj_id"] for row in djs]
+        with self._guard() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT DISTINCT dj_id FROM dj_channels "
+                "WHERE dj_id = ANY(%s)", (seen,))
+            contact_ids = {row["dj_id"] for row in cur.fetchall()}
+        for row in djs:
+            row["has_contact"] = row["dj_id"] in contact_ids
+
+    def save_dj(self, record: dict, channels: list[dict] | None = None) -> None:
+        now = utc_now_iso()
+        channels = channels or []
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT first_stored_at FROM djs WHERE dj_id=%s",
+                (record["dj_id"],))
+            existing = cur.fetchone()
+            first_stored = existing["first_stored_at"] if existing else now
+            cur.execute(
+                """
+                INSERT INTO djs(
+                    dj_id, name, stage_name, role, program, station_key,
+                    station_name, platform, country, state_or_region, city,
+                    genres, formats, source_urls, verification,
+                    discovered_at, last_observed_at,
+                    first_stored_at, last_stored_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
+                        %s, %s, %s, %s)
+                ON CONFLICT(dj_id) DO UPDATE SET
+                    name=EXCLUDED.name, stage_name=EXCLUDED.stage_name,
+                    role=EXCLUDED.role, program=EXCLUDED.program,
+                    station_key=EXCLUDED.station_key,
+                    station_name=EXCLUDED.station_name,
+                    platform=EXCLUDED.platform, country=EXCLUDED.country,
+                    state_or_region=EXCLUDED.state_or_region,
+                    city=EXCLUDED.city, genres=EXCLUDED.genres,
+                    formats=EXCLUDED.formats,
+                    source_urls=EXCLUDED.source_urls,
+                    verification=EXCLUDED.verification,
+                    discovered_at=EXCLUDED.discovered_at,
+                    last_observed_at=EXCLUDED.last_observed_at,
+                    first_stored_at=EXCLUDED.first_stored_at,
+                    last_stored_at=EXCLUDED.last_stored_at
+                """,
+                (record["dj_id"], record.get("name"),
+                 record.get("stage_name"), record.get("role"),
+                 record.get("program"), record.get("station_key"),
+                 record.get("station_name"), record.get("platform"),
+                 record.get("country"), record.get("state_or_region"),
+                 record.get("city"), _dumps(record.get("genres") or []),
+                 _dumps(record.get("formats") or []),
+                 _dumps(record.get("source_urls") or []),
+                 _dumps(record.get("verification")),
+                 record.get("discovered_at") or now,
+                 record.get("last_observed_at") or now,
+                 first_stored, str(record.get("last_stored_at") or now)))
+            cur.execute(
+                "DELETE FROM dj_channels WHERE dj_id=%s",
+                (record["dj_id"],))
+            for ch in channels:
+                cur.execute(
+                    "INSERT INTO dj_channels(dj_id, channel, value, "
+                    "source_url, verified_at) VALUES (%s, %s, %s, %s, %s)",
+                    (record["dj_id"], ch.get("channel"),
+                     ch.get("value"), ch.get("source_url"),
+                     ch.get("verified_at")))
+
+    def delete_dj(self, dj_id: str) -> str | None:
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute("DELETE FROM djs WHERE dj_id=%s", (dj_id,))
+        return dj_id if cur.rowcount else None
 
     def close(self) -> None:
         with self._lock:

@@ -94,17 +94,22 @@ source comparison. Deterministic rules first; Ollama consulted for genuinely amb
 semantic judgments (see [AI Architecture](ai-architecture.md)).
 
 ### outreach/
-Campaign preparation, personalized message generation (drafts only), submission/file
-references, recipient selection, **human approval gate**, delivery execution, bounce and
-response tracking, suppression and opt-out handling. Never assumes "email found = send".
+Outreach RECORD lifecycle: canonical records (`release + station + contact +
+role + method + status`), append-only attempt ledger, status transitions
+(`ready|sent|responded|follow_up|failed|closed`), personalized message
+preparation (drafts only), submission/file references, provider capability
+abstraction. No campaign entity — bulk "campaign" intent is a batch of records.
+Never assumes "email found = send".
 
 ### backend/
-FastAPI application serving organizations, contacts, sources, confidence data, campaigns,
-submissions, outreach state. Owns persistence and business queries. No crawling logic.
+FastAPI application serving organizations, contacts, sources, confidence data,
+outreach records + attempts, submissions, health. Owns persistence and business
+queries. No crawling logic.
 
 ### frontend/
 Search/filter UI (location, genre, format), contact inspection with confidence and source
-attribution visible, campaign building, message review/approval, upload flow, tracking.
+attribution visible, station intake + outreach record creation, my-music upload flow,
+outreach tracking/history.
 
 ### n8n/
 Orchestration only: small logical workflows (e.g., `discovery → crawler`, `extraction →

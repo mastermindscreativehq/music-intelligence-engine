@@ -72,6 +72,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.contracts import (
     contacts_payload,
+    dj_detail,
+    dj_summary,
     error_body,
     intelligence_payload,
     station_detail,
@@ -86,6 +88,8 @@ from submissions import service as submission_service
 from submissions.service import TrackRejected, TrackTooLarge
 
 from outreach import service as outreach_service
+
+from djs import service as dj_service
 
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
@@ -103,8 +107,12 @@ class OutreachNotFound(Exception):
     """Unknown outreach id; converted to a 404 envelope."""
 
 
+class DjNotFound(Exception):
+    """Unknown DJ id; converted to a 404 envelope (independent DJs)."""
+
+
 def create_app(storage, *, track_store=None, link_fetcher=None,
-               allow_private=False):
+               allow_private=False, discover_fetcher=None):
     """Build the FastAPI application bound to *storage*.
 
     Imported lazily as a whole so importing ``backend.app`` stays optional
@@ -176,6 +184,10 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     @app.exception_handler(OutreachNotFound)
     async def _outreach_not_found(request: Request, exc: OutreachNotFound):
         return _json(404, error_body("outreach_not_found", str(exc)))
+
+    @app.exception_handler(DjNotFound)
+    async def _dj_not_found(request: Request, exc: DjNotFound):
+        return _json(404, error_body("dj_not_found", str(exc)))
 
     async def _bad_value(request: Request, exc: Exception):
         # mirrors the stdlib dispatcher's contract-failure mapping
@@ -334,6 +346,13 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             raise TrackNotFound(f"unknown track {track_id!r}")
         return success_body(track_projection(row))
 
+    @app.delete("/api/v1/tracks/{track_id}")
+    def delete_track(track_id: str):
+        if submission_service.get_track(storage, track_id) is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
+        storage.delete_track(track_id)
+        return success_body({"track_id": track_id})
+
     @app.get("/api/v1/stations/{key}/submission")
     def get_submission(key: str):
         view = submission_service.station_submission(storage, key)
@@ -381,6 +400,13 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         return success_body(record)
 
+    @app.delete("/api/v1/outreach/{outreach_id}")
+    def delete_outreach(outreach_id: str):
+        if outreach_service.get_outreach(storage, outreach_id) is None:
+            raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
+        storage.delete_outreach(outreach_id)
+        return success_body({"outreach_id": outreach_id})
+
     @app.post("/api/v1/outreach/{outreach_id}/event")
     async def outreach_event(outreach_id: str, request: Request):
         if outreach_service.get_outreach(storage, outreach_id) is None:
@@ -388,11 +414,132 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         payload = await _json_request(request)
         event = payload.get("event")
         if not isinstance(event, str) or event not in \
-                outreach_service.OUTREACH_STATUSES or event == "draft":
+                outreach_service.OUTREACH_EVENTS:
             raise ValueError("invalid outreach event")
         record = outreach_service.record_outreach_event(
             storage, outreach_id, event=event, meta=payload.get("meta"))
         return success_body(record)
+
+    # -- Phase 4b: independent DJs -------------------------------------------
+    # Independent music professionals, kept fully separate from the radio
+    # station pipeline. Station fields are optional metadata only.
+
+    def _check_automation_auth(request: Request) -> bool:
+        expected = os.environ.get("MIE_AUTOMATION_TOKEN", "").strip()
+        if not expected:
+            return True
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return False
+        import hmac
+        return hmac.compare_digest(auth[7:].strip(), expected)
+
+    @app.get("/api/v1/djs")
+    def list_djs(limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+                 offset: int = Query(0, ge=0),
+                 q: str | None = None,
+                 genre: str | None = None,
+                 country: str | None = None,
+                 location: str | None = None,
+                 station: str | None = None,
+                 dj_type: str | None = None,
+                 platform: str | None = None,
+                 has_contact: bool | None = None,
+                 sort: str | None = Query(None, pattern="^(name|station|discovered)$"),
+                 order: str | None = Query(None, pattern="^(asc|desc)$")):
+        rows, total = dj_service.list_djs(
+            storage, limit=limit, offset=offset, q=q, genre=genre,
+            country=country, location=location, station=station,
+            dj_type=dj_type, platform=platform, has_contact=has_contact,
+            sort=sort, order=order)
+        return success_body({"djs": [dj_summary(r) for r in rows],
+                             "total": total, "limit": limit,
+                             "offset": offset})
+
+    @app.post("/api/v1/djs", status_code=201)
+    async def create_dj(request: Request):
+        payload = await _json_request(request)
+        dj = dj_service.create_dj(storage, payload=payload)
+        return success_body(dj_service.dj_detail(storage, dj["dj_id"]))
+
+    @app.post("/api/v1/djs/discover")
+    async def discover_djs(request: Request):
+        # Independent public-web DJ discovery, kept fully separate from the
+        # radio-station pipeline. Honest contract: a real provider must be
+        # configured, or this returns 503 — never a fabricated/fixture result.
+        try:
+            from discovery.djs.selector import select_djs_discovery_provider
+            from discovery.djs.pipeline import DjsDiscoveryEngine
+            from discovery.models import DiscoveryRequest
+        except ImportError as exc:
+            return _json(503, error_body("discovery_dependency_missing",
+                                          str(exc)))
+        provider = select_djs_discovery_provider(fetcher=discover_fetcher)
+        if not provider.configured:
+            return _json(503, error_body(
+                "dj_discovery_provider_not_configured",
+                "DJ discovery provider is not configured; set "
+                "DJS_SEARCH_BASE_URL / DJS_SEARCH_API_KEY (see .env.example)"))
+        payload = await _json_request(request)
+        request = DiscoveryRequest.from_dict(payload)
+        engine = DjsDiscoveryEngine(provider, fetcher=discover_fetcher)
+        result = engine.run(request)
+        if result.failures:
+            return _json(502, error_body("dj_discovery_provider_error",
+                                         "; ".join(str(f.message) for f in result.failures)))
+        report = dj_service.ingest_djs(storage, result.records)
+        return success_body(report)
+
+    # -- Phase 11: automation discovery jobs ----------------------------------
+
+    @app.post("/api/v1/discovery/jobs")
+    async def run_discovery_job(request: Request):
+        if not _check_automation_auth(request):
+            return _json(401, error_body(
+                "unauthorized",
+                "an Authorization: Bearer token matching MIE_AUTOMATION_TOKEN "
+                "is required for automation endpoints"))
+        from discovery.jobs import run_discovery_job as _run
+        from discovery.djs.http_provider import (
+            DiscoveryProviderNotConfigured,
+        )
+        payload = await _json_request(request)
+        try:
+            report = _run(storage, payload, fetcher=discover_fetcher)
+        except DiscoveryProviderNotConfigured as exc:
+            return _json(503, error_body("discovery_provider_not_configured",
+                                         str(exc)))
+        data = {"job_type": f"{report['organization_type']}_discovery",
+                **report}
+        return success_body(data)
+
+    @app.get("/api/v1/discovery/jobs/{run_id}")
+    def get_discovery_job(run_id: str, request: Request):
+        if not _check_automation_auth(request):
+            return _json(401, error_body(
+                "unauthorized",
+                "an Authorization: Bearer token matching MIE_AUTOMATION_TOKEN "
+                "is required for automation endpoints"))
+        run = storage.get_discovery_job(run_id)
+        if run is None:
+            return _json(404, error_body(
+                "run_not_found", f"unknown discovery job {run_id!r}"))
+        run = {"job_type": f"{run['organization_type']}_discovery", **run}
+        return success_body(run)
+
+    @app.get("/api/v1/djs/{dj_id}")
+    def get_dj(dj_id: str):
+        detail = dj_service.dj_detail(storage, dj_id)
+        if detail is None:
+            raise DjNotFound(f"unknown dj {dj_id!r}")
+        return success_body(detail)
+
+    @app.delete("/api/v1/djs/{dj_id}")
+    def delete_dj(dj_id: str):
+        if dj_service.dj_detail(storage, dj_id) is None:
+            raise DjNotFound(f"unknown dj {dj_id!r}")
+        storage.delete_dj(dj_id)
+        return success_body({"dj_id": dj_id})
 
     return app
 

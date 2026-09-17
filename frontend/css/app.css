@@ -64,12 +64,9 @@ body {
 
 #layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   padding: 0 18px 40px;
-}
-@media (max-width: 900px) {
-  #layout { grid-template-columns: minmax(0, 1fr); }
 }
 
 #view { min-width: 0; }
@@ -265,7 +262,7 @@ tr.station-row:hover { background: var(--panel-2); }
 .result-row:last-child { border-bottom: none; }
 
 /* basket */
-#basket-panel .card { position: sticky; top: 64px; }
+
 .recipient-item {
   display: flex;
   justify-content: space-between;
@@ -535,16 +532,31 @@ a.open-route:hover { filter: brightness(1.08); }
 .outreach-content textarea { resize: vertical; }
 .draft-status { min-height: 1.2em; margin-top: 8px; font-size: 12.5px; }
 
-/* Status chips for outreach statuses */
-.chip.draft { color: var(--text-dim); border-style: dashed; }
-.chip.opened_in_email { color: var(--accent); }
-.chip.sent { color: var(--ok); }
-.chip.failed { color: var(--bad); }
+/* Status chips for outreach statuses (canonical lifecycle) */
+.chip.status-ready { color: var(--text-dim); border-style: dashed; }
+.chip.status-sent { color: var(--ok); }
+.chip.status-responded { color: var(--ok); }
+.chip.status-follow_up { color: var(--accent); border-style: dashed; }
+.chip.status-closed { color: var(--text-dim); }
+.chip.status-failed { color: var(--bad); }
+.chip.status-opened_in_email { color: var(--accent); }
 
 /* Outreach history (Phase 9) */
 .record-id { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
 .receiver { margin-top: 6px; font-size: 13.5px; }
 .attempt-list { margin-top: 12px; padding-left: 18px; }
+.event-control { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.outreach-record { margin-top: 14px; }
+
+/* Dashboard (overview only) */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat-tile { display: block; text-align: left; text-decoration: none; color: inherit; }
+.stat-tile:hover { border-color: var(--accent); }
+.stat-value { font-size: 22px; font-weight: 700; }
+.recent-list { display: grid; gap: 8px; }
+.recent-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.alert-list { display: grid; gap: 8px; }
+.alert-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .attempt-row { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; font-size: 12.5px; }
 .table-card-header { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; }
 .table-card-title { display: flex; gap: 10px; align-items: center; }
@@ -575,4 +587,52 @@ button.buttonish:hover { border-color: var(--accent); background: var(--panel-2)
 .outreach-detail { display: grid; gap: 4px; }
 .outreach-route { font-size: 13px; word-break: break-word; }
 .outreach-queue-status { font-size: 12.5px; margin: 6px 0 0; min-height: 16px; }
+.outreach-detail-slot { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.outreach-detail-slot .kv { grid-template-columns: minmax(120px, 200px) minmax(0, 1fr); font-size: 12.5px; }
+.outreach-detail-slot .attempt-list { margin-top: 6px; }
 
+/* ------------------------------------------------------------------ */
+/* Phase 3 — opportunity intelligence                                  */
+/* ------------------------------------------------------------------ */
+.opp-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-bottom: 12px; }
+.opp-toolbar label { font-size: 12.5px; color: var(--text-dim); display: flex; flex-direction: column; gap: 2px; }
+.opp-toolbar select { font-size: 12.5px; }
+.opp-list { display: flex; flex-direction: column; gap: 12px; }
+.opp-card { padding: 14px; }
+.opp-header { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.opp-header .station-name { font-size: 16px; font-weight: 600; color: var(--accent); text-decoration: none; }
+.opp-header .station-name:hover { text-decoration: underline; }
+.opp-score { font-size: 22px; font-weight: 700; margin-left: auto; white-space: nowrap; }
+.chip.tier-high   { color: var(--ok); border-color: var(--ok); }
+.chip.tier-medium { color: var(--warn); border-color: var(--warn); }
+.chip.tier-low    { color: var(--bad); border-color: var(--bad); }
+.chip.location-available   { color: var(--ok); }
+.chip.location-unavailable { color: var(--bad); }
+.opp-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; font-size: 13px; }
+.opp-recipient { font-size: 13px; margin-top: 4px; }
+.opp-contact { font-size: 13px; }
+.opp-route   { font-size: 13px; word-break: break-word; }
+.opp-reachability { font-size: 12.5px; margin-top: 2px; }
+.opp-row { display: flex; gap: 10px; align-items: baseline; margin-top: 6px; flex-wrap: wrap; }
+.opp-row a.linkish, .opp-row button.linkish { font-size: 13px; }
+.opp-reason-list { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--text-dim); }
+.opp-reason-list li {
+  list-style: none; position: relative; padding-left: 16px; margin-bottom: 2px;
+}
+.opp-reason-list li .sign { position: absolute; left: 0; }
+.opp-history-line { font-size: 12.5px; color: var(--text-dim); }
+
+/* ------------------------------------------------------------------ */
+/* Phase 4 — DJ intelligence                                          */
+/* ------------------------------------------------------------------ */
+.back-link { display: inline-block; margin-bottom: 10px; font-size: 13px; }
+.dj-channels-box { display: grid; gap: 10px; }
+.dj-channel {
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); display: grid; gap: 4px;
+}
+.dj-channel .head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.dj-channel .name { font-weight: 600; font-size: 14px; }
+.dj-channel .route-status-line { font-size: 13px; word-break: break-word; }
+.dj-channel .evidence-row { font-size: 12px; }
+.dj-outreach-status { min-height: 16px; margin-top: 8px; font-size: 12.5px; }

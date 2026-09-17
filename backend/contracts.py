@@ -18,6 +18,9 @@ credentials are ever included.
 from __future__ import annotations
 
 from backend import outreach_intel
+from discovery.radio.contract import derive_location_status
+
+from djs.service import DJ_CHANNEL_ROUTE_CLASS, DJ_CHANNEL_ROUTE_LABEL
 
 # Fields documented as meaningful-but-maybe-absent on a station. When the
 # stored value is None they are reported in epistemology.unknown_fields —
@@ -40,6 +43,10 @@ STATION_SUMMARY_FIELDS = (
 def station_summary(row: dict) -> dict:
     """Compact projection for list responses."""
     summary = {key: row.get(key) for key in STATION_SUMMARY_FIELDS}
+    summary["location_status"] = derive_location_status(
+        row.get("country"), row.get("state_or_region"),
+        row.get("city"), row.get("market_area"),
+        row.get("last_verified_at"))
     summary["links"] = {
         "self": f"/api/v1/stations/{row['identity_key']}",
         "intelligence": f"/api/v1/stations/{row['identity_key']}/intelligence",
@@ -51,11 +58,85 @@ def station_summary(row: dict) -> dict:
 def station_detail(row: dict) -> dict:
     """Full stored station fields (JSON columns already decoded)."""
     detail = dict(row)   # every stored column is part of the contract
+    detail["location_status"] = derive_location_status(
+        row.get("country"), row.get("state_or_region"),
+        row.get("city"), row.get("market_area"),
+        row.get("last_verified_at"))
     detail["links"] = {
         "self": f"/api/v1/stations/{row['identity_key']}",
         "intelligence": f"/api/v1/stations/{row['identity_key']}/intelligence",
         "contacts": f"/api/v1/stations/{row['identity_key']}/contacts",
     }
+    return detail
+
+
+# -- Phase 4: DJ projections --------------------------------------------------
+#
+# Read-path derivation only: storage rows and channel facts are echoed
+# verbatim; route labels are derived from the stored channel name so nothing
+# is ever guessed. Location is reported honestly (`location_status`) and
+# stays "unavailable" when no source-backed location was provided.
+
+DJ_SUMMARY_FIELDS = (
+    "dj_id", "name", "stage_name", "role", "program", "station_key",
+    "station_name", "platform", "country", "state_or_region", "city",
+    "genres", "formats", "discovered_at", "last_observed_at",
+)
+
+_SOCIAL_CHANNELS = frozenset(("instagram", "x", "facebook", "youtube"))
+_EMAIL_CHANNELS = frozenset(("email", "submission_email"))
+_WEBFORM_CHANNELS = frozenset(("submission_page", "contact_page"))
+
+
+def dj_channel_view(channel: dict) -> dict:
+    kind = "email" if channel["channel"] in _EMAIL_CHANNELS \
+        else "webform" if channel["channel"] in _WEBFORM_CHANNELS \
+        else "social" if channel["channel"] in _SOCIAL_CHANNELS \
+        else "website"
+    return {
+        "channel": channel["channel"],
+        "value": channel["value"],
+        "source_url": channel["source_url"],
+        "verified_at": channel.get("verified_at"),
+        "kind": kind,
+        "route_class": DJ_CHANNEL_ROUTE_CLASS.get(
+            channel["channel"], "other"),
+        "route_label": DJ_CHANNEL_ROUTE_LABEL.get(
+            channel["channel"], channel["channel"]),
+    }
+
+
+def dj_summary(row: dict) -> dict:
+    """Compact projection for list responses."""
+    summary = {key: row.get(key) for key in DJ_SUMMARY_FIELDS}
+    summary["location_status"] = derive_location_status(
+        row.get("country"), row.get("state_or_region"),
+        row.get("city"), None, None)
+    summary["has_contact"] = bool(row.get("has_contact"))
+    summary["links"] = {"self": f"/api/v1/djs/{row['dj_id']}"}
+    return summary
+
+
+def dj_detail(row: dict, channels: list[dict] | None = None,
+              outreach: list[dict] | None = None) -> dict:
+    """Full DJ view: identity, source-backed channels, outreach history."""
+    detail = dict(row)   # every stored column is part of the contract
+    detail["location_status"] = derive_location_status(
+        row.get("country"), row.get("state_or_region"),
+        row.get("city"), None, None)
+    channel_views = [dj_channel_view(c) for c in (channels or [])]
+    detail["channels"] = channel_views
+    detail["submission_routes"] = [
+        c for c in channel_views
+        if c["channel"] in ("submission_email", "submission_page",
+                            "contact_page")]
+    detail["has_email"] = any(
+        c["channel"] in _EMAIL_CHANNELS for c in channel_views)
+    detail["has_submission_route"] = bool(detail["submission_routes"])
+    detail["social_channels"] = [
+        c for c in channel_views if c["kind"] == "social"]
+    detail["outreach"] = outreach or []
+    detail["links"] = {"self": f"/api/v1/djs/{row['dj_id']}"}
     return detail
 
 

@@ -440,7 +440,7 @@ class TestWebformOutreach(unittest.TestCase):
             "subject": "Demo submission",
             "message": "Hi, please consider this track.",
         })
-        self.assertEqual(record["status"], "draft")
+        self.assertEqual(record["status"], "ready")
         self.assertEqual(record["recipient"]["outreach_class"], "webform")
         self.assertEqual(record["recipient"]["submission_url"],
                          "https://wfmu.example/sendmusic")

@@ -1,202 +1,185 @@
-/* Outreach list — the action-first saved-stations list.
+/* Outreach page (#/outreach) — ACTIVE outreach records.
  *
- * Displays every station saved to the outreach basket with its best
- * available official route and a single clear action button. The page
- * must never be blank: if the list is empty it shows a helpful empty
- * state; if a recipient uid cannot be resolved the full basket is
- * rendered anyway. No tracks, no draft composer, no blocking gates —
- * only real routes the station itself publishes.
- */
+ * This is the record system: every row is a persisted outreach record
+ * (recipient + station + release + status + attempt history) from the
+ * backend ledger, not an ephemeral browser list. Records are prepared on a
+ * station page (CONTACTS → OUTREACH → Start outreach) and managed here:
+ * open the station, compose/hand off the record, and log real events
+ * (sent / responded / follow_up / failed / closed) that advance the status.
+ *
+ * Active statuses: ready | sent | responded | follow_up. The full ledger
+ * (including failed/closed + every attempt) lives on #/outreach-history.
+ *
+ * The single source of truth is the backend; this view only renders it. */
 
-import { api } from "../api.js";
+import { api, ApiError } from "../api.js";
 import { el } from "../dom.js";
-import { stationHref } from "../router.js";
+import { outreachHistoryHref, stationHref, stationsHref } from "../router.js";
 import { openOutreachModal } from "./outreachModal.js";
+import {
+  attemptRow,
+  detailToggle,
+  removeOutreachButton,
+  statusChip,
+  trackLine,
+} from "./outreachRecords.js";
 
-const ROUTE_LABELS = {
-  webform: "submission page",
-  email: "email",
-  contact: "contact page",
-  dj: "DJ / program page",
-};
+const ACTIVE_STATUSES = ["ready", "sent", "responded", "follow_up"];
+const EVENT_CHOICES = [
+  ["sent", "sent"],
+  ["responded", "responded"],
+  ["follow_up", "follow up"],
+  ["failed", "failed"],
+  ["closed", "closed"],
+];
 
 function externalLink(url, text) {
-  return el("a", {
-    href: url,
-    target: "_blank",
-    rel: "noopener noreferrer",
-  }, text ?? url);
+  return el("a", { href: url, target: "_blank", rel: "noopener noreferrer" },
+    text ?? url);
 }
 
-function routeLabel(item) {
-  if (item.route_label) return item.route_label;
-  if (item.outreach_class === "webform" && item.submission_url) return "submission page";
-  return ROUTE_LABELS[item.route_kind] || "station page";
-}
-
-function routeDetail(item) {
-  const email = (item.email && item.email.trim()) || null;
-  const url = item.submission_url || item.source_url || null;
-  const parts = [routeLabel(item)];
-  if (email) parts.push(email);
-  if (url) parts.push(url);
-  return el("div", { class: "dim outreach-route" }, parts.join(" · "));
-}
-
-/* Queue this recipient as a draft record in the outreach activity ledger.
- * The recipient payload is the exact basket evidence: a verified email XOR a
- * verified submission/contact URL — never both, never fabricated. */
-function queueOutreach(item) {
-  return api.createOutreach({
-    recipient: {
-      contact_uid: item.contact_uid,
-      identity_key: item.identity_key,
-      name: item.name || null,
-      role: item.role || null,
-      organization: item.station_name || item.name || null,
-      email: (item.email && item.email.trim()) || "",
-      submission_url: item.submission_url || null,
-      source_url: item.source_url || null,
-    },
-    subject: "",
-    message: "",
-  });
-}
-
-function stationCard(item, basket, onRemoveAll) {
-  const stationName = item.station_name || item.name || "Saved station";
-  const website = item.website || null;
-  const email = (item.email && item.email.trim()) || null;
-  const routeUrl = item.submission_url
-    || (email ? null : item.source_url) || null;
-  const statusRow = el("div",
-    { class: "outreach-queue-status", role: "status" });
-
-  const head = el("div", { class: "outreach-head" },
-    el("a", { class: "station-name", href: stationHref(item.identity_key) },
-      stationName),
-    website
-      ? externalLink(website, el("span", { class: "dim" }, website))
+function recipientLine(record) {
+  const recipient = record.recipient || {};
+  return el("div", { class: "receiver" },
+    el("span", {}, recipient.name || "(unnamed)"),
+    el("span", { class: "dim" },
+      ` · ${recipient.email || recipient.submission_url || "no direct route"}`),
+    recipient.organization
+      ? el("span", { class: "dim" }, ` · ${recipient.organization}`)
       : null);
-  const detail = el("div", { class: "outreach-detail" },
-    routeDetail(item));
+}
 
-  const removeBtn = el("button", { class: "linkish" }, "remove");
-  removeBtn.addEventListener("click", () => {
-    basket.remove(item.contact_uid);
-    onRemoveAll();
-  });
-
-  /* Primary hand-off: verified email opens the personalized-outreach
-   * composer; a URL route opens the station's real page/form. */
-  let primary;
-  if (email) {
-    primary = el("button", { class: "buttonish" }, "Reach out");
-    primary.addEventListener("click", () => {
-      openOutreachModal({
-        contact_uid: item.contact_uid,
-        identity_key: item.identity_key,
-        name: item.name,
-        role: item.role,
-        station_name: item.station_name || item.name,
-        email,
-        source_url: item.source_url || null,
-      });
-    });
-  } else {
-    primary = externalLink(routeUrl || "#",
-      el("span", { class: "buttonish" }, "Open route"));
-    if (!routeUrl) primary.classList.add("dim");
-  }
-
-  const queueBtn = el("button", { class: "subtle" }, "Queue");
-  queueBtn.addEventListener("click", async () => {
-    if (queueBtn.disabled) return;
-    queueBtn.disabled = true;
-    queueBtn.textContent = "queuing…";
+function eventControl(record, reload) {
+  const select = el("select", { name: "event" },
+    EVENT_CHOICES.map(([value, label]) => el("option", { value }, label)));
+  const button = el("button", { class: "subtle" }, "Log event");
+  button.addEventListener("click", async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    button.textContent = "logging…";
     try {
-      const record = await queueOutreach(item);
-      statusRow.replaceChildren(
-        "Queued as ", el("strong", {}, record.status || "draft"),
-        " — ", el("a", { class: "linkish", href: "#/outreach-history" },
-          "view activity log"));
+      await api.outreachEvent(record.outreach_id, select.value,
+        { applied_by: "console" });
+      reload();
     } catch (error) {
-      statusRow.replaceChildren(
-        "Could not queue: ", el("strong", {},
-          error && error.message ? error.message : String(error)),
-        " — open the route yourself instead.");
-      queueBtn.disabled = false;
-      queueBtn.textContent = "Queue";
+      button.disabled = false;
+      button.textContent = "Log event";
+      /* surface the failure next to the control */
+      const msg = el("span", { class: "dim", role: "alert" },
+        `Could not log: ${
+          error instanceof ApiError ? error.message : String(error)}`);
+      button.after(msg);
     }
   });
-
-  const actions = el("div", { class: "actions-row" },
-    primary, queueBtn,
-    el("a", { class: "linkish", href: stationHref(item.identity_key) },
-      "View station"),
-    removeBtn);
-  return el("section", { class: "card outreach-card" },
-    head, detail, statusRow, actions);
+  return el("div", { class: "event-control" },
+    el("span", { class: "dim" }, "Record event: "),
+    select, " ", button);
 }
 
-function emptyView() {
-  return [
-    el("h1", {}, "Outreach list"),
-    el("p", { class: "dim" },
-      "Stations you add show up here with their real submission route."),
-    el("section", { class: "card" },
-      el("p", { class: "dim" },
-        "Your outreach list is empty. Search for a station and click ",
-        "\"Send music\" to get started."),
-      el("div", { class: "actions-row" },
-        el("a", { class: "primary", href: "#/" }, "Find stations")))
+function recordCard(record, reload) {
+  const recipient = record.recipient || {};
+  const details = detailToggle(() => api.getOutreach(record.outreach_id));
+
+  const openStation = el("a", {
+    class: "linkish",
+    href: stationHref(recipient.identity_key || ""),
+  }, "Open station");
+
+  let primaryAction;
+  const email = String(recipient.email || "").trim();
+  if (email) {
+    primaryAction = el("button", {
+      class: "buttonish",
+      onClick: () => openOutreachModal({ recipient, record }),
+    }, "Compose & hand off");
+  } else {
+    primaryAction = el("a", {
+      class: "linkish",
+      href: recipient.submission_url || "#",
+      target: "_blank",
+      rel: "noopener noreferrer",
+    }, "Open submission page");
+    if (!recipient.submission_url) primaryAction.classList.add("dim");
+  }
+
+  const body = [
+    (record.subject ? el("strong", {}, record.subject) : null),
+    recipientLine(record),
+    trackLine(record),
+    record.updated_at
+      ? el("div", { class: "dim" },
+        `updated ${new Date(record.updated_at).toLocaleString()}`)
+      : null,
   ];
+  const attempts = (record.attempts || []).map(attemptRow);
+
+  return el("article", { class: "table-card card outreach-record" },
+    el("div", { class: "table-card-header" },
+      el("div", { class: "table-card-title" },
+        statusChip(record.status),
+        el("span", { class: "dim record-id" }, record.outreach_id)),
+      el("div", { class: "table-card-actions actions-row" },
+        openStation, primaryAction, details.button,
+        removeOutreachButton(record, reload))),
+    body.length ? el("div", { class: "table-card-body" }, ...body) : null,
+    el("div", { class: "table-card-actions actions-row" },
+      eventControl(record, reload)),
+    attempts.length
+      ? el("ol", { class: "attempt-list" }, ...attempts)
+      : null,
+    details.slot);
 }
 
-function fullView(basket, rerender) {
-  return [
-    el("h1", {}, "Outreach list"),
+export function renderOutreachView(root) {
+  root.append(
+    el("h1", {}, "Outreach"),
     el("p", { class: "dim" },
-      "Stations you saved, the real route each publishes, and the queue for ",
-      "your outreach activity log."),
+      "Active outreach records you prepared from station pages. Open a ",
+      "record, hand it to your email client, and log what happens — the ",
+      "record answers who you reached, for which release, and where it stands."));
+
+  const listSlot = el("div", { class: "outreach-list" },
+    el("p", { class: "dim" }, "Loading outreach records…"));
+  const refresh = el("button", { class: "subtle" }, "Refresh");
+  root.append(
     el("div", { class: "actions-row" },
-      el("a", { class: "linkish", href: "#/outreach-history" },
-        "Outreach activity log →")),
-    ...basket.items.map((item) => stationCard(item, basket, rerender)),
-  ];
-}
+      el("a", { class: "linkish", href: stationsHref },
+        "Prepare records from a station →"),
+      el("a", { class: "linkish", href: outreachHistoryHref() },
+        "Full activity log →"),
+      refresh),
+    listSlot);
 
-/* If the basket carries no website for an item (older session data),
- * fetch the station detail once per unique identity_key and patch the
- * basket item in-place so future renders are immediate. Errors are
- * silently swallowed — the card renders without a website link. */
-async function enrichWebsites(basket) {
-  const missing = new Map();
-  for (const item of basket.items) {
-    if (item.website) continue;
-    const key = item.identity_key;
-    if (missing.has(key)) continue;
-    missing.set(key, item);
+  function renderRecords() {
+    listSlot.replaceChildren(el("p", { class: "dim" },
+      "Loading outreach records…"));
+    api.listOutreach({ limit: 200 })
+      .then((data) => {
+        const active = (data.outreach || []).filter((r) =>
+          ACTIVE_STATUSES.includes(r.status));
+        if (active.length === 0) {
+          listSlot.replaceChildren(
+            el("section", { class: "card" },
+              el("h2", {}, "No active outreach records"),
+              el("p", { class: "dim" },
+                "Open a station, select the people who decide about music, ",
+                "pick a release, and click \"Start outreach\" to prepare ",
+                "records here."),
+              el("div", { class: "actions-row" },
+                el("a", { class: "primary", href: stationsHref },
+                  "Browse stations"))));
+          return;
+        }
+        listSlot.replaceChildren(...active.map((r) => recordCard(r, renderRecords)));
+      })
+      .catch((error) => {
+        const detail = error instanceof ApiError ? error.message : String(error);
+        listSlot.replaceChildren(
+          el("p", { class: "banner-error", role: "alert" },
+            `Could not load outreach records: ${detail}`));
+      });
   }
-  for (const [key] of missing) {
-    try {
-      const detail = await api.station(key);
-      const website = detail.website || null;
-      if (!website) continue;
-      for (const item of basket.items) {
-        if (item.identity_key === key) item.website = website;
-      }
-    } catch (_error) {
-      /* item stays without website — acceptable */
-    }
-  }
-}
 
-export function renderOutreachView(root, uids, basket) {
-  const rerender = () => {
-    root.replaceChildren(
-      ...(basket.items.length > 0 ? fullView(basket, rerender) : emptyView()));
-  };
-  rerender();
-  enrichWebsites(basket).then(rerender).catch(() => {});
+  refresh.addEventListener("click", renderRecords);
+  renderRecords();
 }

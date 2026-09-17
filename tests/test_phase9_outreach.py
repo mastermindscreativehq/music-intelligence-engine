@@ -3,8 +3,10 @@
 Covers the approved boundaries:
 
 - ``outreach.providers``: the EmailProvider interface, status vocabulary
-  (draft | opened_in_email | sent | failed), and the non-sending local
-  stub — nothing may claim delivery without a provider-confirmed send.
+  (canonical lifecycle ready | sent | responded | follow_up | closed, plus
+  the honest terminal failed; opened_in_email remains an attempt event), and
+  the non-sending local stub — nothing may claim delivery without a
+  provider-confirmed send.
 - ``outreach.service`` over the SQLite repository: create, list, get, and
   attempt/status recording as an append-only ledger.
 - ``backend.routes`` dispatch contract for /api/v1/outreach + event.
@@ -49,10 +51,18 @@ def _payload(**over):
 
 class ProviderAbstractionTests(unittest.TestCase):
     def test_status_vocabulary(self):
+        # Record statuses follow the canonical lifecycle READY -> SENT ->
+        # RESPONDED -> FOLLOW-UP -> CLOSED (plus honest 'failed');
+        # OPENED_IN_EMAIL is a handoff ATTEMPT event, not a stored status.
         self.assertEqual([s.value for s in providers.DeliveryStatus],
-                         ["draft", "opened_in_email", "sent", "failed"])
+                         ["ready", "opened_in_email", "sent", "responded",
+                          "follow_up", "failed", "closed"])
         self.assertEqual(tuple(osvc.OUTREACH_STATUSES),
-                         ("draft", "opened_in_email", "sent", "failed"))
+                         ("ready", "sent", "responded", "follow_up",
+                          "failed", "closed"))
+        self.assertEqual(tuple(osvc.OUTREACH_EVENTS),
+                         ("opened_in_email", "sent", "responded",
+                          "follow_up", "failed", "closed"))
 
     def test_local_stub_never_claims_delivery(self):
         stub = providers.default_provider()
@@ -94,7 +104,7 @@ class OutreachRepositoryTests(unittest.TestCase):
     def test_create_lists_and_records_event(self):
         rec = osvc.create_outreach(self.svc, payload=_payload())
         self.assertTrue(rec["outreach_id"].startswith("om_"))
-        self.assertEqual(rec["status"], "draft")
+        self.assertEqual(rec["status"], "ready")
         self.assertEqual(rec["recipient"]["email"], "jessica@wfmu.org")
         self.assertEqual(rec["track"]["track_id"], "sha256:abc123")
         self.assertEqual(rec["attempts"], [])
@@ -104,15 +114,35 @@ class OutreachRepositoryTests(unittest.TestCase):
         rows, total = osvc.list_outreach(self.svc)
         self.assertEqual(total, 1)
 
+        # Mail-client handoff is recorded as an attempt but never promoted
+        # to a stored status: the record stays 'ready'.
         updated = osvc.record_outreach_event(
             self.svc, rec["outreach_id"], event="opened_in_email",
             meta={"channel": "mailto"})
-        self.assertEqual(updated["status"], "opened_in_email")
+        self.assertEqual(updated["status"], "ready")
         self.assertEqual(len(updated["attempts"]), 1)
         self.assertEqual(updated["attempts"][0]["event"],
                          "opened_in_email")
         self.assertEqual(updated["attempts"][0]["meta"]["channel"],
                          "mailto")
+
+    def test_canonical_lifecycle_transitions(self):
+        rec = osvc.create_outreach(self.svc, payload=_payload())
+        self.assertEqual(rec["status"], "ready")
+        rec = osvc.record_outreach_event(self.svc, rec["outreach_id"],
+                                         event="sent")
+        self.assertEqual(rec["status"], "sent")
+        rec = osvc.record_outreach_event(self.svc, rec["outreach_id"],
+                                         event="responded")
+        self.assertEqual(rec["status"], "responded")
+        rec = osvc.record_outreach_event(self.svc, rec["outreach_id"],
+                                         event="follow_up")
+        self.assertEqual(rec["status"], "follow_up")
+        rec = osvc.record_outreach_event(self.svc, rec["outreach_id"],
+                                         event="closed")
+        self.assertEqual(rec["status"], "closed")
+        self.assertEqual([a["event"] for a in rec["attempts"]],
+                         ["sent", "responded", "follow_up", "closed"])
 
     def test_create_requires_email(self):
         with self.assertRaises(ValueError):
@@ -136,7 +166,7 @@ class OutreachRepositoryTests(unittest.TestCase):
         osvc.create_outreach(self.svc, payload=_payload(
             recipient={"contact_uid": "cu2", "name": "B",
                        "email": "b@example.com"}))
-        _, total = osvc.list_outreach(self.svc, status="draft")
+        _, total = osvc.list_outreach(self.svc, status="ready")
         self.assertEqual(total, 2)
         _, total = osvc.list_outreach(self.svc, status="sent")
         self.assertEqual(total, 0)
@@ -168,14 +198,16 @@ class OutreachDispatchTests(unittest.TestCase):
         status2, env2 = dispatch(self.svc, "GET",
                                  f"/api/v1/outreach/{oid}", {})
         self.assertEqual(status2, 200)
-        self.assertEqual(env2["data"]["status"], "draft")
+        self.assertEqual(env2["data"]["status"], "ready")
 
         status3, env3 = dispatch(
             self.svc, "POST", f"/api/v1/outreach/{oid}/event", {},
             json.dumps({"event": "opened_in_email",
                         "meta": {"channel": "mailto"}}).encode("utf-8"))
         self.assertEqual(status3, 200)
-        self.assertEqual(env3["data"]["status"], "opened_in_email")
+        self.assertEqual(env3["data"]["status"], "ready")
+        self.assertEqual(env3["data"]["attempts"][0]["event"],
+                         "opened_in_email")
 
         status4, env4 = dispatch(self.svc, "GET", "/api/v1/outreach", {})
         self.assertEqual(status4, 200)
@@ -227,11 +259,16 @@ class PostgresOutreachContractTests(unittest.TestCase):
         migrations = load_pg_migrations()
         names = {name for _v, name, _sql in migrations}
         self.assertIn("0003_outreach.sql", names)
-        tail_name, tail_sql = migrations[-1][1], migrations[-1][2]
-        # outreach is created in 0003; 0004 adds the webform/URL route columns
-        self.assertEqual(tail_name, "0004_webform_outreach.sql")
-        self.assertIn("outreach_class", tail_sql)
-        self.assertIn("submission_url", tail_sql)
+        self.assertIn("0004_webform_outreach.sql", names)
+        self.assertIn("0005_outreach_status.sql", names)
+        # 0005 adopts the canonical lifecycle vocabulary non-destructively.
+        outreach5 = next(sql for _v, name, sql in migrations
+                         if name == "0005_outreach_status.sql")
+        self.assertIn("'ready', 'sent', 'responded', 'follow_up'", outreach5)
+        self.assertIn("'opened_in_email', 'sent', 'responded', 'follow_up'",
+                      outreach5)
+        self.assertIn("WHERE status IN ('draft', 'opened_in_email')",
+                      outreach5)
 
     def test_repository_protocol_includes_outreach(self):
         from database.repository import IntelligenceRepository

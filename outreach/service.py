@@ -11,7 +11,11 @@ Hard rules (from outreach/README.md):
 - Every action is appended to an attempts ledger (traceable history).
 - Missing information is stored as NULL/omitted; nothing is invented.
 
-Status vocabulary: draft | opened_in_email | sent | failed
+Outreach record lifecycle (canonical):
+    ready -> sent -> responded -> follow_up -> closed   (plus failed)
+Legacy values were mapped non-destructively in the v6 migration:
+    draft -> ready ; opened_in_email -> ready (the mail-client handoff is
+    preserved verbatim as an *attempt event*, never as a stored status).
 """
 
 from __future__ import annotations
@@ -26,11 +30,21 @@ from outreach.providers import (
     LocalStubProvider,
 )
 
-OUTREACH_STATUSES = tuple(s.value for s in DeliveryStatus)
+# Stored record statuses (the canonical lifecycle plus the honest 'failed').
+OUTREACH_STATUSES = (
+    "ready", "sent", "responded", "follow_up", "failed", "closed",
+)
+
+# Append-only attempt events. 'opened_in_email' records a mail-client handoff
+# and keeps the record 'ready'; every other event advances the status to the
+# event's own name. 'ready' is never stored as an attempt (create-only).
+OUTREACH_EVENTS = (
+    "opened_in_email", "sent", "responded", "follow_up", "failed", "closed",
+)
 
 __all__ = [
-    "DeliveryStatus", "OUTREACH_STATUSES", "create_outreach",
-    "get_outreach", "list_outreach", "provider_for",
+    "DeliveryStatus", "OUTREACH_STATUSES", "OUTREACH_EVENTS",
+    "create_outreach", "get_outreach", "list_outreach", "provider_for",
     "record_outreach_event",
 ]
 
@@ -50,6 +64,7 @@ def _oom_payload(row: dict, attempts: list[dict] | None = None) -> dict:
             "organization": row.get("organization"),
             "email": row["email"],
             "identity_key": row.get("identity_key"),
+            "target_type": row.get("target_type") or "station",
             "source_url": row.get("source_url"),
             "outreach_class": row.get("outreach_class") or "email",
             "submission_url": row.get("submission_url"),
@@ -71,7 +86,7 @@ def _oom_payload(row: dict, attempts: list[dict] | None = None) -> dict:
 
 def create_outreach(repository, *, payload: dict,
                     provider: EmailProvider = None, now: str = None) -> dict:
-    """Create a fresh outreach message record (status ``draft``).
+    """Create a fresh outreach message record (status ``ready``).
 
     ``payload`` is the operator-supplied outreach (recipient, optional
     track/context/sharing, subject, message). Nothing is sent here.
@@ -116,6 +131,7 @@ def create_outreach(repository, *, payload: dict,
         "outreach_id": outreach_id,
         "contact_uid": str(recipient.get("contact_uid") or "").strip(),
         "identity_key": recipient.get("identity_key"),
+        "target_type": recipient.get("target_type") or "station",
         "recipient_name": recipient.get("name"),
         "recipient_role": recipient.get("role"),
         "organization": recipient.get("organization"),
@@ -130,7 +146,7 @@ def create_outreach(repository, *, payload: dict,
         "message": str(payload.get("message") or ""),
         "from_email": str(payload.get("from") or "").strip() or None,
         "sharing": payload.get("sharing"),
-        "status": DeliveryStatus.DRAFT.value,
+        "status": DeliveryStatus.READY.value,
         "provider": provider.name,
         "created_at": ts,
         "updated_at": ts,
@@ -162,13 +178,15 @@ def record_outreach_event(repository, outreach_id: str, *, event: str,
                           meta: dict = None, now: str = None) -> dict:
     """Append a traceable attempt and transition status (recorded only).
 
-    ``event`` is one of: opened_in_email | sent | failed.
-    This function does not send; it records what the caller reports.
+    ``event`` is one of: opened_in_email | sent | responded | follow_up |
+    failed | closed. This function does not send; it records what the caller
+    reports. ``opened_in_email`` records a mail-client handoff in the ledger
+    while keeping the record's status ``ready``.
     """
     row = repository.get_outreach(outreach_id)
     if row is None:
         raise LookupError(f"unknown outreach {outreach_id!r}")
-    if event not in OUTREACH_STATUSES or event == "draft":
+    if event not in OUTREACH_EVENTS:
         raise ValueError(f"invalid event {event!r}")
 
     provider = provider or provider_for(row["provider"])
@@ -180,8 +198,9 @@ def record_outreach_event(repository, outreach_id: str, *, event: str,
         "at": ts,
         "meta": meta or {},
     }
+    destination = "ready" if event == "opened_in_email" else event
     repository.append_outreach_attempt(outreach_id, attempt)
-    repository.set_outreach_status(outreach_id, event, ts)
+    repository.set_outreach_status(outreach_id, destination, ts)
     return get_outreach(repository, outreach_id)
 
 

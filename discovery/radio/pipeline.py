@@ -62,6 +62,21 @@ def clean_title(raw: str) -> str:
     return " ".join(title.split())
 
 
+def _first_geo(
+    group: list[tuple[Candidate, str]],
+    field: str,
+    fallback: str | None,
+) -> str | None:
+    """First non-empty geography value carried by a candidate, else fallback."""
+    for candidate, _ in group:
+        value = getattr(candidate, field)
+        if value:
+            return value
+    if fallback:
+        return " ".join(fallback.split())
+    return None
+
+
 @dataclass
 class EngineConfig:
     timeout_seconds: float = 15.0
@@ -209,6 +224,42 @@ class RadioDiscoveryEngine:
         record.discovered_at = min(discovered_times) if discovered_times \
             else utc_now_iso()
         record.last_observed_at = utc_now_iso()
+
+        # --- location: carry provided geography through the pipeline ---------
+        # The seed entry (per candidate) is the most specific source; the
+        # discovery request is a generic fallback. Values are only ever copied
+        # from what was provided — nothing is invented — and the origin is
+        # recorded alongside for provenance.
+        location_evidence: list[dict] = []
+        for field, fallback in (("country", request.country),
+                                ("state_or_region", request.state_or_region),
+                                ("city", request.city)):
+            value = _first_geo(group, field, fallback)
+            setattr(record, field, value)
+            if not value:
+                continue
+            for candidate, _ in group:
+                if getattr(candidate, field):
+                    location_evidence.append({
+                        "value": value,
+                        "field": field,
+                        "source_url": candidate.url,
+                        "source_type": "seed_data",
+                        "method": "carry_through",
+                        "discovered_at": utc_now_iso(),
+                    })
+                    break
+            else:
+                location_evidence.append({
+                    "value": value,
+                    "field": field,
+                    "source_url": homepage_url,
+                    "source_type": "discovery_request",
+                    "method": "carry_through",
+                    "discovered_at": utc_now_iso(),
+                })
+        if location_evidence:
+            record.raw_metadata["location_evidence"] = location_evidence
 
         station_domain = canonical_domain(homepage_url)
 

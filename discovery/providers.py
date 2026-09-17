@@ -44,6 +44,13 @@ def _clean_title(name: str, url: str) -> str:
     return title or url
 
 
+def _clean_geo(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split())
+    return cleaned or None
+
+
 class SeedListProvider:
     """Deterministic provider over a local JSON seed file."""
 
@@ -85,6 +92,9 @@ class SeedListProvider:
                 source=f"seed_file:{self.seed_path.name}",
                 snippet=" ".join(str(entry.get("snippet") or "").split()),
                 source_type=SourceType.DIRECTORY_SOURCE,
+                country=_clean_geo(entry.get("country")),
+                state_or_region=_clean_geo(entry.get("state_or_region")),
+                city=_clean_geo(entry.get("city")),
             ))
             if len(candidates) >= request.limit:
                 break
@@ -122,5 +132,8 @@ class StaticListProvider:
                 source=str(entry.get("source") or "static_list"),
                 snippet=str(entry.get("snippet") or ""),
                 source_type=SourceType.DIRECTORY_SOURCE,
+                country=_clean_geo(entry.get("country")),
+                state_or_region=_clean_geo(entry.get("state_or_region")),
+                city=_clean_geo(entry.get("city")),
             ))
         return out

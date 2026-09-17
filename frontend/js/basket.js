@@ -6,8 +6,9 @@
  * preferred_submission_contacts). Selection is an operator decision
  * recorded on top of backend output.
  *
- * Persisted in sessionStorage so a refresh keeps the working set without
- * ever writing to a server or sending anything.
+ * The basket is a TEMPORARY selection mechanism (implementation detail),
+ * not a user-facing workflow: recipients are staged on a station page,
+ * then turned into real outreach RECORDS via "Start outreach" and removed.
  */
 
 const STORAGE_KEY = "mie.recipients.v1";
@@ -69,6 +70,7 @@ export class Basket {
     this.items.push({
       contact_uid: String(recipient.contact_uid),
       identity_key: String(recipient.identity_key),
+      target_type: recipient.target_type ?? "station",
       station_name: recipient.station_name ?? null,
       name: recipient.name ?? null,
       role: recipient.role ?? null,
@@ -93,15 +95,5 @@ export class Basket {
   clear() {
     this.items = [];
     this._save();
-  }
-
-  exportPayload() {
-    return {
-      generated_at: new Date().toISOString(),
-      note:
-        "Operator-selected outreach recipients. Pre-outreach export only; " +
-        "this application never sends messages.",
-      recipients: this.items.map((item) => ({ ...item })),
-    };
   }
 }

@@ -1,7 +1,7 @@
 # Music Intelligence Engine
 
-Find a radio station → find a **real** way to send it your music → submit or
-start an outreach campaign → move to the next station.
+Find a radio station → find a **real** way to send it your music → prepare an
+outreach record, hand it off, and track it → move to the next station.
 
 The engine discovers radio stations, records what the station itself publishes
 (website, location, genres, submission pages, contact emails), and **never
@@ -9,6 +9,23 @@ invents** an email address, contact person, or submission route. If a route
 isn't published, the app says so plainly.
 
 ---
+
+## Phases
+
+The engine ships in phases; later phases extend earlier ones, never replace
+them:
+
+- PHASE 1 — find a station → find a real submission route → prepare outreach.
+- PHASE 2 — universal station intelligence: unified location handling, the
+  canonical station contract, and generic submission/contact coverage.
+- PHASE 3 — enrichment (radio intelligence records, evidence labeling).
+- PHASE 4 — storage + API contracts.
+- PHASE 5 — verification append-only runs.
+- PHASE 6 — database + API parity (SQLite / PostgreSQL).
+- PHASE 7 — operator console frontend.
+- PHASE 8 — submissions + tracks (My music) + FastAPI parity.
+- PHASE 9 — outreach records with a provider abstraction.
+- PHASE 10/11 — intelligence repairs, relevance, and per-contact actionability.
 
 ## INSTALL
 
@@ -42,13 +59,16 @@ The server runs on `127.0.0.1` on port **8788**.
 
 From there:
 
-1. **Stations** — search and open a radio station.
-2. On a station page — see its website, location, genres, and the real
-   submission/contact pages and emails the engine found.
-3. **Send music** opens the station's own submission page; **Add to campaign**
-   stages a verified route for outreach.
-4. **My music** uploads the MP3 you want to pitch; **Outreach** drafts a
-   message and hands it to your own email client (the app never sends email).
+1. **Dashboard** — counts, recent records, alerts, quick paths.
+2. **Stations** — search and open a radio station.
+3. On a station page — see its website, location, genres, and the real
+   submission/contact pages and emails the engine found, in four sections:
+   STATION PROFILE / SUBMISSION INFORMATION / CONTACTS / OUTREACH.
+4. **Add to outreach** stages verified routes; **Start outreach** turns them
+   into real outreach records.
+5. **My music** uploads the MP3 you want to pitch; **Outreach** hands records
+   to your own email client (the app never sends email) and tracks them
+   `ready → sent → responded → follow_up → closed`.
 
 ## Tests
 
@@ -98,6 +118,6 @@ Intelligence Engine and is left untouched.
 | `database/`  | SQLite + PostgreSQL persistence and migrations           |
 | `discovery/` | Radio station discovery pipeline                         |
 | `enrichment/`| Contact / submission extraction and normalization        |
-| `outreach/`  | Campaign records and email-provider abstraction          |
+| `outreach/`  | Outreach RECORD layer + email-provider abstraction |
 | `crawler/`   | Bounded, robots-respecting HTTP retrieval                |
 | `tests/`     | Test suite (stdlib `unittest`)                           |

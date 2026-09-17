@@ -737,6 +737,66 @@ class PersistenceService:
             "failures": [dict(f) for f in failures],
         }
 
+    # -- Phase 11: automation discovery jobs ----------------------------------
+
+    def record_discovery_job(self, report: dict) -> str:
+        """Persist one automation discovery job run; returns its run_id.
+
+        The report dict is the same shape the discovery job endpoint returns,
+        so stored metadata and API responses stay in sync. Timestamps and
+        counters are coerced defensively — a job that failed before running
+        still gets an honest row.
+        """
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO discovery_jobs (
+                    run_id, organization_type, config, provider, status,
+                    queries_run, candidates_found, records_ingested,
+                    duplicates, failures, error_message, started_at,
+                    completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (str(report["run_id"]),
+                 str(report.get("organization_type") or "dj"),
+                 _dumps(report.get("config") or {}),
+                 report.get("provider"),
+                 str(report.get("status") or "failed"),
+                 int(report.get("queries_run") or 0),
+                 int(report.get("candidates_found") or 0),
+                 int(report.get("records_ingested") or 0),
+                 int(report.get("duplicates") or 0),
+                 int(report.get("failures") or 0),
+                 report.get("error"),
+                 str(report.get("started_at") or now),
+                 str(report.get("completed_at") or "")))
+        return str(report["run_id"])
+
+    def get_discovery_job(self, run_id: str) -> dict | None:
+        """One stored automation discovery job run (or None)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM discovery_jobs WHERE run_id=?",
+                (run_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "organization_type": row["organization_type"],
+            "config": _loads(row["config"], default={}),
+            "provider": row["provider"],
+            "status": row["status"],
+            "queries_run": int(row["queries_run"]),
+            "candidates_found": int(row["candidates_found"]),
+            "records_ingested": int(row["records_ingested"]),
+            "duplicates": int(row["duplicates"]),
+            "failures": int(row["failures"]),
+            "error": row["error_message"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"] or None,
+        }
+
     # -- submission assets + link accessibility (Phase 8) ----------------------
     # track_id ('sha256:<hex>') is the only asset identifier at this
     # boundary; storage locations are owned by the submissions storage
@@ -818,6 +878,17 @@ class PersistenceService:
                 [*params, int(limit), int(offset)]).fetchall()
         return [self._track_from_row(r) for r in rows], int(total)
 
+    def delete_track(self, track_id: str) -> str | None:
+        """Delete one stored asset RECORD; returns the deleted id or None.
+
+        Only the database record is removed — never the uploaded file bytes
+        in the asset store (the existing app defines no file-level removal).
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM tracks WHERE track_id=?", (track_id,))
+            return track_id if cur.rowcount else None
+
     def record_link_check(self, identity_key: str, entry: dict) -> None:
         """Append one accessibility check row; history is never rewritten."""
         with self._lock, self._conn:      # commit-on-exit: durable history
@@ -854,6 +925,7 @@ class PersistenceService:
             "outreach_id": row["outreach_id"],
             "contact_uid": row["contact_uid"],
             "identity_key": row["identity_key"],
+            "target_type": row["target_type"] or "station",
             "recipient_name": row["recipient_name"],
             "recipient_role": row["recipient_role"],
             "organization": row["organization"],
@@ -891,9 +963,9 @@ class PersistenceService:
                     email, source_url, track_id, track, context,
                     subject, message, from_email, sharing,
                     status, provider, created_at, updated_at,
-                    outreach_class, submission_url)
+                    outreach_class, submission_url, target_type)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(outreach_id) DO UPDATE SET
                     contact_uid=excluded.contact_uid,
                     identity_key=excluded.identity_key,
@@ -913,6 +985,7 @@ class PersistenceService:
                     provider=excluded.provider,
                     outreach_class=excluded.outreach_class,
                     submission_url=excluded.submission_url,
+                    target_type=excluded.target_type,
                     updated_at=excluded.updated_at
                 """,
                 (record["outreach_id"], record.get("contact_uid"),
@@ -926,7 +999,8 @@ class PersistenceService:
                  record.get("provider") or "local", created,
                  str(record.get("updated_at") or now),
                  record.get("outreach_class"),
-                 record.get("submission_url")))
+                 record.get("submission_url"),
+                 record.get("target_type") or "station"))
         return self.get_outreach(record["outreach_id"])
 
     def get_outreach(self, outreach_id: str) -> dict | None:
@@ -982,6 +1056,218 @@ class PersistenceService:
             "event": r["event"], "provider": r["provider"],
             "at": r["at"], "meta": _loads(r["meta"]),
         } for r in rows]
+
+    def delete_outreach(self, outreach_id: str) -> str | None:
+        """Delete one outreach record; returns the deleted id or None.
+
+        The connected schema cascades the delete to the record's attempt
+        history (``outreach_attempts`` → ``outreach_messages``); the raw
+        station/contact data that produced the record is untouched.
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM outreach_messages WHERE outreach_id=?",
+                (outreach_id,))
+            return outreach_id if cur.rowcount else None
+
+    # -- Phase 4: DJ intelligence ---------------------------------------------
+
+    def list_djs(self, limit: int = 50, offset: int = 0,
+                 q: str | None = None,
+                 genre: str | None = None,
+                 country: str | None = None,
+                 location: str | None = None,
+                 station: str | None = None,
+                 dj_type: str | None = None,
+                 platform: str | None = None,
+                 has_contact: bool | None = None,
+                 sort: str | None = None,
+                 order: str | None = None
+                 ) -> tuple[list[dict], int]:
+        clauses, params = [], []
+        if q:
+            clauses.append(
+                "(name LIKE ? ESCAPE '\\' OR stage_name LIKE ? ESCAPE '\\'"
+                " OR program LIKE ? ESCAPE '\\'"
+                " OR station_name LIKE ? ESCAPE '\\')")
+            like = "%" + _like_escape(q) + "%"
+            params.extend([like, like, like, like])
+        if genre:
+            clauses.append("genres LIKE ? ESCAPE '\\'")
+            params.append("%" + _like_escape(genre) + "%")
+        if country:
+            clauses.append("country = ?")
+            params.append(country)
+        if location:
+            clauses.append(
+                "(city LIKE ? ESCAPE '\\' OR state_or_region LIKE ? "
+                "ESCAPE '\\')")
+            like = "%" + _like_escape(location) + "%"
+            params.extend([like, like])
+        if station:
+            # Station affiliation is optional metadata on an INDEPENDENT DJ
+            # record — searching it never adds or implies radio-station links.
+            clauses.append(
+                "(station_key LIKE ? ESCAPE '\\' OR station_name LIKE ? "
+                "ESCAPE '\\')")
+            like = "%" + _like_escape(station) + "%"
+            params.extend([like, like])
+        if dj_type:
+            clauses.append("role LIKE ? ESCAPE '\\'")
+            params.append("%" + _like_escape(dj_type) + "%")
+        if platform:
+            clauses.append("platform LIKE ? ESCAPE '\\'")
+            params.append("%" + _like_escape(platform) + "%")
+        has_contact_sql = (
+            "EXISTS (SELECT 1 FROM dj_channels c WHERE c.dj_id = djs.dj_id)")
+        if has_contact is True:
+            clauses.append(has_contact_sql)
+        elif has_contact is False:
+            clauses.append("NOT " + has_contact_sql)
+        order_by = "name COLLATE NOCASE, dj_id"
+        if sort == "station":
+            order_by = ("station_name COLLATE NOCASE, name COLLATE NOCASE, "
+                        "dj_id")
+        elif sort == "discovered":
+            order_by = "discovered_at, dj_id"
+        direction = "DESC" if order == "desc" else "ASC"
+        order_clause = ", ".join(
+            f"{col} {direction}" for col in order_by.split(", "))
+        where = " AND ".join(clauses)
+        where_sql = f"WHERE {where}" if where else ""
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM djs {where_sql}",
+                params).fetchone()["n"]
+            rows = self._conn.execute(
+                f"SELECT * FROM djs {where_sql} "
+                f"ORDER BY {order_clause} "
+                "LIMIT ? OFFSET ?",
+                [*params, int(limit), int(offset)]).fetchall()
+        djs = [self._dj_from_row(r) for r in rows]
+        self._decorate_dj_contact_flag(djs)
+        return djs, int(total)
+
+    def get_dj(self, dj_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM djs WHERE dj_id=?",
+                (dj_id,)).fetchone()
+        return self._dj_from_row(row) if row else None
+
+    def get_dj_channels(self, dj_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT channel, value, source_url, verified_at "
+                "FROM dj_channels WHERE dj_id=? "
+                "ORDER BY channel, value", (dj_id,)).fetchall()
+        return [self._dj_channel_from_row(r) for r in rows]
+
+    def _decorate_dj_contact_flag(self, djs: list[dict]) -> None:
+        """Set ``has_contact`` on each list row (batched, read-path only)."""
+        if not djs:
+            return
+        with self._lock:
+            seen = {row["dj_id"] for row in djs}
+            batch = ",".join("?" * len(seen))
+            rows = self._conn.execute(
+                f"SELECT DISTINCT dj_id FROM dj_channels "
+                f"WHERE dj_id IN ({batch})", list(seen)).fetchall()
+        contact_ids = {row["dj_id"] for row in rows}
+        for row in djs:
+            row["has_contact"] = row["dj_id"] in contact_ids
+
+    def save_dj(self, record: dict, channels: list[dict] | None = None) -> None:
+        """Upsert one DJ row and replace its channel rows (transactional).
+
+        Additive semantics: the DJ row is INSERT OR REPLACE; channel rows
+        are delete-then-insert within the same transaction so a re-save
+        never accumulates stale facts. Nothing else is touched.
+        """
+        now = utc_now_iso()
+        channels = channels or []
+        with self._lock, self._conn:
+            existing = self._conn.execute(
+                "SELECT first_stored_at FROM djs WHERE dj_id=?",
+                (record["dj_id"],)).fetchone()
+            first_stored = existing["first_stored_at"] if existing else now
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO djs(
+                    dj_id, name, stage_name, role, program, station_key,
+                    station_name, platform, country, state_or_region, city,
+                    genres, formats, source_urls, verification,
+                    discovered_at, last_observed_at,
+                    first_stored_at, last_stored_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?)
+                """,
+                (record["dj_id"], record.get("name"),
+                 record.get("stage_name"), record.get("role"),
+                 record.get("program"), record.get("station_key"),
+                 record.get("station_name"), record.get("platform"),
+                 record.get("country"), record.get("state_or_region"),
+                 record.get("city"), _dumps(record.get("genres") or []),
+                 _dumps(record.get("formats") or []),
+                 _dumps(record.get("source_urls") or []),
+                 _dumps(record.get("verification")),
+                 record.get("discovered_at") or now,
+                 record.get("last_observed_at") or now,
+                 first_stored, str(record.get("last_stored_at") or now)))
+            self._conn.execute(
+                "DELETE FROM dj_channels WHERE dj_id=?", (record["dj_id"],))
+            for channel in channels:
+                self._conn.execute(
+                    "INSERT INTO dj_channels(dj_id, channel, value, "
+                    "source_url, verified_at) VALUES (?, ?, ?, ?, ?)",
+                    (record["dj_id"], channel.get("channel"),
+                     channel.get("value"), channel.get("source_url"),
+                     channel.get("verified_at")))
+
+    def delete_dj(self, dj_id: str) -> str | None:
+        """Delete one DJ row (channels cascade); returns the id or None.
+
+        Outreach records created for the DJ are preserved (target_type dj);
+        only the DJ profile and its source-backed channels are removed.
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM djs WHERE dj_id=?", (dj_id,))
+            return dj_id if cur.rowcount else None
+
+    @staticmethod
+    def _dj_from_row(row) -> dict:
+        """Decode one DJ row; optional fields that are absent stay None."""
+        return {
+            "dj_id": row["dj_id"],
+            "name": row["name"],
+            "stage_name": row["stage_name"],
+            "role": row["role"],
+            "program": row["program"],
+            "station_key": row["station_key"],
+            "station_name": row["station_name"],
+            "platform": row["platform"],
+            "country": row["country"],
+            "state_or_region": row["state_or_region"],
+            "city": row["city"],
+            "genres": _loads(row["genres"]),
+            "formats": _loads(row["formats"]),
+            "source_urls": _loads(row["source_urls"]),
+            "verification": _loads(row["verification"], default={}),
+            "discovered_at": row["discovered_at"],
+            "last_observed_at": row["last_observed_at"],
+            "first_stored_at": row["first_stored_at"],
+            "last_stored_at": row["last_stored_at"],
+        }
+
+    @staticmethod
+    def _dj_channel_from_row(row) -> dict:
+        return {
+            "channel": row["channel"],
+            "value": row["value"],
+            "source_url": row["source_url"],
+            "verified_at": row["verified_at"],
+        }
 
 
     # -- row shaping -------------------------------------------------------------

@@ -51,6 +51,15 @@ without provenance respectively), method used, evidence reference, verifier
 (code/human), timestamp.
 
 ### Campaign
+
+**Design note (stabilization 2026-09-08):** the shipping engine deliberately has NO
+campaign/`campaign_recipients` entity — a parallel campaign workflow was consolidated
+into a single canonical OUTREACH RECORD (`MUSIC + STATION + CONTACT`) stored as
+`outreach_messages` + `outreach_attempts` with the status vocabulary `ready | sent |
+responded | follow_up | failed | closed` (pending `draft`). The campaign concepts below
+remain the documented forward target for bulk multi-recipient sending and are not
+implemented; "campaign intent" today maps to a batch of outreach records.
+
 An outreach campaign: purpose, template reference, music/submission links, status
 (`draft`, `in_review`, `approved`, `sending`, `paused`, `completed`), created-by,
 approval records.
@@ -80,6 +89,8 @@ Identity-based blocklist (email/domain/org) with reason
 ```
 OrganizationType 1──* Organization 1──* Contact 1──* ContactMethod
 Organization 1──* Source / DiscoveryEvent / EnrichmentResult / VerificationResult
+# implemented today (stabilization): outreach_messages (release+station+contact+status)
+#   + outreach_attempts (append-only ledger); campaign_* entities documented, not built.
 Campaign 1──* CampaignRecipient *──1 Contact
 CampaignRecipient 1──* Message 1──* DeliveryEvent
 CampaignRecipient 1──0..1 Submission
@@ -103,7 +114,7 @@ The future radio intelligence record maps onto the generic model:
 | discovery date          | DiscoveryEvent                                      |
 | last verification       | VerificationResult                                  |
 | email / contact / org confidence | Confidence fields on respective entities   |
-| outreach status         | CampaignRecipient / organization status             |
+| outreach status         | outreach_messages.status (`ready|sent|responded|follow_up|failed|closed`); attempts in outreach_attempts |
 | notes                   | freeform annotation                                 |
 
 Radio-specific display can be composed in the backend/frontend without new tables.

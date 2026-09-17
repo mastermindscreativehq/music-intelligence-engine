@@ -161,7 +161,7 @@ class StdlibHttpFetcher:
         self.rate_limiter = RateLimiter(rate_limit_seconds)
         self.robots = RobotsCache(user_agent, timeout_seconds, respect_robots)
 
-    def fetch(self, url: str) -> FetchResult:
+    def fetch(self, url: str, *, timeout: float | None = None) -> FetchResult:
         result = FetchResult(url=url)
         try:
             normalized_scheme_ok = url.lower().startswith(("http://", "https://"))
@@ -189,7 +189,9 @@ class StdlibHttpFetcher:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(
+                    request, timeout=self.timeout if timeout is None else timeout
+            ) as resp:
                 result.status = int(getattr(resp, "status", 0) or 0)
                 result.final_url = resp.geturl()
                 raw_type = resp.headers.get("Content-Type", "") if resp.headers else ""

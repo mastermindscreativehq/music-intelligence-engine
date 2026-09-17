@@ -10,8 +10,12 @@ Design:
   outreach as ``sent`` merely because a mail client opened — that transition
   is only taken when a provider confirms delivery.
 
-Status vocabulary (shared with the outreach records layer):
-    draft | opened_in_email | sent | failed
+Status vocabulary (shared with the outreach records layer). A record's
+``status`` uses the canonical lifecycle READY -> SENT -> RESPONDED ->
+FOLLOW-UP -> CLOSED (plus the honest terminal ``failed``). ``OPENED_IN_EMAIL``
+is an ATTEMPT event (handoff to the operator's mail client), never a stored
+status: it is preserved verbatim in the attempts ledger while the record
+itself stays ``ready``.
 
 No provider credentials are configured yet; every concrete provider here is
 a local/no-op stub. Real providers (Gmail/Microsoft/SMTP/transactional) can
@@ -26,10 +30,13 @@ from typing import Protocol
 
 
 class DeliveryStatus(str, Enum):
-    DRAFT = "draft"
+    READY = "ready"
     OPENED_IN_EMAIL = "opened_in_email"
     SENT = "sent"
+    RESPONDED = "responded"
+    FOLLOW_UP = "follow_up"
     FAILED = "failed"
+    CLOSED = "closed"
 
 
 #: Provider capability flags

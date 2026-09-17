@@ -1,94 +1,95 @@
-/* Outreach history (Phase 9) — the persisted ledger of outreach records.
+/* Outreach activity log (#/outreach-history) — the FULL persisted ledger.
  *
- * Lists backend records with their status (draft | opened_in_email | sent |
- * failed) and the append-only attempt ledger. A record shown as
- * "opened in email" is never labeled "sent": only a provider-confirmed send
- * ever earns the `sent` status.
+ * Every outreach record ever prepared, including failed/closed ones and the
+ * append-only attempt history. Nothing is "sent" here unless a
+ * provider-confirmed send earned that status; 'opened in email' handoffs
+ * stay attempts. Records open their station right from the row.
  */
 
 import { api, ApiError } from "../api.js";
 import { el } from "../dom.js";
-import { outreachHref } from "../router.js";
+import { stationsHref, stationHref } from "../router.js";
+import {
+  attemptRow,
+  detailToggle,
+  removeOutreachButton,
+  statusChip,
+  trackLine,
+} from "./outreachRecords.js";
 
-function statusChip(status) {
-  const known = ["draft", "opened_in_email", "sent", "failed"];
-  const css = known.includes(status) ? ` ${status}` : "";
-  return el("span", { class: `chip${css}` }, String(status ?? "unknown"));
-}
-
-function attemptRow(a) {
-  const when = new Date(a.at).toLocaleString();
-  return el("li", { class: "attempt-row" },
-    statusChip(a.event),
-    el("span", { class: "dim" }, `@ ${a.at} · ${a.provider || "local"}`),
-    a.meta && a.meta.channel
-      ? el("span", { class: "dim" }, ` · via ${a.meta.channel}`) : null);
+function recipientLine(record) {
+  const recipient = record.recipient || {};
+  return el("div", { class: "receiver" },
+    el("span", {}, recipient.name || "(unnamed)"),
+    el("span", { class: "dim" },
+      ` · ${recipient.email || recipient.submission_url || "no direct route"}`),
+    recipient.organization
+      ? el("span", { class: "dim" }, ` · ${recipient.organization}`)
+      : null);
 }
 
 export function renderOutreachHistoryView(root) {
   root.append(
-    el("h1", {}, "Outreach history"),
+    el("h1", {}, "Outreach activity log"),
     el("p", { class: "dim" },
-      "Everything you drafted and opened — a traceable ledger. Nothing ",
-      "here is marked sent unless a provider confirmed delivery."));
+      "The traceable ledger of every outreach record, with all attempts. ",
+      "Nothing here is marked sent unless a provider confirmed delivery."));
 
-  const listSlot = el("div", { class: "card" },
-    el("p", { class: "dim" }, "Loading outreach records…"));
+  const listSlot = el("div", { class: "outreach-history-list" });
   const refresh = el("button", { class: "subtle" }, "Refresh");
   const newOutreach = el("button", { class: "primary" }, "New outreach");
   newOutreach.addEventListener("click", () => {
-    window.location.hash = outreachHref([]);
+    window.location.hash = stationsHref;
   });
   refresh.addEventListener("click", renderRecords);
 
-  root.append(el("div", { class: "actions-row" }, newOutreach, refresh),
+  root.append(
+    el("div", { class: "actions-row" }, newOutreach, refresh),
     listSlot);
 
   function renderRecords() {
     listSlot.replaceChildren(el("p", { class: "dim" },
       "Loading outreach records…"));
-    api.listOutreach({ limit: 100 })
+    api.listOutreach({ limit: 200 })
       .then((data) => {
         const records = data.outreach || [];
         if (records.length === 0) {
           listSlot.replaceChildren(
             el("p", { class: "dim" },
-              "No outreach records yet. Draft one from the outreach composer.")
-          );
+              "No outreach records yet. Open a station and prepare records ",
+              "from its OUTREACH section."));
           return;
         }
-        listSlot.replaceChildren(...records.map((r) => {
-          const recipient = r.recipient || {};
-          const track = r.track;
+        listSlot.replaceChildren(...records.map((record) => {
+          const recipient = record.recipient || {};
+          const details = detailToggle(() => api.getOutreach(record.outreach_id));
           const body = [
-            (r.subject ? el("strong", {}, r.subject) : null),
-            el("div", { class: "receiver" },
-              el("span", {}, recipient.name || "(unnamed)"),
-              el("span", { class: "dim" },
-                ` · ${recipient.email || "no email"}`),
-              recipient.organization
-                ? el("span", { class: "dim" }, ` · ${recipient.organization}`)
-                : null),
-            track
+            (record.subject ? el("strong", {}, record.subject) : null),
+            recipientLine(record),
+            trackLine(record),
+            record.updated_at
               ? el("div", { class: "dim" },
-                  `Track: ${track.original_filename || "(unnamed)"}`)
-              : null,
-            r.updated_at
-              ? el("div", { class: "dim" },
-                  `updated ${new Date(r.updated_at).toLocaleString()}`)
+                `updated ${new Date(record.updated_at).toLocaleString()}`)
               : null,
           ];
-          const attempts = (r.attempts || []).map(attemptRow);
-          return el("article", { class: "table-card card" },
+          const attempts = (record.attempts || []).map(attemptRow);
+          return el("article", { class: "table-card card outreach-record" },
             el("div", { class: "table-card-header" },
               el("div", { class: "table-card-title" },
-                statusChip(r.status),
-                el("span", { class: "dim record-id" }, r.outreach_id)),
-              el("div", { class: "table-card-actions" },
-                el("a", { href: r.links && r.links.self ? "#" + r.links.self : "#", class: "linkish" },
-                  "details"))),
+                statusChip(record.status),
+                el("span", { class: "dim record-id" }, record.outreach_id)),
+              el("div", { class: "table-card-actions actions-row" },
+                el("a", {
+                  class: "linkish",
+                  href: stationHref(recipient.identity_key || ""),
+                }, "Open station"),
+                details.button,
+                removeOutreachButton(record, renderRecords))),
             body.length ? el("div", { class: "table-card-body" }, ...body) : null,
-            attempts.length ? el("ol", { class: "attempt-list" }, ...attempts) : null);
+            attempts.length
+              ? el("ol", { class: "attempt-list" }, ...attempts)
+              : null,
+            details.slot);
         }));
       })
       .catch((error) => {

@@ -136,6 +136,9 @@ export const api = {
     request(/^https?:\/\//.test(selfPath) || selfPath.startsWith("/")
       ? selfPath
       : API_BASE_URL + "/" + selfPath),
+  deleteTrack: (trackId) =>
+    send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
+      { method: "DELETE" }),
   stationSubmission: (key) =>
     request(API_BASE_URL + `/api/v1/stations/${encodeURIComponent(key)}/submission`),
   runSubmissionChecks: (key) =>
@@ -166,6 +169,33 @@ export const api = {
     send(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}/event`,
       { method: "POST", body: JSON.stringify({ event, meta: meta || null }),
         headers: { "Content-Type": "application/json" } }),
+  deleteOutreach: (id) =>
+    send(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}`,
+      { method: "DELETE" }),
+  // Phase 3: opportunity intelligence for a selected release.
+  opportunities: (params) =>
+    request(API_BASE_URL + "/api/v1/opportunities", params),
+  // Phase 4: DJ intelligence.
+  djs: (params) => request(API_BASE_URL + "/api/v1/djs", params),
+  dj: (id) =>
+    request(API_BASE_URL + `/api/v1/djs/${encodeURIComponent(id)}`),
+  createDj: (payload) =>
+    send(API_BASE_URL + "/api/v1/djs",
+      { method: "POST", body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" } }),
+  discoverDjs: (payload) =>
+    send(API_BASE_URL + "/api/v1/djs/discover",
+      { method: "POST", body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" } }),
+  // Phase 4c: independent public-web DJ discovery. No secrets ever sent;
+  // the backend answers honestly when the provider is unconfigured.
+  discoverDjs: (payload) =>
+    send(API_BASE_URL + "/api/v1/djs/discover",
+      { method: "POST", body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" } }),
+  deleteDj: (id) =>
+    send(API_BASE_URL + `/api/v1/djs/${encodeURIComponent(id)}`,
+      { method: "DELETE" }),
 };
 
 /* Phase 8 addition: POST-capable companion to request(), sharing the same

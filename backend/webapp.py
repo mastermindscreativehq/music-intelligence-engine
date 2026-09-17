@@ -65,7 +65,8 @@ _ALLOWED_SUFFIXES = {
 
 
 def build_handler(service, static_root: Path, track_store=None,
-                  link_fetcher=None, allow_private: bool = False):
+                  link_fetcher=None, allow_private: bool = False,
+                  discover_fetcher=None):
     """Create a request handler bound to *service* + *static_root*.
 
     ``track_store``/``link_fetcher`` inject the Phase 8 submission
@@ -127,8 +128,18 @@ def build_handler(service, static_root: Path, track_store=None,
                     "error": {"code": "route_not_found",
                               "message": f"no route for {path!r}"}})
 
+        def do_DELETE(self):   # noqa: N802 (http.server API)
+            parts = urlsplit(self.path)
+            path = unquote(parts.path)
+            if path == "/api/v1" or path.startswith("/api/v1/"):
+                self._api("DELETE", path, parse_qs(parts.query))
+            else:
+                self._send_json(404, {
+                    "ok": False, "data": None,
+                    "error": {"code": "route_not_found",
+                              "message": f"no route for {path!r}"}})
+
         do_PUT = do_POST
-        do_DELETE = do_POST
         do_PATCH = do_POST
 
         # -- api -------------------------------------------------------------
@@ -137,7 +148,9 @@ def build_handler(service, static_root: Path, track_store=None,
                 status, body = dispatch(
                     service, method, path, params, self._read_body(),
                     track_store=track_store, link_fetcher=link_fetcher,
-                    allow_private=allow_private)
+                    allow_private=allow_private,
+                    discover_fetcher=discover_fetcher,
+                    headers=self.headers)
                 self._send_json(status, body)
             except Exception:
                 self._send_json(500, {
@@ -179,14 +192,16 @@ def build_handler(service, static_root: Path, track_store=None,
 def create_server(db_path, host: str, port: int,
                   static_root: Path | None = None, *,
                   track_store=None, link_fetcher=None,
-                  allow_private: bool = False) -> ThreadingHTTPServer:
+                  allow_private: bool = False,
+                  discover_fetcher=None) -> ThreadingHTTPServer:
     service = PersistenceService(db_path) if isinstance(db_path, str) \
         else db_path
     handler = build_handler(service,
                             Path(static_root or DEFAULT_STATIC_ROOT),
                             track_store=track_store,
                             link_fetcher=link_fetcher,
-                            allow_private=allow_private)
+                            allow_private=allow_private,
+                            discover_fetcher=discover_fetcher)
     server = ThreadingHTTPServer((host, port), handler)
     server.service = service      # type: ignore[attr-defined]
     return server

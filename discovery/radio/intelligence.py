@@ -242,7 +242,7 @@ def build_intelligence_record(
     carried_format = [station["format"]] if station.get("format") else []
     record.formats = list(dict.fromkeys(carried_format + detected_formats))
 
-    record.market_area = extract_market(texts)
+    record.market_area = extract_market(texts) or station.get("market_area")
     record.language = station.get("language")
     record.description = snippet or station.get("description")
 
@@ -386,6 +386,12 @@ def build_intelligence_record(
         "enrichment_mode": "pages" if pages else "offline_facts_only",
     }
 
+    # --- station-level useful pages (evidence-backed discovered links) --------
+    # Built before submission intelligence so Phase 2 route recognition can
+    # promote a discovered send-music page into the submission record.
+    record.useful_pages = build_useful_pages(
+        pages, fetch_records or [], site_domains)
+
     # --- submission intelligence -----------------------------------------------
     record.submission = _build_submission_path(
         record,
@@ -393,15 +399,35 @@ def build_intelligence_record(
         station.get("submission_url")
         if isinstance(station.get("submission_url"), dict) else None,
     )
-
-    # --- station-level useful pages (evidence-backed discovered links) --------
-    record.useful_pages = build_useful_pages(
-        pages, fetch_records or [], site_domains)
     # Persist the evidence-backed list alongside the station record so the
     # API contract can surface it verbatim on later reads.
     record.raw_metadata["useful_pages"] = [
         p.to_dict() for p in record.useful_pages
     ]
+
+    # --- location provenance --------------------------------------------------
+    # Preserve evidence recorded at discovery time (seed carry-through). For a
+    # location value that arrived without provenance, record an observed-
+    # evidence fact anchored to an official station source URL. Absent values
+    # stay absent — nothing is fabricated.
+    raw_metadata = station.get("raw_metadata") or {}
+    stored_evidence = raw_metadata.get("location_evidence")
+    location_evidence = [dict(e) for e in stored_evidence] \
+        if isinstance(stored_evidence, list) else []
+    known_fields = {e.get("field") for e in location_evidence}
+    for field in ("country", "state_or_region", "city"):
+        value = getattr(record, field)
+        if not value or field in known_fields:
+            continue
+        location_evidence.append({
+            "value": value,
+            "field": field,
+            "source_url": (station.get("source_urls") or [None])[0],
+            "source_type": "official_website_page",
+            "method": "observed",
+            "discovered_at": "",
+        })
+    record.raw_metadata["location_evidence"] = location_evidence
 
     # --- overall confidence: Phase 2 base + transparent enrichment deltas ------
     base = float(station.get("confidence_score") or 0.0)
@@ -527,8 +553,43 @@ def _build_submission_path(
 
     if path.submission_url is None and not submission_email \
             and path.instructions is None and not music_contacts:
+        promoted = _promote_send_music_page(record)
+        if promoted is not None:
+            path.submission_url = promoted
+            path.confidence_score = min(round(
+                path.confidence_score + 0.35, 2), 0.95)
+            path.confidence_reasons.append(
+                "published send-music page identified")
+            return path
         return None
     return path
+
+
+def _promote_send_music_page(
+    record: RadioIntelligenceRecord,
+) -> dict | None:
+    """Promote a discovered send-music page into the submission record.
+
+    Phase 2 route recognition: when a station publishes a page explicitly for
+    receiving music but no structured submission facts were extracted, the
+    EXACT href discovered on the station's own site becomes the documented
+    submission route. The URL is never constructed or guessed, and no outreach
+    record is created here — this is intelligence only.
+    """
+    for page in record.useful_pages:
+        if page.category not in ("send_music", "submission_guidelines"):
+            continue
+        if not isinstance(page.url, str) or not page.url:
+            continue
+        return {
+            "value": page.url,
+            "source_url": page.source_url or page.url,
+            "source_type": "official_website_page",
+            "method": "link",
+            "discovered_at": page.discovered_at or "",
+            "also_seen_at": [],
+        }
+    return None
 
 
 def _email_fact(value: str, source_url: str, quality: dict) -> dict:

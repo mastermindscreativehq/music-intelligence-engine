@@ -48,7 +48,8 @@ LOGGER = logging.getLogger("mie.api")
 
 
 def build_handler(service: PersistenceService, track_store=None,
-                  link_fetcher=None, allow_private: bool = False):
+                  link_fetcher=None, allow_private: bool = False,
+                  discover_fetcher=None):
     """Create a request handler class bound to *service*.
 
     ``track_store``/``link_fetcher`` inject the Phase 8 submission
@@ -89,7 +90,9 @@ def build_handler(service: PersistenceService, track_store=None,
                     service, method, unquote(parts.path),
                     parse_qs(parts.query), self._read_body(),
                     track_store=track_store, link_fetcher=link_fetcher,
-                    allow_private=allow_private)
+                    allow_private=allow_private,
+                    discover_fetcher=discover_fetcher,
+                    headers=self.headers)
                 self._send_json(status, body)
             except Exception:
                 LOGGER.exception("handler failure")
@@ -109,8 +112,10 @@ def build_handler(service: PersistenceService, track_store=None,
         def do_POST(self):   # noqa: N802 (http.server API)
             self._dispatch("POST")
 
+        def do_DELETE(self):   # noqa: N802 (http.server API)
+            self._dispatch("DELETE")
+
         do_PUT = do_POST
-        do_DELETE = do_POST
         do_PATCH = do_POST
 
     return RadioIntelligenceAPIHandler
@@ -118,11 +123,13 @@ def build_handler(service: PersistenceService, track_store=None,
 
 def create_server(db_path: str, host: str, port: int, *,
                   track_store=None, link_fetcher=None,
-                  allow_private: bool = False) -> ThreadingHTTPServer:
+                  allow_private: bool = False,
+                  discover_fetcher=None) -> ThreadingHTTPServer:
     service = PersistenceService(db_path)
     handler = build_handler(service, track_store=track_store,
                             link_fetcher=link_fetcher,
-                            allow_private=allow_private)
+                            allow_private=allow_private,
+                            discover_fetcher=discover_fetcher)
     server = ThreadingHTTPServer((host, port), handler)
     server.service = service      # type: ignore[attr-defined]
     return server
