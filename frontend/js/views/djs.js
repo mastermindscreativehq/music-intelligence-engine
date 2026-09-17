@@ -83,9 +83,15 @@ function filterForm(current, onApply) {
   return form;
 }
 
-function summaryLine(total, devExcluded) {
-  return `${total} DJ${total === 1 ? "" : "s"} found`
-    + (devExcluded ? ` · ${devExcluded} development/test fixture${devExcluded === 1 ? "" : "s"} hidden` : "");
+function summaryLine(total, devExcluded, rejectedExcluded) {
+  let line = `${total} DJ${total === 1 ? "" : "s"} found`;
+  if (devExcluded) {
+    line += ` · ${devExcluded} development/test fixture${devExcluded === 1 ? "" : "s"} hidden`;
+  }
+  if (rejectedExcluded) {
+    line += ` · ${rejectedExcluded} non-DJ record${rejectedExcluded === 1 ? "" : "s"} hidden`;
+  }
+  return line;
 }
 
 function resultRow(dj) {
@@ -147,7 +153,7 @@ export function renderDJsView(root) {
       }
       resultsCard.replaceChildren(
         el("h2", {}, "DJs"),
-        el("p", { class: "dim" }, summaryLine(data.total, data.dev_fixtures_excluded)),
+        el("p", { class: "dim" }, summaryLine(data.total, data.dev_fixtures_excluded, data.rejected_excluded)),
         el("table", { class: "results" },
           el("thead", {}, el("tr", {},
             el("th", {}, "DJ"), el("th", {}, "genres"),

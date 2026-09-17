@@ -13,11 +13,12 @@ function chip(label, cls) {
 /* DJ classification (detail.classification_status from the discovery gate):
  *   verified           -> "Verified DJ"
  *   needs_verification -> "DJ"        (recorded, evidence not yet confirmed)
- *   not_qualified      -> "Needs verification" (evidence says not a DJ) */
+ *   not_qualified      -> "Not a DJ"  (evidence says this record is NOT a DJ;
+ *                                       hidden from the normal listing) */
 const DJ_STATUS_CHIP = {
   verified: ["Verified DJ", "status-verified"],
   needs_verification: ["DJ", "status-unverified"],
-  not_qualified: ["Needs verification", "status-stale"],
+  not_qualified: ["Not a DJ", "status-stale"],
 };
 
 export function djStatusChip(dj) {

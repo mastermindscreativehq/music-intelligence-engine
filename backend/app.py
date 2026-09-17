@@ -447,14 +447,17 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                  has_contact: bool | None = None,
                  sort: str | None = Query(None, pattern="^(name|station|discovered)$"),
                  order: str | None = Query(None, pattern="^(asc|desc)$")):
-        rows, total = dj_service.list_djs(
+        rows, total, dev_excluded, rejected_excluded = dj_service.list_djs(
             storage, limit=limit, offset=offset, q=q, genre=genre,
             country=country, location=location, station=station,
             dj_type=dj_type, platform=platform, has_contact=has_contact,
-            sort=sort, order=order)
+            sort=sort, order=order, exclude_dev=True,
+            exclude_rejected=True)
         return success_body({"djs": [dj_summary(r) for r in rows],
                              "total": total, "limit": limit,
-                             "offset": offset})
+                             "offset": offset,
+                             "dev_fixtures_excluded": dev_excluded,
+                             "rejected_excluded": rejected_excluded})
 
     @app.post("/api/v1/djs", status_code=201)
     async def create_dj(request: Request):

@@ -142,12 +142,31 @@ class IntelligenceRepository(Protocol):
                  platform: str | None = ...,
                  has_contact: bool | None = ...,
                  sort: str | None = ...,
-                 order: str | None = ...) -> tuple[list[dict], int]:
+                 order: str | None = ...,
+                 exclude_dev: bool = ...,
+                 exclude_rejected: bool = ...) \
+            -> tuple[list[dict], int, int, int]:
         """Filtered DJ listing; returns (rows, total), default order by name.
+
+        With ``exclude_dev`` the tuple becomes
+        ``(rows, visible_total, dev_fixtures_excluded)``; with
+        ``exclude_rejected`` also set it becomes
+        ``(rows, visible_total, dev_fixtures_excluded,
+        rejected_excluded)``. ``rejected_excluded`` counts rows whose
+        ``verification.classification.verdict`` is ``rejected`` (NOT a DJ) —
+        they never surface in the normal listing.
 
         ``station`` matches the optional station AFFILIATION metadata only;
         ``has_contact`` requires/excludes profiles with at least one stored
         channel; rows include the read-path ``has_contact`` flag.
+        """
+        ...
+
+    def update_dj_verification(self, dj_id: str, verification: dict) -> bool:
+        """Replace one DJ's ``verification`` JSON (touch ``last_stored_at``).
+
+        Used by data cleanup to persist classification verdicts without
+        touching any other DJ column. Returns True when the row existed.
         """
         ...
 

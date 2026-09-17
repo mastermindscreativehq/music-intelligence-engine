@@ -9,8 +9,11 @@ the product contract DISCOVERED → VERIFIED → RELEVANT → ACTIONABLE:
   decision-maker (personal DJ site, platform profile, radio-host page, club
   residence, bookings/mixes text, a leading ``DJ`` title).
 - Strong non-DJ markers (event/ticketing hosts and URLs, playlist and
-  concert/listing pages) *reject* the candidate even when a DJ name appears —
-  an event page is not DJ evidence.
+  concert/listing pages, ra.co/resident advisor events, search-result
+  listings, Facebook group/discussion pages) *reject* the candidate even when
+  a DJ name appears — an event page is not DJ evidence.
+- Editorial blog pages (``blog.*`` / blogspot) are treated as no-DJ-evidence
+  pages: they reject only when no positive DJ evidence exists either.
 - Otherwise the candidate is ``needs_review``: it is NEVER ingested
   automatically, because a generic/music/venue page merely mentioning a DJ
   is not sufficient evidence.
@@ -32,20 +35,27 @@ VERDICT_NEEDS_REVIEW = "needs_review"
 
 KIND_PERSONAL_SITE = "personal_site"
 KIND_PLATFORM_PROFILE = "platform_profile"
-KIND_NOT_A_DJ = "not_a_dj"
+KIND_NOT_A_DJ = "non_dj"
 
 # Event/ticketing/subscription-result hosts. A URL on one of these is never
 # DJ evidence, even when the result title names a specific act.
 _REJECT_HOST_FRAGMENTS = (
     "eventbrite", "ticketmaster", "songkick", "seatgeek", "eventful",
     "dice.", "dice.fm", "lu.ma", "meetup.", "biletix", "enterticket",
+    "ra.co", "residentadvisor", "yelp.", "yellowpages", "eventnoire",
 )
 
-# Path fragments that mark event/ticket/playlist/listing pages.
+# Path fragments that mark event/ticket/playlist/listing/search pages.
 _REJECT_PATH_FRAGMENTS = (
     "/events", "/event/", "/tickets", "/ticketing", "/date/",
-    "/playlist", "/sets", "/shows", "/tour/", "/gigs",
+    "/playlist", "/sets", "/shows", "/tour/", "/gigs", "/search",
 )
+
+# A social-platform discussion/dissemination page is never DJ evidence.
+# Only Facebook group/post/video pages are matched so a DJ's own platform
+# profile (host without those path segments) can still qualify.
+_FORUM_HOST_FRAGMENT = "facebook"
+_FORUM_PATH_FRAGMENTS = ("/groups/", "/posts/", "/videos/")
 
 # Text markers that identify an event/ticketing/playlist/listing page.
 _REJECT_TEXT_FRAGMENTS = (
@@ -126,10 +136,31 @@ def _disqualify_host_or_path(url: str) -> str | None:
     host, path = _host_and_path(url)
     for fragment in _REJECT_HOST_FRAGMENTS:
         if fragment in host:
-            return f"ticketing/event host detected: {host}"
+            return f"ticketing/event/listing host detected: {host}"
     for fragment in _REJECT_PATH_FRAGMENTS:
         if fragment in path:
-            return f"event/ticket/playlist page path: {path}"
+            return f"event/ticket/playlist/listing page path: {path}"
+    return None
+
+
+def _disqualify_forum_path(url: str) -> str | None:
+    """A Facebook group/post/video page is discussion, not a DJ profile."""
+    host, path = _host_and_path(url)
+    if _FORUM_HOST_FRAGMENT in host and any(
+            fragment in path for fragment in _FORUM_PATH_FRAGMENTS):
+        return f"social-discussion page ({host}{path})"
+    return None
+
+
+def _soft_editorial_host(url: str) -> str | None:
+    """Editorial blog pages carry search/magazine text, not DJ evidence.
+
+    This is a *soft* marker: it only rejects when no positive DJ evidence
+    exists, because an artist can legitimately publish on a blog platform.
+    """
+    host, _path = _host_and_path(url)
+    if host.startswith("blog.") or "blogspot." in host:
+        return f"editorial blog host: {host}"
     return None
 
 
@@ -157,7 +188,7 @@ def classify_candidate(*, url: str, title: str = "", snippet: str = "",
     evidence_title = (page_title or title or "").strip()
     host, _path = _host_and_path(url)
 
-    hard_reject = _disqualify_host_or_path(url)
+    hard_reject = _disqualify_host_or_path(url) or _disqualify_forum_path(url)
     if hard_reject:
         return Qualification(
             verdict=VERDICT_REJECTED, kind=KIND_NOT_A_DJ,
@@ -174,7 +205,8 @@ def classify_candidate(*, url: str, title: str = "", snippet: str = "",
             reason=f"qualified on evidence: {evidence}",
             evidence_url=url, evaluated_at=utc_now_iso())
 
-    soft_reject = _disqualify_text(evidence_title, snippet)
+    soft_reject = _disqualify_text(evidence_title, snippet) \
+        or _soft_editorial_host(url)
     if soft_reject:
         return Qualification(
             verdict=VERDICT_REJECTED, kind=KIND_NOT_A_DJ,

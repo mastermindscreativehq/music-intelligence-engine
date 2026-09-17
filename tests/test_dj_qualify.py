@@ -39,7 +39,7 @@ class TestClassifyCandidate(unittest.TestCase):
             url="https://www.ticketmaster.com/event/12345",
             title="Afrobeats Festival Tickets")
         self.assertEqual(q.verdict, VERDICT_REJECTED)
-        self.assertEqual(q.kind, "not_a_dj")
+        self.assertEqual(q.kind, "non_dj")
 
     def test_venue_listing_page_with_dj_name_is_rejected(self):
         """An event/listing page is NOT DJ evidence even when it names a DJ."""
@@ -105,6 +105,48 @@ class TestClassifyCandidate(unittest.TestCase):
         self.assertEqual(data["evidence_url"], "https://djamara.example/")
         self.assertIn("evidence", data["reason"].lower())
         self.assertTrue(data["evaluated_at"])
+
+    # -- deterministic non-DJ signatures added for the data cleanup ------------
+
+    def test_resident_advisor_event_is_rejected(self):
+        q = classify_candidate(
+            url="https://ra.co/events/2398661", title="DJ Holger | RA Guide")
+        self.assertEqual(q.verdict, VERDICT_REJECTED)
+        self.assertEqual(q.kind, "non_dj")
+
+    def test_yelp_search_listing_is_rejected(self):
+        q = classify_candidate(
+            url="https://www.yelp.com/search?find_desc=djs",
+            title="Best Djs Near Me | Yelp")
+        self.assertEqual(q.verdict, VERDICT_REJECTED)
+
+    def test_facebook_group_discussion_is_rejected(self):
+        q = classify_candidate(
+            url="https://www.facebook.com/groups/djtalk/posts/123",
+            title="DJ Facebook group post")
+        self.assertEqual(q.verdict, VERDICT_REJECTED)
+
+    def test_facebook_profile_page_can_still_qualify(self):
+        """The forum marker only fires on group/post/video pages."""
+        q = classify_candidate(
+            url="https://www.facebook.com/djkenz/",
+            title="DJ Kenz | NY & NJ DJ")
+        self.assertEqual(q.verdict, VERDICT_QUALIFIED)
+
+    def test_editorial_blog_soft_rejects_without_dj_evidence(self):
+        q = classify_candidate(
+            url="https://blog.afrobeats-news.com/nyc-2026/",
+            title="NYC Afrobeats Scene Grows")
+        self.assertEqual(q.verdict, VERDICT_REJECTED)
+        self.assertEqual(q.kind, "non_dj")
+        self.assertIn("blog", q.reason.lower())
+
+    def test_editorial_blog_with_dj_evidence_still_qualifies(self):
+        """Positive DJ evidence outranks the soft editorial marker."""
+        q = classify_candidate(
+            url="https://blog.afrobeats-news.com/nyc-2026/",
+            title="DJ Kenz Books NYC Residency", page_title="DJ Kenz")
+        self.assertEqual(q.verdict, VERDICT_QUALIFIED)
 
 
 if __name__ == "__main__":

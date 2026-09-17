@@ -17,9 +17,11 @@ All data lives in temp SQLite files; no network.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from crawler.http import FetchResult
 from crawler.urls import normalize_url
@@ -30,8 +32,15 @@ from discovery.djs.pipeline import DjsDiscoveryEngine
 from discovery.models import DiscoveryRequest
 from discovery.providers import StaticListProvider
 
-from djs.service import create_dj
+from djs.service import create_dj, ingest_dj_discovery
 from outreach.service import create_outreach
+
+_CLEANUP_PATH = (Path(__file__).resolve().parents[1] / "scripts"
+                 / "dj_classification_cleanup.py")
+_spec = importlib.util.spec_from_file_location(
+    "dj_classification_cleanup", _CLEANUP_PATH)
+dj_cleanup = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(dj_cleanup)
 
 
 def _station(contacts, **over):
@@ -331,6 +340,198 @@ class TestPipelineQualificationGate(unittest.TestCase):
         self.assertEqual(classification["verdict"], "qualified")
         self.assertEqual(classification["evidence_url"],
                          "https://amara.example")
+
+
+class TestDjRejectedExclusion(unittest.TestCase):
+    """Rejected (NOT a DJ) records never surface in the normal listing."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.service = PersistenceService(os.path.join(self._tmp, "t.db"))
+        self.real = create_dj(self.service, payload={
+            "name": "DJ Amara", "city": "Lagos",
+            "source_urls": ["https://djamara.fm/"],
+        })
+        self.rejected = create_dj(self.service, payload={
+            "name": "Yelp DJ search", "city": "Austin",
+            "source_urls": ["https://www.yelp.com/search?find_desc=djs"],
+            "verification": {
+                "classification": {
+                    "verdict": "rejected", "kind": "non_dj",
+                    "reason": "not a DJ profile",
+                    "evidence_url": "https://www.yelp.com/search?find_desc=djs",
+                    "evaluated_at": "2026-09-17T00:00:00Z",
+                },
+            },
+        })
+
+    def tearDown(self):
+        self.service.close()
+
+    def test_rejected_row_is_hidden_and_counted(self):
+        _code, body = dispatch(self.service, "GET", "/api/v1/djs", {})
+        self.assertEqual(body["data"]["total"], 1)
+        self.assertEqual(body["data"]["rejected_excluded"], 1)
+        self.assertEqual(body["data"]["djs"][0]["dj_id"], self.real["dj_id"])
+
+    def test_rejected_detail_is_still_reachable_and_plain_language(self):
+        _code, body = dispatch(
+            self.service, "GET",
+            f"/api/v1/djs/{self.rejected['dj_id']}", {})
+        self.assertEqual(body["data"]["classification_status"],
+                         "not_qualified")
+
+    def test_needs_verification_rows_stay_visible(self):
+        create_dj(self.service, payload={
+            "name": "DJ Marta", "city": "Nairobi",
+            "source_urls": ["https://marta.fm/"],
+            "verification": {
+                "classification": {
+                    "verdict": "needs_verification", "kind": None,
+                    "reason": "no evidence yet",
+                    "evidence_url": "https://marta.fm/",
+                    "evaluated_at": "2026-09-17T00:00:00Z",
+                },
+            },
+        })
+        _code, body = dispatch(self.service, "GET", "/api/v1/djs", {})
+        self.assertEqual(body["data"]["total"], 2)
+        self.assertEqual(body["data"]["rejected_excluded"], 1)
+
+
+class TestDjIngestRejectGuard(unittest.TestCase):
+    """R4: a rejected source URL must never re-introduce a DJ record."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.service = PersistenceService(os.path.join(self._tmp, "t.db"))
+        self.bad_url = "https://www.eventbrite.com/e/afrobeats-night-123"
+        create_dj(self.service, payload={
+            "name": "AFROBEATS | Eventbrite", "city": "Austin",
+            "source_urls": [self.bad_url],
+            "verification": {
+                "classification": {
+                    "verdict": "rejected", "kind": "non_dj",
+                    "reason": "not a DJ profile",
+                    "evidence_url": self.bad_url,
+                    "evaluated_at": "2026-09-17T00:00:00Z",
+                },
+            },
+        })
+
+    def tearDown(self):
+        self.service.close()
+
+    def test_reintroduced_source_is_refused(self):
+        report = ingest_dj_discovery(self.service, [{
+            "name": "Afrobeats Night Austin", "city": "Austin",
+            "source_urls": [self.bad_url],
+        }])
+        self.assertEqual(report["created"], 0)
+        self.assertEqual(len(report["failures"]), 1)
+        self.assertIn("already classified not a DJ",
+                      report["failures"][0]["error"])
+        _code, body = dispatch(self.service, "GET", "/api/v1/djs", {})
+        self.assertEqual(body["data"]["total"], 0)
+        self.assertEqual(body["data"]["rejected_excluded"], 1)
+
+
+class TestStationEnrichmentIsNullOnly(unittest.TestCase):
+    """Re-enrichment fills empty columns and never overwrites stored facts."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.service = PersistenceService(os.path.join(self._tmp, "t.db"))
+
+    def tearDown(self):
+        self.service.close()
+
+    def _ingest(self, **over):
+        record = {
+            "name": "W Genre Match", "website": "https://genre-match.org",
+            "station_type": "community", "status": "enriched",
+            "submission": None,
+        }
+        record.update(over)
+        self.service.ingest_intelligence([record], source="t")
+
+    def test_existing_values_survive_and_nulls_are_filled(self):
+        self._ingest(description="First description", city="Portland")
+        self._ingest(description="Second description", city="Seattle",
+                     state_or_region="OR", genres=["rock"])
+        row = self.service.list_stations(limit=1)[0][0]
+        self.assertEqual(row["description"], "First description")
+        self.assertEqual(row["city"], "Portland")
+        self.assertEqual(row["state_or_region"], "OR")
+        self.assertIn("rock", row["genres"])
+
+
+class TestDjClassificationCleanup(unittest.TestCase):
+    """The cleanup script classifies stored rows idempotently and reversibly."""
+
+    ROWS = (
+        ("AFROBEATS | Eventbrite",
+         "https://www.eventbrite.com/e/afrobeats-night-123", "rejected"),
+        ("DJ Holger", "https://ra.co/events/2398661", "rejected"),
+        ("RED CARPET: Kenya's DJ Fully Focus",
+         "https://www.youtube.com/watch?v=abc123", "needs_verification"),
+        ("DJ Kenz | NY & NJ DJ",
+         "https://www.instagram.com/djkenz_/", "needs_verification"),
+        ("Grand Performances",
+         "https://www.grandperformances.org/events/summer", "rejected"),
+        ("DJ Hol Up", "https://open.spotify.com/playlist/37i9dQZF1DX",
+         "rejected"),
+        ("Best DJs Near Me",
+         "https://www.yelp.com/search?find_desc=djs", "rejected"),
+        ("Afrobeats Scene Grows",
+         "https://blog.eventnoire.com/nyc-afrobeats-2026/", "rejected"),
+        ("Afrobeats To The World", "https://afrobeatstotheworld.com/",
+         "needs_verification"),
+        ("DJ Talk Group",
+         "https://www.facebook.com/groups/djtalk/posts/123", "rejected"),
+    )
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.service = PersistenceService(os.path.join(self._tmp, "t.db"))
+        for name, url, _verdict in self.ROWS:
+            create_dj(self.service, payload={
+                "name": name, "source_urls": [url]})
+
+    def tearDown(self):
+        self.service.close()
+
+    def test_plan_apply_replan_and_reverse(self):
+        now = "2026-09-17T00:00:00Z"
+        plan = dj_cleanup.plan_cleanup(self.service, now=now)
+        verdicts = sorted(
+            (c["name"], c["target"]["verdict"]) for c in plan)
+        expected = sorted((name, verdict) for name, _u, verdict in self.ROWS)
+        self.assertEqual(verdicts, expected)
+
+        rejected = [c for c in plan if c["target"]["verdict"] == "rejected"]
+        review = [c for c in plan if c["target"]["verdict"] != "rejected"]
+        self.assertEqual(len(rejected), 7)
+        self.assertEqual(len(review), 3)
+        for change in rejected:
+            self.assertEqual(change["target"]["kind"], "non_dj")
+
+        applied = dj_cleanup.apply_cleanup(self.service, plan)
+        self.assertEqual(applied, 10)
+        self.assertEqual(dj_cleanup.plan_cleanup(self.service, now=now), [])
+        self.assertEqual(dj_cleanup.apply_cleanup(self.service, []), 0)
+
+        _code, body = dispatch(self.service, "GET", "/api/v1/djs", {})
+        self.assertEqual(body["data"]["total"], 3)
+        self.assertEqual(body["data"]["rejected_excluded"], 7)
+
+        # Reversal restores exactly the pre-cleanup listing.
+        reverted = dj_cleanup.reverse_cleanup(self.service)
+        self.assertEqual(reverted, 10)
+        self.assertEqual(dj_cleanup.reverse_cleanup(self.service), 0)
+        _code, body = dispatch(self.service, "GET", "/api/v1/djs", {})
+        self.assertEqual(body["data"]["total"], 10)
+        self.assertEqual(body["data"]["rejected_excluded"], 0)
 
 
 if __name__ == "__main__":

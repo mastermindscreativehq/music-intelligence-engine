@@ -204,23 +204,30 @@ def list_djs(repository, *, limit: int = 50, offset: int = 0,
              station: str | None = None, dj_type: str | None = None,
              platform: str | None = None, has_contact: bool | None = None,
              sort: str | None = None, order: str | None = None,
-             exclude_dev: bool = False
-             ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
+             exclude_dev: bool = False,
+             exclude_rejected: bool = False
+             ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
+             | tuple[list[dict], int, int, int]:
     """Filtered DJ listing; returns (rows, total) or, when ``exclude_dev``
-    is set, (rows, visible_total, dev_fixtures_excluded).
+    is set, (rows, visible_total, dev_fixtures_excluded) and, when
+    ``exclude_rejected`` is set as well, (rows, visible_total,
+    dev_fixtures_excluded, rejected_excluded).
 
     ``station`` filters on the DJ's OPTIONAL station affiliation only —
     affiliation is metadata, never a discovery source. ``dj_type`` matches
     the stored role label (e.g. ``club_dj``); ``has_contact`` requires (or
     excludes) DJs with at least one stored channel. With ``exclude_dev``,
     dev/test fixtures (reserved-TLD hosts, ``test-dj-``/``e2e`` markers) are
-    hidden from the read path — storage is never mutated.
+    hidden from the read path — storage is never mutated. With
+    ``exclude_rejected``, DJs deterministically classified NOT a DJ
+    (``verdict == 'rejected'``) are hidden from the normal listing too —
+    rejected once, they stay hidden forever.
     """
     return repository.list_djs(
         limit=limit, offset=offset, q=q, genre=genre, country=country,
         location=location, station=station, dj_type=dj_type,
         platform=platform, has_contact=has_contact, sort=sort, order=order,
-        exclude_dev=exclude_dev)
+        exclude_dev=exclude_dev, exclude_rejected=exclude_rejected)
 
 
 def ingest_dj_discovery(repository, records: list[dict], *,
@@ -242,6 +249,7 @@ def ingest_dj_discovery(repository, records: list[dict], *,
     ts = now or utc_now_iso()
     merged_records, duplicates_removed = deduplicate_djs(list(records))
     index = _existing_fingerprints(repository)
+    rejected_sources = _rejected_source_map(repository)
 
     created = 0
     merged = 0
@@ -255,6 +263,17 @@ def ingest_dj_discovery(repository, records: list[dict], *,
             record, channels = _normalize_dj_payload(raw, ts)
         except ValueError as exc:
             failures.append({"entry": raw, "error": str(exc)})
+            continue
+        reintroduced = next(
+            (url for url in sorted(record.get("source_urls") or [])
+             if url in rejected_sources),
+            None)
+        if reintroduced is not None:
+            failures.append({
+                "entry": raw,
+                "error": (f"source_url already classified not a DJ "
+                          f"(dj {rejected_sources[reintroduced]}): "
+                          f"{reintroduced}")})
             continue
         fingerprints = set(dj_fingerprints({**record, "channels": channels}))
         match_id = _match_existing(index, fingerprints)
@@ -292,6 +311,25 @@ def _existing_fingerprints(repository) -> dict[str, set[str]]:
         index[row["dj_id"]] = set(
             dj_fingerprints({**row, "channels": channels}))
     return index
+
+
+def _rejected_source_map(repository) -> dict[str, str]:
+    """source_url -> dj_id for every stored DJ classed NOT a DJ.
+
+    ``list_djs`` is called WITHOUT ``exclude_rejected`` here so the whole
+    table (including hidden, rejected rows) is scanned. R4: rejected once,
+    a source URL stays rejected forever — discovery re-feeding the same
+    source must never re-introduce a record.
+    """
+    from backend.contracts import derive_dj_classification_status
+    rows, _total = repository.list_djs(limit=10000, offset=0)
+    mapping: dict[str, str] = {}
+    for row in rows:
+        if derive_dj_classification_status(row) != "not_qualified":
+            continue
+        for url in row.get("source_urls") or []:
+            mapping[url] = row["dj_id"]
+    return mapping
 
 
 def _match_existing(index: dict[str, set[str]],

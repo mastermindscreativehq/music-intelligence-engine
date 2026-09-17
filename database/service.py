@@ -138,6 +138,12 @@ def _outreach_dev_fixture_exclusion_sql(wildcard: str = "%") -> str:
 _DEV_DJ_FIXTURE_EXCLUSION_SQL = _dj_dev_fixture_exclusion_sql("%")
 _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL = _outreach_dev_fixture_exclusion_sql("%")
 
+# Read-path exclusion for DJs deterministically classified as NOT a DJ
+# (rejected once, hidden from the normal listing forever).
+_DJ_REJECTED_SQL = (
+    "COALESCE(json_extract(verification, '$.classification.verdict'), '') "
+    "= 'rejected'")
+
 
 class ValidationError(Exception):
     """Raised per-record during validation; captured into the report."""
@@ -414,8 +420,14 @@ class PersistenceService:
                 fresh.update(value or {})
                 merged[key] = fresh
             else:
-                # Newest evidence wins; incoming None never erases a fact.
-                merged[key] = value if value is not None else previous
+                # Ingest evidence is additive and NULL-only: an existing
+                # fact is NEVER overwritten — re-enrichment only fills
+                # still-empty columns. ``status`` is workflow state (not a
+                # stored fact) so it may still progress (new -> enriched).
+                if key == "status":
+                    merged[key] = value if value is not None else previous
+                else:
+                    merged[key] = previous if previous is not None else value
         merged["first_stored_at"] = old["first_stored_at"]
         merged["last_stored_at"] = now
         return merged
@@ -1164,8 +1176,10 @@ class PersistenceService:
                  has_contact: bool | None = None,
                  sort: str | None = None,
                  order: str | None = None,
-                 exclude_dev: bool = False
-                 ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
+                 exclude_dev: bool = False,
+                 exclude_rejected: bool = False
+                 ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
+                   | tuple[list[dict], int, int, int]:
         clauses, params = [], []
         if q:
             clauses.append(
@@ -1217,37 +1231,57 @@ class PersistenceService:
             f"{col} {direction}" for col in order_by.split(", "))
         where = " AND ".join(clauses)
         where_sql = f"WHERE {where}" if where else ""
+        where = " AND ".join(clauses)
+        where_sql = f"WHERE {where}" if where else ""
+        visible_clauses = list(clauses)
         if exclude_dev:
-            dev_clause = "(" + _DEV_DJ_FIXTURE_EXCLUSION_SQL + ")"
-            dev_where = (f"WHERE {where} AND {dev_clause}"
-                         if where else f"WHERE {dev_clause}")
-            with self._lock:
-                visible_total = self._conn.execute(
-                    f"SELECT COUNT(*) AS n FROM djs {dev_where}",
-                    params).fetchone()["n"]
-                full_total = self._conn.execute(
-                    f"SELECT COUNT(*) AS n FROM djs {where_sql}",
-                    params).fetchone()["n"]
-                rows = self._conn.execute(
-                    f"SELECT * FROM djs {dev_where} "
-                    f"ORDER BY {order_clause} "
-                    "LIMIT ? OFFSET ?",
-                    [*params, int(limit), int(offset)]).fetchall()
-            djs = [self._dj_from_row(r) for r in rows]
-            self._decorate_dj_contact_flag(djs)
-            return djs, int(visible_total), int(full_total - visible_total)
+            visible_clauses.append("(" + _DEV_DJ_FIXTURE_EXCLUSION_SQL + ")")
+        if exclude_rejected:
+            visible_clauses.append("NOT (" + _DJ_REJECTED_SQL + ")")
+        visible_where = (
+            "WHERE " + " AND ".join(visible_clauses)
+            if visible_clauses else "")
+
         with self._lock:
-            total = self._conn.execute(
+            full_total = self._conn.execute(
                 f"SELECT COUNT(*) AS n FROM djs {where_sql}",
                 params).fetchone()["n"]
+            visible_total = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM djs {visible_where}",
+                params).fetchone()["n"]
             rows = self._conn.execute(
-                f"SELECT * FROM djs {where_sql} "
+                f"SELECT * FROM djs {visible_where} "
                 f"ORDER BY {order_clause} "
                 "LIMIT ? OFFSET ?",
                 [*params, int(limit), int(offset)]).fetchall()
+            dev_excluded = 0
+            if exclude_dev:
+                dev_where = (
+                    f"WHERE {where} AND NOT ("
+                    f"{_DEV_DJ_FIXTURE_EXCLUSION_SQL})"
+                    if where
+                    else f"WHERE NOT ({_DEV_DJ_FIXTURE_EXCLUSION_SQL})")
+                dev_excluded = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM djs {dev_where}",
+                    params).fetchone()["n"]
+            rejected_excluded = 0
+            if exclude_rejected:
+                rej_where = (
+                    f"WHERE {where} AND {_DJ_REJECTED_SQL}"
+                    if where else f"WHERE {_DJ_REJECTED_SQL}")
+                rejected_excluded = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM djs {rej_where}",
+                    params).fetchone()["n"]
         djs = [self._dj_from_row(r) for r in rows]
         self._decorate_dj_contact_flag(djs)
-        return djs, int(total)
+        if exclude_dev and exclude_rejected:
+            return (djs, int(visible_total), int(dev_excluded),
+                    int(rejected_excluded))
+        if exclude_rejected:
+            return djs, int(visible_total), int(rejected_excluded)
+        if exclude_dev:
+            return djs, int(visible_total), int(dev_excluded)
+        return djs, int(visible_total)
 
     def get_dj(self, dj_id: str) -> dict | None:
         with self._lock:
@@ -1335,6 +1369,20 @@ class PersistenceService:
             cur = self._conn.execute(
                 "DELETE FROM djs WHERE dj_id=?", (dj_id,))
             return dj_id if cur.rowcount else None
+
+    def update_dj_verification(self, dj_id: str, verification: dict) -> bool:
+        """Replace one DJ's ``verification`` JSON; touch ``last_stored_at``.
+
+        Narrow update used by data cleanup to persist classification
+        verdicts — no other DJ column is touched. Returns False for an
+        unknown dj_id.
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE djs SET verification=?, last_stored_at=? "
+                "WHERE dj_id=?",
+                (_dumps(verification), utc_now_iso(), dj_id))
+            return cur.rowcount > 0
 
     @staticmethod
     def _dj_from_row(row) -> dict:

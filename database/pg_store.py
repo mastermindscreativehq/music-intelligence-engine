@@ -78,6 +78,12 @@ _DEV_FIXTURE_EXCLUSION_SQL = (
 _DEV_DJ_FIXTURE_EXCLUSION_SQL = _dj_dev_fixture_exclusion_sql("%%")
 _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL = _outreach_dev_fixture_exclusion_sql("%%")
 
+# Read-path exclusion for DJs deterministically classified as NOT a DJ
+# (rejected once, hidden from the normal listing forever).
+_DJ_REJECTED_SQL = (
+    "COALESCE(verification::jsonb->'classification'->>'verdict', '') "
+    "= 'rejected'")
+
 _JSON = frozenset({
     "classification_evidence", "formats", "genres", "genre_evidence",
     "social_urls", "source_urls", "confidence_reasons", "raw_metadata",
@@ -1163,8 +1169,10 @@ class PostgresStorage:
                  has_contact: bool | None = None,
                  sort: str | None = None,
                  order: str | None = None,
-                 exclude_dev: bool = False
-                 ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
+                 exclude_dev: bool = False,
+                 exclude_rejected: bool = False
+                 ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
+                   | tuple[list[dict], int, int, int]:
         clauses, params = [], []
         if q:
             clauses.append(
@@ -1216,39 +1224,53 @@ class PostgresStorage:
             f"{col} {direction}" for col in order_by.split(", "))
         where = " AND ".join(clauses)
         where_sql = f"WHERE {where}" if where else ""
+        visible_clauses = list(clauses)
         if exclude_dev:
-            dev_clause = "(" + _DEV_DJ_FIXTURE_EXCLUSION_SQL + ")"
-            dev_where = (f"WHERE {where} AND {dev_clause}"
-                         if where else f"WHERE {dev_clause}")
-            with self._guard() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    f"SELECT COUNT(*) AS n FROM djs {dev_where}", params)
-                visible_total = int(cur.fetchone()["n"])
-                cur.execute(
-                    f"SELECT COUNT(*) AS n FROM djs {where_sql}", params)
-                full_total = int(cur.fetchone()["n"])
-                cur.execute(
-                    f"SELECT * FROM djs {dev_where} "
-                    f"ORDER BY {order_clause} "
-                    "LIMIT %s OFFSET %s",
-                    [*params, int(limit), int(offset)])
-                rows = [_dj_from_row(r) for r in cur.fetchall()]
-            self._decorate_dj_contact_flag(rows)
-            return rows, visible_total, full_total - visible_total
+            visible_clauses.append("(" + _DEV_DJ_FIXTURE_EXCLUSION_SQL + ")")
+        if exclude_rejected:
+            visible_clauses.append("NOT (" + _DJ_REJECTED_SQL + ")")
+        visible_where = (
+            "WHERE " + " AND ".join(visible_clauses)
+            if visible_clauses else "")
+
         with self._guard() as conn:
             cur = conn.cursor()
+
+            def _count_where(where_fragment: str) -> int:
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM djs {where_fragment}", params)
+                return int(cur.fetchone()["n"])
+
+            full_total = _count_where(where_sql)
+            visible_total = _count_where(visible_where)
             cur.execute(
-                f"SELECT COUNT(*) AS n FROM djs {where_sql}", params)
-            total = int(cur.fetchone()["n"])
-            cur.execute(
-                f"SELECT * FROM djs {where_sql} "
-                f"ORDER BY {order_clause} "
-                "LIMIT %s OFFSET %s",
+                f"SELECT * FROM djs {visible_where} "
+                f"ORDER BY {order_clause} LIMIT %s OFFSET %s",
                 [*params, int(limit), int(offset)])
             rows = [_dj_from_row(r) for r in cur.fetchall()]
+            dev_excluded = 0
+            if exclude_dev:
+                dev_where = (
+                    f"WHERE {where} AND NOT ("
+                    f"{_DEV_DJ_FIXTURE_EXCLUSION_SQL})"
+                    if where
+                    else f"WHERE NOT ({_DEV_DJ_FIXTURE_EXCLUSION_SQL})")
+                dev_excluded = _count_where(dev_where)
+            rejected_excluded = 0
+            if exclude_rejected:
+                rej_where = (
+                    f"WHERE {where} AND {_DJ_REJECTED_SQL}"
+                    if where else f"WHERE {_DJ_REJECTED_SQL}")
+                rejected_excluded = _count_where(rej_where)
         self._decorate_dj_contact_flag(rows)
-        return rows, total
+        if exclude_dev and exclude_rejected:
+            return (rows, visible_total, int(dev_excluded or 0),
+                    int(rejected_excluded or 0))
+        if exclude_rejected:
+            return rows, visible_total, int(rejected_excluded or 0)
+        if exclude_dev:
+            return rows, visible_total, int(dev_excluded or 0)
+        return rows, visible_total
 
     def get_dj(self, dj_id: str) -> dict | None:
         with self._guard() as conn:
@@ -1347,6 +1369,23 @@ class PostgresStorage:
             cur = self._conn.cursor()
             cur.execute("DELETE FROM djs WHERE dj_id=%s", (dj_id,))
         return dj_id if cur.rowcount else None
+
+    def update_dj_verification(self, dj_id: str, verification: dict) -> bool:
+        """Replace one DJ's ``verification`` JSON; touch ``last_stored_at``.
+
+        Narrow update used by data cleanup to persist classification
+        verdicts — no other DJ column is touched. Returns False for an
+        unknown dj_id.
+        """
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute(
+                "UPDATE djs SET verification=%s::jsonb, last_stored_at=%s "
+                "WHERE dj_id=%s",
+                (_dumps(verification), utc_now_iso(), dj_id))
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def close(self) -> None:
         with self._lock:

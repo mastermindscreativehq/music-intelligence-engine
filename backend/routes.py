@@ -526,7 +526,7 @@ def _handle(service, method: str, match: re.Match, params: dict,
             raise ValueError("'sort' must be name, station or discovered")
         if order not in ("asc", "desc"):
             raise ValueError("'order' must be asc or desc")
-        rows, total, dev_excluded = dj_service.list_djs(
+        rows, total, dev_excluded, rejected_excluded = dj_service.list_djs(
             service, limit=limit, offset=offset, q=_first(params, "q"),
             genre=_first(params, "genre"), country=_first(params, "country"),
             location=_first(params, "location"),
@@ -534,11 +534,13 @@ def _handle(service, method: str, match: re.Match, params: dict,
             dj_type=_first(params, "dj_type"),
             platform=_first(params, "platform"),
             has_contact=_opt_bool(params, "has_contact"),
-            sort=sort, order=order, exclude_dev=True)
+            sort=sort, order=order, exclude_dev=True,
+            exclude_rejected=True)
         return 200, success_body({
             "djs": [dj_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,
             "dev_fixtures_excluded": dev_excluded,
+            "rejected_excluded": rejected_excluded,
         })
 
     if path.startswith("/api/v1/djs/"):
