@@ -32,8 +32,18 @@ function describeOrigin(path) {
 
 // Every request carries a hard deadline instead of hanging forever: a stale
 // keep-alive socket, a stalling proxy, or a backend that never answers must
-// surface as a typed error — never leave the console on "connecting…".
-const REQUEST_TIMEOUT_MS = 10000;
+// surface as a typed error — never leave the console on "connecting…". The
+// deadline is a ceiling for genuinely-slow-but-valid reads (the Railway DJ
+// listing can take several seconds under cold-start; a fixed 10s deadline
+// turned those into user-visible false timeouts).
+const REQUEST_TIMEOUT_MS = 30000;
+
+// Transient transport failures (connection stall, edge reset, or a deadline
+// reached while the backend was still working) are retried once with a short
+// backoff — idempotent GET reads only. Mutating calls via send() are NEVER
+// retried, so an outreach/ingest action can never be applied twice.
+const RETRY_ATTEMPTS = 1;
+const RETRY_BACKOFF_MS = 700;
 
 function deadline() {
   const controller = new AbortController();
@@ -60,7 +70,7 @@ function searchParams(params) {
   return asString ? `?${asString}` : "";
 }
 
-export async function request(path, params) {
+async function requestOnce(path, params) {
   const { controller, timer } = deadline();
   try {
     let response;
@@ -113,6 +123,25 @@ export async function request(path, params) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function request(path, params) {
+  let lastError;
+  for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
+    }
+    try {
+      return await requestOnce(path, params);
+    } catch (error) {
+      if (!(error instanceof ApiError)
+          || (error.code !== "network" && error.code !== "timeout")) {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 export const api = {
