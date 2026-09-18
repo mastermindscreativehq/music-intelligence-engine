@@ -1,0 +1,205 @@
+{
+  "name": "MIE Daily Station Discovery",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "6f1c2a90-3b44-4a1e-9a7c-1d2e3f4a5b60",
+      "name": "Schedule daily (07:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// One item per station discovery job - append objects to 'jobs' to fan out.\n// organization_type 'radio' selects the station deep-research runner;\n// 'station' is accepted as an alias. Only shared DiscoveryRequest fields\n// are sent - the provider/API key stays server-side.\nconst jobs = [\n  { organization_type: 'radio', query: 'community radio station', station_type: 'community', country: 'United States', limit: 25 },\n  { organization_type: 'radio', query: 'public radio station', station_type: 'public', country: 'United States', limit: 25 },\n];\n\nreturn jobs.map((job) => ({ json: job }));"
+      },
+      "id": "a2b3c4d5-e6f7-4a8b-9c0d-1e2f3a4b5c6d",
+      "name": "Build station discovery job(s)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MIE_BASE_URL }}/api/v1/discovery/jobs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.MIE_AUTOMATION_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "b3c4d5e6-f7a8-4b9c-0d1e-2f3a4b5c6d7e",
+      "name": "POST /api/v1/discovery/jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Flatten the MIE envelope into per-job run metrics.\n// completed_with_failures runs are preserved intact (status + failures\n// count stay visible) instead of being discarded.\nconst items = $input.all();\n\nreturn items.map((item) => {\n  const data = item.json.data ?? item.json;\n  return {\n    json: {\n      ok: item.json.ok,\n      job_type: data.job_type ?? null,\n      run_id: data.run_id ?? null,\n      provider: data.provider ?? null,\n      queries_run: data.queries_run ?? 0,\n      candidates_found: data.candidates_found ?? 0,\n      records_ingested: data.records_ingested ?? 0,\n      duplicates: data.duplicates ?? 0,\n      failures: data.failures ?? 0,\n      status: data.status ?? 'unknown',\n      started_at: data.started_at ?? null,\n      completed_at: data.completed_at ?? null,\n    },\n  };\n});"
+      },
+      "id": "c4d5e6f7-a8b9-4c0d-1e2f-3a4b5c6d7e8f",
+      "name": "Capture run metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d5e6f7a8-b9c0-4d1e-2f3a-4b5c6d7e8f90",
+      "name": "Status: completed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "e6f7a8b9-c0d1-4e2f-3a4b-5c6d7e8f9012",
+      "name": "Run successful (completed)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        160
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f7a8b9c0-d1e2-4f3a-4b5c-6d7e8f901234",
+      "name": "completed_with_failures (preserved)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule daily (07:00)": {
+      "main": [
+        [
+          {
+            "node": "Build station discovery job(s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build station discovery job(s)": {
+      "main": [
+        [
+          {
+            "node": "POST /api/v1/discovery/jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST /api/v1/discovery/jobs": {
+      "main": [
+        [
+          {
+            "node": "Capture run metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture run metrics": {
+      "main": [
+        [
+          {
+            "node": "Status: completed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status: completed?": {
+      "main": [
+        [
+          {
+            "node": "Run successful (completed)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "completed_with_failures (preserved)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

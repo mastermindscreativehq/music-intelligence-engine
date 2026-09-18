@@ -41,6 +41,7 @@ from discovery.models import (
 )
 from discovery.providers import DiscoveryProvider, SeedListProvider
 from discovery.queries import build_queries
+from discovery.radio.qualify import REJECTED, classify_station_candidate
 from discovery.radio.schema import ContactRecord, StationRecord
 
 from enrichment.confidence import rescore
@@ -175,10 +176,25 @@ class RadioDiscoveryEngine:
         request: DiscoveryRequest,
         result: DiscoveryResult,
     ) -> dict[str, list[tuple[Candidate, str]]]:
-        """Group by canonical domain; normalize once per candidate URL."""
+        """Group by canonical domain; normalize once per candidate URL.
+
+        Deterministic qualification runs first: unambiguous non-station
+        destinations (social/streaming/aggregator hosts, article/event/
+        lyrics/jobs/shop paths) are dropped before any fetch. Candidates
+        without a decisive signal are kept (``needs_review`` != disqualified).
+        """
         groups: dict[str, list[tuple[Candidate, str]]] = {}
         for candidate in candidates[: min(request.limit,
                                           self.config.max_candidates_hard_cap)]:
+            verdict = classify_station_candidate(
+                url=candidate.url, title=candidate.title,
+                snippet=candidate.snippet)
+            if verdict.verdict == REJECTED:
+                ev.log_event(
+                    self.log, ev.EVENT_CANDIDATE_REJECTED,
+                    url=candidate.url, kind=verdict.kind,
+                    reason=verdict.reason)
+                continue
             try:
                 normalized = normalize_url(candidate.url)
             except (InvalidUrlError, ValueError) as exc:

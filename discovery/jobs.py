@@ -10,7 +10,7 @@ whether it completed.
 Job envelope (JSON object):
 
     {
-      "organization_type": "dj",       # required; 'dj' today, future types
+      "organization_type": "dj",       # required; 'dj' | 'radio' | 'station'
       "patterns": [...],               # RESERVED, optional (per-type)
       ...DiscoveryRequest fields...    # query, genre, country,
                                        #   state_or_region, city, language,
@@ -47,7 +47,10 @@ logger = logging.getLogger("mie.discovery.jobs")
 # Organization types the dispatcher can run today. Adding a future type is a
 # new ``discovery/<type>/jobs.py`` runner registered below — the API surface,
 # the run ledger, and the envelope do not change.
-SUPPORTED_ORGANIZATION_TYPES = ("dj",)
+#
+# ``station`` is an accepted alias for ``radio``: station deep-research is the
+# radio target type (``discovery.radio``); both names select the same runner.
+SUPPORTED_ORGANIZATION_TYPES = ("dj", "radio", "station")
 
 # Fields that belong to the automation envelope, not to DiscoveryRequest.
 _ENVELOPE_FIELDS = frozenset(("organization_type", "patterns"))
@@ -62,7 +65,10 @@ def _load_runners() -> dict[str, Callable[..., dict]]:
     """Lazily import the per-type runners (keeps imports stdlib-only)."""
     if not _RUNNERS:
         from discovery.djs.jobs import run_dj_discovery_job
+        from discovery.radio.jobs import run_radio_discovery_job
         _RUNNERS["dj"] = run_dj_discovery_job
+        _RUNNERS["radio"] = run_radio_discovery_job
+        _RUNNERS["station"] = run_radio_discovery_job
     return _RUNNERS
 
 

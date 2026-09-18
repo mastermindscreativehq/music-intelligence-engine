@@ -84,7 +84,17 @@ class SerpApiSearchDjsProvider:
     serpapi_google``), whose snippet is carried only when present, and whose
     geography is carried ONLY when the organic result actually contains it —
     it is never derived from the query or the request, and never fabricated.
+
+    The wire format lives here once. Organization-type twins (e.g.
+    ``discovery.radio.serpapi_provider.SerpApiSearchRadioProvider``) subclass
+    this and override ONLY the honest labels/messages below — never the
+    transport, parsing, or no-fabrication rules.
     """
+
+    # Overridable honest labels for twin org types (kept DJ-default here so
+    # existing DJ behavior and messages are byte-for-byte unchanged).
+    provider_label = "DJ"
+    default_user_agent = DEFAULT_USER_AGENT
 
     def __init__(
         self,
@@ -103,11 +113,23 @@ class SerpApiSearchDjsProvider:
             from crawler.http import StdlibHttpFetcher
             fetcher = StdlibHttpFetcher(
                 timeout_seconds=timeout, max_bytes=1_500_000,
-                user_agent=DEFAULT_USER_AGENT, respect_robots=False,
+                user_agent=self.default_user_agent, respect_robots=False,
                 allowed_content_types=("application/json",),
             )
         self._fetcher = fetcher
         self._host = self._derive_host()
+
+    def _not_configured_message(self) -> str:
+        return (
+            "DJ discovery provider is not configured: set "
+            f"{SERPAPI_API_KEY_ENV} (and optionally {SERPAPI_BASE_URL_ENV})"
+            " in .env — see .env.example")
+
+    def _unreachable_message(self) -> str:
+        return (
+            "DJ discovery provider is not configured: SerpAPI is "
+            "not reachable from this host (no real discovery was "
+            "performed and nothing was fabricated).")
 
     @property
     def configured(self) -> bool:
@@ -143,10 +165,7 @@ class SerpApiSearchDjsProvider:
         self, request: DiscoveryRequest, queries: Sequence[str],
     ) -> list[Candidate]:
         if not self.configured:
-            raise DiscoveryProviderNotConfigured(
-                "DJ discovery provider is not configured: set "
-                f"{SERPAPI_API_KEY_ENV} (and optionally {SERPAPI_BASE_URL_ENV})"
-                " in .env — see .env.example")
+            raise DiscoveryProviderNotConfigured(self._not_configured_message())
 
         out: list[Candidate] = []
         seen_urls: set[str] = set()
@@ -165,18 +184,14 @@ class SerpApiSearchDjsProvider:
                     "be reached for query %r; treating DJ discovery as "
                     "not configured and NOT fabricating anything.", query)
                 raise DiscoveryProviderNotConfigured(
-                    "DJ discovery provider is not configured: SerpAPI is "
-                    "not reachable from this host (no real discovery was "
-                    "performed and nothing was fabricated).")
+                    self._unreachable_message())
             if not getattr(result, "ok", False):
                 logger.warning(
                     "serpapi_google transport failure: query %r did not "
                     "reach SerpAPI; no real discovery result was returned "
                     "and nothing was fabricated.", query)
                 raise DiscoveryProviderNotConfigured(
-                    "DJ discovery provider is not configured: SerpAPI is "
-                    "not reachable from this host (no real discovery was "
-                    "performed and nothing was fabricated).")
+                    self._unreachable_message())
             if not getattr(result, "body", None):
                 continue
             try:
