@@ -350,20 +350,47 @@ class StationJobTests(unittest.TestCase):
                     self.repo, _request().to_dict(),
                     fetcher=_Web(pages=_station_pages()))
 
-    def test_dispatcher_accepts_radio_and_station_alias(self):
-        for org_type in ("radio", "station"):
-            with self.subTest(org_type=org_type):
-                report = run_discovery_job(
-                    self.repo,
-                    {"organization_type": org_type,
-                     "query": "community radio", "limit": 5},
-                    fetcher=self.web)
-                self.assertIn(
-                    report["status"], ("completed", "completed_with_failures"))
-                self.assertGreaterEqual(report["records_ingested"], 1)
-                stored = self.repo.get_discovery_job(report["run_id"])
-                self.assertIsNotNone(stored)
-                self.assertEqual(stored["organization_type"], org_type)
+    def test_dispatcher_accepts_radio_and_dispatches_station_pipeline(self):
+        # Proves the POST /api/v1/discovery/jobs handler path (it calls exactly
+        # ``discovery.jobs.run_discovery_job``): organization_type=radio (and
+        # its canonical alias) is accepted, routed to the *station* deep-
+        # research runner, and NEVER downgraded into the DJ runner.
+        import discovery.jobs as discovery_jobs_mod
+        dj_calls: list[str] = []
+        radio_calls: list[dict] = []
+
+        def _spy_dj(*_args, **_kwargs):
+            dj_calls.append("dj")
+            raise AssertionError(
+                "radio jobs must never be routed to the DJ runner")
+
+        def _spy_radio(repository, config, *, fetcher=None):
+            radio_calls.append(config)
+            return run_radio_discovery_job(repository, config,
+                                           fetcher=fetcher)
+
+        with mock.patch.dict(
+                discovery_jobs_mod._RUNNERS,
+                {"dj": _spy_dj, "radio": _spy_radio, "station": _spy_radio},
+                clear=True):
+            for org_type in ("radio", "station"):
+                with self.subTest(org_type=org_type):
+                    report = run_discovery_job(
+                        self.repo,
+                        {"organization_type": org_type,
+                         "query": "community radio", "limit": 5},
+                        fetcher=self.web)
+                    self.assertIn(
+                        report["status"],
+                        ("completed", "completed_with_failures"))
+                    self.assertGreaterEqual(report["records_ingested"], 1)
+                    stored = self.repo.get_discovery_job(report["run_id"])
+                    self.assertIsNotNone(stored)
+                    self.assertEqual(stored["organization_type"], org_type)
+
+        self.assertEqual(dj_calls, [],
+                         "radio jobs must dispatch the station runner")
+        self.assertEqual(len(radio_calls), 2)
 
     def test_dispatcher_rejects_unsupported_org_type(self):
         with self.assertRaises(ValueError):
