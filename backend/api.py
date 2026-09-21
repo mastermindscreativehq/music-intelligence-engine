@@ -61,6 +61,9 @@ def build_handler(service: PersistenceService, track_store=None,
     if link_fetcher is None:
         from submissions import service as submission_service
         link_fetcher = submission_service.default_link_fetcher()
+    from discovery.async_discovery import DiscoveryJobScheduler
+    discovery_scheduler = DiscoveryJobScheduler(
+        service, fetcher=discover_fetcher)
 
     class RadioIntelligenceAPIHandler(BaseHTTPRequestHandler):
         server_version = "MIE-API/0.6"
@@ -92,7 +95,8 @@ def build_handler(service: PersistenceService, track_store=None,
                     track_store=track_store, link_fetcher=link_fetcher,
                     allow_private=allow_private,
                     discover_fetcher=discover_fetcher,
-                    headers=self.headers)
+                    headers=self.headers,
+                    discovery_scheduler=discovery_scheduler)
                 self._send_json(status, body)
             except Exception:
                 LOGGER.exception("handler failure")

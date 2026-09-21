@@ -53,7 +53,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {
-          "timeout": 300000
+          "timeout": 30000
         }
       },
       "id": "b3c4d5e6-f7a8-4b9c-0d1e-2f3a4b5c6d7e",
@@ -68,15 +68,155 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Flatten the MIE envelope into per-job run metrics.\n// completed_with_failures runs are preserved intact (status + failures\n// count stay visible) instead of being discarded.\nconst items = $input.all();\n\nreturn items.map((item) => {\n  const data = item.json.data ?? item.json;\n  return {\n    json: {\n      ok: item.json.ok,\n      job_type: data.job_type ?? null,\n      run_id: data.run_id ?? null,\n      provider: data.provider ?? null,\n      queries_run: data.queries_run ?? 0,\n      candidates_found: data.candidates_found ?? 0,\n      records_ingested: data.records_ingested ?? 0,\n      duplicates: data.duplicates ?? 0,\n      failures: data.failures ?? 0,\n      status: data.status ?? 'unknown',\n      started_at: data.started_at ?? null,\n      completed_at: data.completed_at ?? null,\n    },\n  };\n});"
+        "jsCode": "// The POST now submits and answers 202 immediately with a durable run_id;\n// the SerpAPI + enrichment work runs in the background on the server.\n// Normalize the submission envelope so the poll loop has a stable run_id\n// and an attempt counter.\nconst items = $input.all();\n\nreturn items.map((item) => {\n  const payload = item.json.data ?? item.json;\n  return {\n    json: {\n      attempt: 0,\n      run_id: payload.run_id ?? null,\n      organization_type: payload.organization_type ?? null,\n      status: payload.status ?? 'queued',\n      started_at: payload.started_at ?? null,\n    },\n  };\n});"
       },
       "id": "c4d5e6f7-a8b9-4c0d-1e2f-3a4b5c6d7e8f",
-      "name": "Capture run metrics",
+      "name": "Record submitted run_id",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
         780,
         300
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "d5e6f7a8-b9c0-4d1e-2f3a-4b5c6d7e8f90",
+      "name": "Wait 30s for background job",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.MIE_BASE_URL }}/api/v1/discovery/jobs/{{ $json.run_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.MIE_AUTOMATION_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "e6f7a8b9-c0d1-4e2f-3a4b-5c6d7e8f9012",
+      "name": "GET /api/v1/discovery/jobs/{run_id}",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Merge the polled status payload with the running attempt counter and\n// increment it so the poll loop is strictly bounded (see 'Poll limit\n// reached?'). completed_with_failures runs are preserved intact.\nconst items = $input.all();\n\nreturn items.map((item) => {\n  const payload = item.json.data ?? item.json;\n  const run_id = payload.run_id ?? item.json.run_id;\n  return {\n    json: {\n      attempt: (item.json.attempt ?? 0) + 1,\n      run_id,\n      organization_type: payload.organization_type ?? null,\n      status: payload.status ?? 'unknown',\n      provider: payload.provider ?? null,\n      queries_run: payload.queries_run ?? 0,\n      candidates_found: payload.candidates_found ?? 0,\n      records_ingested: payload.records_ingested ?? 0,\n      duplicates: payload.duplicates ?? 0,\n      failures: payload.failures ?? 0,\n      error: payload.error ?? null,\n      started_at: payload.started_at ?? null,\n      completed_at: payload.completed_at ?? null,\n    },\n  };\n});"
+      },
+      "id": "f7a8b9c0-d1e2-4f3a-4b5c-6d7e8f901234",
+      "name": "Track poll attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "queued",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "singleValue": true
+              }
+            },
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "running",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+      "name": "Still waiting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.attempt }}",
+              "rightValue": 40,
+              "operator": {
+                "type": "number",
+                "operation": "largerEqual",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+      "name": "Poll limit reached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1880,
+        100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f",
+      "name": "Poll timeout",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2120,
+        -80
       ]
     },
     {
@@ -103,35 +243,88 @@
         },
         "options": {}
       },
-      "id": "d5e6f7a8-b9c0-4d1e-2f3a-4b5c6d7e8f90",
+      "id": "d1e2f3a4-b5c6-4d7e-8f9a-0b1c2d3e4f5a",
       "name": "Status: completed?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        1000,
+        1880,
         300
       ]
     },
     {
       "parameters": {},
-      "id": "e6f7a8b9-c0d1-4e2f-3a4b-5c6d7e8f9012",
+      "id": "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b",
       "name": "Run successful (completed)",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        1240,
+        2120,
         160
       ]
     },
     {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "failed",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "singleValue": true
+              }
+            },
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "not_configured",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "f1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c",
+      "name": "Status: failed or not configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1880,
+        440
+      ]
+    },
+    {
       "parameters": {},
-      "id": "f7a8b9c0-d1e2-4f3a-4b5c-6d7e8f901234",
+      "id": "a2b3c4d5-e6f7-4a8b-9c0d-1e2f3a4b5c6e",
+      "name": "Report failure",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2120,
+        440
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6f",
       "name": "completed_with_failures (preserved)",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        1240,
-        460
+        2120,
+        720
       ]
     }
   ],
@@ -162,18 +355,87 @@
       "main": [
         [
           {
-            "node": "Capture run metrics",
+            "node": "Record submitted run_id",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Capture run metrics": {
+    "Record submitted run_id": {
       "main": [
         [
           {
+            "node": "Wait 30s for background job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 30s for background job": {
+      "main": [
+        [
+          {
+            "node": "GET /api/v1/discovery/jobs/{run_id}",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET /api/v1/discovery/jobs/{run_id}": {
+      "main": [
+        [
+          {
+            "node": "Track poll attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Track poll attempt": {
+      "main": [
+        [
+          {
+            "node": "Still waiting?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still waiting?": {
+      "main": [
+        [
+          {
+            "node": "Poll limit reached?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Status: completed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll limit reached?": {
+      "main": [
+        [
+          {
+            "node": "Poll timeout",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 30s for background job",
             "type": "main",
             "index": 0
           }
@@ -185,6 +447,24 @@
         [
           {
             "node": "Run successful (completed)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Status: failed or not configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status: failed or not configured?": {
+      "main": [
+        [
+          {
+            "node": "Report failure",
             "type": "main",
             "index": 0
           }

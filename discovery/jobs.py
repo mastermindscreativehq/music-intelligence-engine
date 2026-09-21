@@ -1,11 +1,15 @@
 """Reusable, automation-facing discovery job dispatcher (Phase 11).
 
 n8n (or any scheduler) POSTs ONE structured job; this module validates the
-envelope, dispatches to the organization-type runner (``discovery/<type>/``),
-and persists the run to the repository's ``discovery_jobs`` ledger so every
-automated run answers: when it ran, on what configuration, through which
-provider, how many queries/candidates/records/duplicates/failures, and
-whether it completed.
+envelope and dispatches to the organization-type runner
+(``discovery/<type>/``). Execution is synchronous here (``run_discovery_job``
+kept for direct callers/tests); the hosted API submits the validated job to
+``discovery.async_discovery`` instead, which runs the SAME pipeline on a
+background worker and returns 202 immediately. Either way the run is
+persisted to the repository's ``discovery_jobs`` ledger so every automated
+run answers: when it ran, on what configuration, through which provider, how
+many queries/candidates/records/duplicates/failures, and whether it
+completed.
 
 Job envelope (JSON object):
 
@@ -123,8 +127,19 @@ def _build_config(payload: Any) -> tuple[str, dict, list[str] | None]:
     return org_type, config, pattern_list
 
 
-def _failed_report(run_id: str, org_type: str, config: dict, started: str,
-                   status: str, error: str) -> dict:
+def prepare_discovery_job(payload: Any) -> tuple[str, dict]:
+    """Validate one automation job envelope; returns (org_type, config).
+
+    Raises ``ValueError`` on a malformed envelope (mapped to 400 by the API).
+    No discovery work happens here, so the submission endpoint never blocks.
+    """
+    org_type, config, _patterns = _build_config(payload)
+    return org_type, dict(config)
+
+
+def _base_report(run_id: str, org_type: str, config: dict, started: str, *,
+                 status: str, error: str | None = None,
+                 completed_at: str | None = None) -> dict:
     return {
         "run_id": run_id,
         "organization_type": org_type,
@@ -138,39 +153,47 @@ def _failed_report(run_id: str, org_type: str, config: dict, started: str,
         "status": status,
         "error": error,
         "started_at": started,
-        "completed_at": utc_now_iso(),
+        "completed_at": completed_at,
     }
 
 
-def run_discovery_job(repository, payload: dict, *, fetcher: Any = None) -> dict:
-    """Validate + run one automation discovery job; returns its report.
+def execute_discovery_job(repository, run_id: str, org_type: str,
+                          config: dict, *, fetcher: Any = None,
+                          started_at: str | None = None,
+                          record_running: bool = False) -> dict:
+    """Run ONE prepared discovery job and persist its run ledger report.
 
-    The report is the machine-readable job result the endpoint returns and
-    persists (``record_discovery_job``). Not-configured providers and
-    unexpected failures are recorded honestly and re-raised so the caller
-    answers a deterministic error code (503 / 500) — never a fabricated run.
+    Shared by the synchronous wrapper (``run_discovery_job``) and the
+    background scheduler worker. With ``record_running`` the row is first
+    rewritten to ``running``; the terminal report is always persisted
+    (``completed`` / ``completed_with_failures`` / ``not_configured`` /
+    ``failed``) and failures re-raise so the caller decides how to answer.
+    Nothing is ever fabricated: unconfigured providers fail honestly.
     """
-    org_type, config, patterns = _build_config(payload)
-    run_id = "job_" + uuid.uuid4().hex[:24]
-    started = utc_now_iso()
+    started = started_at or utc_now_iso()
+    if record_running:
+        repository.record_discovery_job(_base_report(
+            run_id, org_type, config, started, status="running"))
     ev.log_event(logger, "discovery_job_started", run_id=run_id,
                  organization_type=org_type, provider_note=None,
-                 reserved_patterns=bool(patterns))
+                 reserved_patterns=bool(config.get("patterns")))
 
     runner = _load_runners()[org_type]
     try:
         result = runner(repository, dict(config), fetcher=fetcher)
     except DiscoveryProviderNotConfigured as exc:
-        report = _failed_report(
-            run_id, org_type, config, started, "not_configured", str(exc))
+        report = _base_report(run_id, org_type, config, started,
+                              status="not_configured", error=str(exc),
+                              completed_at=utc_now_iso())
         repository.record_discovery_job(report)
         ev.log_event(logger, "discovery_job_failed", run_id=run_id,
                      status="not_configured", reason=str(exc))
         raise
     except Exception as exc:  # never swallow an unexpected failure
         message = f"{type(exc).__name__}: {exc}"
-        report = _failed_report(
-            run_id, org_type, config, started, "failed", message)
+        report = _base_report(run_id, org_type, config, started,
+                              status="failed", error=message,
+                              completed_at=utc_now_iso())
         try:
             repository.record_discovery_job(report)
         except Exception:
@@ -205,3 +228,17 @@ def run_discovery_job(repository, payload: dict, *, fetcher: Any = None) -> dict
         ingested=report["records_ingested"],
         duplicates=report["duplicates"], failures=report["failures"])
     return report
+
+
+def run_discovery_job(repository, payload: dict, *, fetcher: Any = None) -> dict:
+    """Validate + synchronously run one automation discovery job.
+
+    Kept for direct callers and tests. The hosted API validates the envelope
+    via :func:`prepare_discovery_job` and submits to the background scheduler
+    instead; execution here is byte-for-byte the same pipeline.
+    """
+    org_type, config = prepare_discovery_job(payload)
+    run_id = "job_" + uuid.uuid4().hex[:24]
+    started = utc_now_iso()
+    return execute_discovery_job(repository, run_id, org_type, config,
+                                 fetcher=fetcher, started_at=started)

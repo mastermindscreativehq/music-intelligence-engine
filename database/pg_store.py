@@ -770,7 +770,12 @@ class PostgresStorage:
     # -- Phase 11: automation discovery jobs ----------------------------------
 
     def record_discovery_job(self, report: dict) -> str:
-        """Persist one automation discovery job run; returns its run_id."""
+        """Persist (upsert by run_id) one automation discovery job run.
+
+        Upserting on the PRIMARY KEY ``run_id`` lets the async worker
+        transition one row through queued -> running -> terminal without
+        leaving duplicate ledger rows.
+        """
         with self._lock:
             self._ensure_connection()
             cur = self._conn.cursor()
@@ -783,6 +788,19 @@ class PostgresStorage:
                     completed_at
                 ) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s,
                           %s, %s, %s)
+                ON CONFLICT (run_id) DO UPDATE SET
+                    organization_type = EXCLUDED.organization_type,
+                    config = EXCLUDED.config,
+                    provider = EXCLUDED.provider,
+                    status = EXCLUDED.status,
+                    queries_run = EXCLUDED.queries_run,
+                    candidates_found = EXCLUDED.candidates_found,
+                    records_ingested = EXCLUDED.records_ingested,
+                    duplicates = EXCLUDED.duplicates,
+                    failures = EXCLUDED.failures,
+                    error_message = EXCLUDED.error_message,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at
                 """,
                 (str(report["run_id"]),
                  str(report.get("organization_type") or "dj"),
@@ -799,6 +817,17 @@ class PostgresStorage:
                  str(report.get("completed_at") or "")))
             self._conn.commit()
         return str(report["run_id"])
+
+    def clone(self) -> "PostgresStorage":
+        """An independent storage bound to the same database (own connection).
+
+        Used by the background discovery worker so an in-flight job never
+        holds the shared request-thread connection.
+        """
+        if not self._dsn:
+            raise ValueError(
+                "cannot clone connection-injected storage; a DSN is required")
+        return PostgresStorage(dsn=self._dsn)
 
     def get_discovery_job(self, run_id: str) -> dict | None:
         """One stored automation discovery job run (or None)."""

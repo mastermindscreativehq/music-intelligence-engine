@@ -66,6 +66,14 @@ class IntelligenceRepository(Protocol):
         """One stored automation discovery job run (or None)."""
         ...
 
+    def clone(self):
+        """A new independent storage bound to the same database.
+
+        The background discovery worker runs on its own connection so an
+        in-flight job never blocks polling status reads.
+        """
+        ...
+
     # -- Phase 8: submission assets + link accessibility ----------------------
 
     def save_track(self, track: dict) -> dict:

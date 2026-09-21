@@ -813,12 +813,14 @@ class PersistenceService:
     # -- Phase 11: automation discovery jobs ----------------------------------
 
     def record_discovery_job(self, report: dict) -> str:
-        """Persist one automation discovery job run; returns its run_id.
+        """Persist (upsert by run_id) one automation discovery job run.
 
         The report dict is the same shape the discovery job endpoint returns,
         so stored metadata and API responses stay in sync. Timestamps and
         counters are coerced defensively — a job that failed before running
-        still gets an honest row.
+        still gets an honest row. Upserting on ``run_id`` lets the async
+        worker transition one row through queued -> running -> terminal
+        without leaving duplicate ledger rows.
         """
         now = utc_now_iso()
         with self._lock, self._conn:
@@ -830,6 +832,19 @@ class PersistenceService:
                     duplicates, failures, error_message, started_at,
                     completed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    organization_type = excluded.organization_type,
+                    config = excluded.config,
+                    provider = excluded.provider,
+                    status = excluded.status,
+                    queries_run = excluded.queries_run,
+                    candidates_found = excluded.candidates_found,
+                    records_ingested = excluded.records_ingested,
+                    duplicates = excluded.duplicates,
+                    failures = excluded.failures,
+                    error_message = excluded.error_message,
+                    started_at = excluded.started_at,
+                    completed_at = excluded.completed_at
                 """,
                 (str(report["run_id"]),
                  str(report.get("organization_type") or "dj"),
@@ -845,6 +860,14 @@ class PersistenceService:
                  str(report.get("started_at") or now),
                  str(report.get("completed_at") or "")))
         return str(report["run_id"])
+
+    def clone(self) -> "PersistenceService":
+        """An independent storage bound to the same database (own connection).
+
+        Used by the background discovery worker so an in-flight job never
+        holds the shared request-thread connection.
+        """
+        return PersistenceService(self.db_path)
 
     def get_discovery_job(self, run_id: str) -> dict | None:
         """One stored automation discovery job run (or None)."""

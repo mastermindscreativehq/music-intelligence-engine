@@ -76,6 +76,9 @@ def build_handler(service, static_root: Path, track_store=None,
         track_store = submission_service.default_track_store()
     if link_fetcher is None:
         link_fetcher = submission_service.default_link_fetcher()
+    from discovery.async_discovery import DiscoveryJobScheduler
+    discovery_scheduler = DiscoveryJobScheduler(
+        service, fetcher=discover_fetcher)
 
     class OperatorWebappHandler(BaseHTTPRequestHandler):
         server_version = "MIE-WEB/0.7"
@@ -150,7 +153,8 @@ def build_handler(service, static_root: Path, track_store=None,
                     track_store=track_store, link_fetcher=link_fetcher,
                     allow_private=allow_private,
                     discover_fetcher=discover_fetcher,
-                    headers=self.headers)
+                    headers=self.headers,
+                    discovery_scheduler=discovery_scheduler)
                 self._send_json(status, body)
             except Exception:
                 self._send_json(500, {

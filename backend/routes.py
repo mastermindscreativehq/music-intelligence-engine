@@ -29,6 +29,7 @@ import hmac
 import json
 import os
 import re
+import uuid
 
 from backend.contracts import (
     contacts_payload,
@@ -252,13 +253,16 @@ def _automation_token_ok(headers) -> bool:
 def dispatch(service, method: str, path: str, params: dict,
              body: bytes | None = None, *, track_store=None,
              link_fetcher=None, allow_private=False,
-             discover_fetcher=None, headers=None) -> tuple[int, dict]:
+             discover_fetcher=None, headers=None,
+             discovery_scheduler=None) -> tuple[int, dict]:
     """Route one request against *service*; returns (status, envelope).
 
     ``track_store`` / ``link_fetcher`` inject the Phase 8 submission
     dependencies; adapters construct process defaults when omitted.
     ``headers`` (``self.headers`` from stdlib handlers) feeds the optional
-    automation-token gate.
+    automation-token gate. ``discovery_scheduler`` injects the background
+    job executor for the automation endpoint (202 submit when present;
+    legacy synchronous execution otherwise).
     """
     matched_route = False
     for route_method, pattern, _template, _qparams in ROUTE_TABLE:
@@ -277,7 +281,8 @@ def dispatch(service, method: str, path: str, params: dict,
                            link_fetcher=link_fetcher,
                            allow_private=allow_private,
                            discover_fetcher=discover_fetcher,
-                           headers=headers)
+                           headers=headers,
+                           discovery_scheduler=discovery_scheduler)
         except StationNotFound as exc:
             return 404, error_body("station_not_found", str(exc))
         except RunNotFound as exc:
@@ -306,7 +311,7 @@ def dispatch(service, method: str, path: str, params: dict,
 def _handle(service, method: str, match: re.Match, params: dict,
             body: bytes | None, *, track_store=None, link_fetcher=None,
             allow_private=False, discover_fetcher=None,
-            headers=None) -> tuple[int, dict]:
+            headers=None, discovery_scheduler=None) -> tuple[int, dict]:
     path = match.group(0)
 
     def require_station(key: str) -> dict:
@@ -454,20 +459,38 @@ def _handle(service, method: str, match: re.Match, params: dict,
                 "unauthorized",
                 "an Authorization: Bearer token matching MIE_AUTOMATION_TOKEN "
                 "is required for automation endpoints")
-        from discovery.jobs import run_discovery_job
         from discovery.djs.http_provider import (
             DiscoveryProviderNotConfigured,
         )
         payload = _parse_json_body(body)
-        try:
-            report = run_discovery_job(
-                service, payload, fetcher=discover_fetcher)
-        except DiscoveryProviderNotConfigured as exc:
-            return 503, error_body("discovery_provider_not_configured",
-                                   str(exc))
-        data = {"job_type": f"{report['organization_type']}_discovery",
-                **report}
-        return 200, success_body(data)
+        if discovery_scheduler is None:
+            # Legacy synchronous contract (no scheduler wired, e.g. direct
+            # test callers). Execution blocks until discovery finishes.
+            from discovery.jobs import run_discovery_job
+            try:
+                report = run_discovery_job(
+                    service, payload, fetcher=discover_fetcher)
+            except DiscoveryProviderNotConfigured as exc:
+                return 503, error_body("discovery_provider_not_configured",
+                                       str(exc))
+            data = {"job_type": f"{report['organization_type']}_discovery",
+                    **report}
+            return 200, success_body(data)
+
+        # Async contract: validate + enqueue and answer 202 immediately. The
+        # worker runs the same pipeline; status is polled via GET below.
+        from discovery.jobs import prepare_discovery_job
+        from discovery.models import utc_now_iso
+        org_type, config = prepare_discovery_job(payload)  # ValueError -> 400
+        run_id = "job_" + uuid.uuid4().hex[:24]
+        started_at = utc_now_iso()
+        discovery_scheduler.submit(run_id, org_type, config, started_at)
+        return 202, success_body({
+            "run_id": run_id,
+            "organization_type": org_type,
+            "status": "queued",
+            "started_at": started_at,
+        })
 
     if path.startswith("/api/v1/discovery/jobs/"):
         run_id = match.group("run_id")

@@ -122,6 +122,8 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         track_store = submission_service.default_track_store()
     if link_fetcher is None:
         link_fetcher = submission_service.default_link_fetcher()
+    from discovery.async_discovery import DiscoveryJobScheduler
+    scheduler = DiscoveryJobScheduler(storage, fetcher=discover_fetcher)
     app = FastAPI(title="Music Intelligence Engine API",
                   version="0.8",
                   docs_url="/api/v1/docs", openapi_url="/api/v1/openapi.json")
@@ -502,19 +504,22 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                 "unauthorized",
                 "an Authorization: Bearer token matching MIE_AUTOMATION_TOKEN "
                 "is required for automation endpoints"))
-        from discovery.jobs import run_discovery_job as _run
-        from discovery.djs.http_provider import (
-            DiscoveryProviderNotConfigured,
-        )
+        from discovery.jobs import prepare_discovery_job
+        from discovery.models import utc_now_iso
+        import uuid
         payload = await _json_request(request)
-        try:
-            report = _run(storage, payload, fetcher=discover_fetcher)
-        except DiscoveryProviderNotConfigured as exc:
-            return _json(503, error_body("discovery_provider_not_configured",
-                                         str(exc)))
-        data = {"job_type": f"{report['organization_type']}_discovery",
-                **report}
-        return success_body(data)
+        # Validation is the only synchronous work; ValueError -> 400 via the
+        # registered exception handler. No discovery happens in this request.
+        org_type, config = prepare_discovery_job(payload)
+        run_id = "job_" + uuid.uuid4().hex[:24]
+        started_at = utc_now_iso()
+        scheduler.submit(run_id, org_type, config, started_at)
+        return _json(202, success_body({
+            "run_id": run_id,
+            "organization_type": org_type,
+            "status": "queued",
+            "started_at": started_at,
+        }))
 
     @app.get("/api/v1/discovery/jobs/{run_id}")
     def get_discovery_job(run_id: str, request: Request):

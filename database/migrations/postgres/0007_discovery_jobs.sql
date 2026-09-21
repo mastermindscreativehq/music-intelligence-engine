@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS discovery_jobs (
     organization_type  TEXT NOT NULL,      -- 'dj' today; future target types
     config             JSONB NOT NULL,     -- job configuration
     provider           TEXT,               -- 'serpapi_google' | 'djs_http_search:<host>' | ...
-    status             TEXT NOT NULL,      -- completed | completed_with_failures |
+    status             TEXT NOT NULL,      -- queued | running | completed |
+                                           -- completed_with_failures |
                                            -- not_configured | failed
     queries_run        INTEGER NOT NULL DEFAULT 0,
     candidates_found   INTEGER NOT NULL DEFAULT 0,
