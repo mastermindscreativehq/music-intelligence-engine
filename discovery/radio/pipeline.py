@@ -120,6 +120,9 @@ class RadioDiscoveryEngine:
                 queries=len(queries),
             )
             candidates = self.provider.search(request, queries) or []
+            for provider_failure in (
+                    getattr(self.provider, "failures", None) or []):
+                result.failures.append(provider_failure)
             for candidate in candidates[:request.limit]:
                 ev.log_event(
                     self.log, ev.EVENT_CANDIDATE_FOUND,

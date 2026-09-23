@@ -149,6 +149,9 @@ class DjsDiscoveryEngine:
                          query=request.query, limit=request.limit,
                          queries=len(queries))
             candidates = self.provider.search(request, queries) or []
+            for provider_failure in (
+                    getattr(self.provider, "failures", None) or []):
+                result.failures.append(provider_failure)
         except Exception as exc:  # provider-level failure never crashes
             message = f"provider failed: {type(exc).__name__}: {exc}"
             result.failures.append(Failure("provider", "provider_error", message))

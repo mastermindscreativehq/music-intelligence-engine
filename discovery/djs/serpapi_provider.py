@@ -43,6 +43,7 @@ from urllib.parse import urlencode, urlsplit
 from discovery.models import (
     Candidate,
     DiscoveryRequest,
+    Failure,
     SourceType,
 )
 from discovery.djs.http_provider import DiscoveryProviderNotConfigured
@@ -84,7 +85,17 @@ class SerpApiSearchDjsProvider:
     serpapi_google``), whose snippet is carried only when present, and whose
     geography is carried ONLY when the organic result actually contains it —
     it is never derived from the query or the request, and never fabricated.
+
+    The wire format lives here once. Organization-type twins (e.g.
+    ``discovery.radio.serpapi_provider.SerpApiSearchRadioProvider``) subclass
+    this and override ONLY the honest labels/messages below — never the
+    transport, parsing, or no-fabrication rules.
     """
+
+    # Overridable honest labels for twin org types (kept DJ-default here so
+    # existing DJ behavior and messages are byte-for-byte unchanged).
+    provider_label = "DJ"
+    default_user_agent = DEFAULT_USER_AGENT
 
     def __init__(
         self,
@@ -103,11 +114,24 @@ class SerpApiSearchDjsProvider:
             from crawler.http import StdlibHttpFetcher
             fetcher = StdlibHttpFetcher(
                 timeout_seconds=timeout, max_bytes=1_500_000,
-                user_agent=DEFAULT_USER_AGENT, respect_robots=False,
+                user_agent=self.default_user_agent, respect_robots=False,
                 allowed_content_types=("application/json",),
             )
         self._fetcher = fetcher
         self._host = self._derive_host()
+        self.failures: list[Failure] = []
+
+    def _not_configured_message(self) -> str:
+        return (
+            "DJ discovery provider is not configured: set "
+            f"{SERPAPI_API_KEY_ENV} (and optionally {SERPAPI_BASE_URL_ENV})"
+            " in .env — see .env.example")
+
+    def _unreachable_message(self) -> str:
+        return (
+            "DJ discovery provider is not configured: SerpAPI is "
+            "not reachable from this host (no real discovery was "
+            "performed and nothing was fabricated).")
 
     @property
     def configured(self) -> bool:
@@ -119,6 +143,16 @@ class SerpApiSearchDjsProvider:
             return urlsplit(self.base_url).netloc or "serpapi"
         except ValueError:
             return "serpapi"
+
+    def _query_failure(self, query: str, error_kind: str, detail: str
+                       ) -> Failure:
+        message = f"serpapi query failed: {query}"
+        if detail:
+            message = f"{message}: {detail}"
+        if self._api_key:
+            message = message.replace(self._api_key, "[redacted]")
+        return Failure(
+            stage="provider", error_kind=error_kind, message=message)
 
     def _candidate_from_result(self, entry: dict, request: DiscoveryRequest,
                                query: str) -> Candidate | None:
@@ -143,13 +177,11 @@ class SerpApiSearchDjsProvider:
         self, request: DiscoveryRequest, queries: Sequence[str],
     ) -> list[Candidate]:
         if not self.configured:
-            raise DiscoveryProviderNotConfigured(
-                "DJ discovery provider is not configured: set "
-                f"{SERPAPI_API_KEY_ENV} (and optionally {SERPAPI_BASE_URL_ENV})"
-                " in .env — see .env.example")
+            raise DiscoveryProviderNotConfigured(self._not_configured_message())
 
         out: list[Candidate] = []
         seen_urls: set[str] = set()
+        self.failures = []
         for query in queries:
             if len(out) >= request.limit:
                 break
@@ -159,24 +191,25 @@ class SerpApiSearchDjsProvider:
             url = f"{self.base_url}{sep}{urlencode(params)}"
             try:
                 result = self._fetcher.fetch(url, timeout=self.timeout)
-            except Exception:
+            except Exception as exc:
+                failure = self._query_failure(
+                    query, "provider_error",
+                    f"{type(exc).__name__}: {exc}")
                 logger.warning(
-                    "serpapi_google transport failure: SerpAPI could not "
-                    "be reached for query %r; treating DJ discovery as "
-                    "not configured and NOT fabricating anything.", query)
-                raise DiscoveryProviderNotConfigured(
-                    "DJ discovery provider is not configured: SerpAPI is "
-                    "not reachable from this host (no real discovery was "
-                    "performed and nothing was fabricated).")
+                    "serpapi_google transport failure: %s; "
+                    "continuing with remaining queries.", failure.message)
+                self.failures.append(failure)
+                continue
             if not getattr(result, "ok", False):
+                failure = self._query_failure(
+                    query,
+                    getattr(result, "error_kind", None) or "provider_error",
+                    getattr(result, "error_message", None) or "")
                 logger.warning(
-                    "serpapi_google transport failure: query %r did not "
-                    "reach SerpAPI; no real discovery result was returned "
-                    "and nothing was fabricated.", query)
-                raise DiscoveryProviderNotConfigured(
-                    "DJ discovery provider is not configured: SerpAPI is "
-                    "not reachable from this host (no real discovery was "
-                    "performed and nothing was fabricated).")
+                    "serpapi_google transport failure: %s; "
+                    "continuing with remaining queries.", failure.message)
+                self.failures.append(failure)
+                continue
             if not getattr(result, "body", None):
                 continue
             try:
