@@ -176,31 +176,52 @@ class TestPipelineLocationCarry(unittest.TestCase):
         ])
         self.assertEqual(result.record_count, 1)
         record = result.records[0]
+        # Country now derives from the station's own title/callsign ("KQXR
+        # 101.5 FM"); region and city, which the site's pages do not name,
+        # are filled by the seed attached to this candidate (fallback only).
         self.assertEqual(record["country"], "United States")
         self.assertEqual(record["state_or_region"], "Oregon")
         self.assertEqual(record["city"], "Portland")
         evidence = record["raw_metadata"]["location_evidence"]
         self.assertTrue(evidence)
-        entry = next(e for e in evidence if e["field"] == "country")
-        self.assertEqual(entry["value"], "United States")
-        self.assertEqual(entry["source_type"], "seed_data")
-        self.assertEqual(entry["method"], "carry_through")
-        self.assertEqual(entry["source_url"], "https://kqxr.example/")
+        country = next(e for e in evidence if e["field"] == "country")
+        self.assertEqual(country["value"], "United States")
+        self.assertEqual(country["source_type"], "official_website_page")
+        self.assertEqual(country["method"], "callsign_rule")
+        self.assertNotEqual(country.get("discovered_at"), "")
+        region = next(e for e in evidence if e["field"] == "state_or_region")
+        self.assertEqual(region["value"], "Oregon")
+        self.assertEqual(region["source_type"], "seed_data")
+        self.assertEqual(region["method"], "carry_through")
+        self.assertEqual(region["source_url"], "https://kqxr.example/")
+        # The discovery request's scope is never part of the evidence.
+        self.assertFalse(any(
+            e["source_type"] == "discovery_request" for e in evidence))
 
-    def test_request_geography_fallback(self):
+    def test_request_geography_is_never_carried(self):
+        # A request scoped to "United States" / "Oregon" must NOT imprint the
+        # station record: the site's callsign says US, but no region/city is
+        # asserted from the request, and none is invented.
         result = run_with([
             {"name": "KQXR 101.5 FM", "url": "https://kqxr.example/"},
         ], country="United States", state_or_region="Oregon")
         record = result.records[0]
         self.assertEqual(record["country"], "United States")
-        self.assertEqual(record["state_or_region"], "Oregon")
+        self.assertIsNone(record["state_or_region"])
+        self.assertIsNone(record["city"])
         evidence = record["raw_metadata"]["location_evidence"]
-        self.assertEqual(evidence[0]["source_type"], "discovery_request")
+        self.assertFalse(any(e["source_type"] == "discovery_request"
+                             for e in evidence))
+        self.assertTrue(any(e["method"] == "callsign_rule" for e in evidence))
 
     def test_absent_location_stays_absent(self):
-        result = run_with([
-            {"name": "KQXR 101.5 FM", "url": "https://kqxr.example/"},
-        ])
+        result = run_with(
+            [{"name": "Untitled Station", "url": "https://nogeo.example/"}],
+            pages={"https://nogeo.example/": {"body":
+                "<html><head><title>Untitled Station</title></head><body>"
+                "<p>Independent radio, on your dial 24/7 since 1997.</p>"
+                "</body></html>"}},
+        )
         record = result.records[0]
         self.assertIsNone(record["country"])
         self.assertIsNone(record["state_or_region"])

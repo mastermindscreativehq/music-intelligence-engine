@@ -48,6 +48,7 @@ from database.service import (
     PersistenceService,
     ValidationError,
     _merge_provenance,
+    _preserve_verified_readiness,
     contact_uid,
     load_records_file,
     normalize_intelligence_record,
@@ -83,6 +84,12 @@ _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL = _outreach_dev_fixture_exclusion_sql("%%")
 _DJ_REJECTED_SQL = (
     "COALESCE(verification::jsonb->'classification'->>'verdict', '') "
     "= 'rejected'")
+
+# Read-path exclusion for stations the post-fetch hard gate decided are not
+# (verifiably) radio stations. Mirror of database.service._STATION_QUARANTINED_SQL.
+_STATION_QUARANTINED_SQL = (
+    "COALESCE(raw_metadata::jsonb->'qualification'->>'verdict', '') "
+    "IN ('needs_review', 'rejected')")
 
 _JSON = frozenset({
     "classification_evidence", "formats", "genres", "genre_evidence",
@@ -395,15 +402,18 @@ class PostgresStorage:
                     (stable_id,))
         row = cur.fetchone()
         existing = _org_from_row(row) if row else None
-        merged = PersistenceService._merge_station_row(existing, clean, now)
+        preserve = _preserve_verified_readiness(existing, clean)
+        merged = PersistenceService._merge_station_row(
+            existing, clean, now, preserve_verified=preserve)
         self._upsert_org(cur, stable_id, kind, merged)
         self._sync_facts(cur, stable_id, clean.get("emails") or [],
                          table="organization_emails")
         self._sync_facts(cur, stable_id, clean.get("phone_numbers") or [],
                          table="organization_phones")
         report.contacts_upserted += self._upsert_contacts(
-            cur, stable_id, clean.get("contacts") or [], now)
-        if clean.get("submission") is not None:
+            cur, stable_id, clean.get("contacts") or [], now,
+            reconcile=not preserve)
+        if PersistenceService._should_upsert_submission(existing, clean):
             self._upsert_submission(cur, stable_id, clean["submission"], now)
             report.submissions_stored += 1
         self._replace_fetches(cur, stable_id, clean.get("fetches") or [])
@@ -452,7 +462,7 @@ class PostgresStorage:
                 (stable_id, str(value), _dumps(fact)))
 
     def _upsert_contacts(self, cur, stable_id: str, contacts: list[dict],
-                         now: str) -> int:
+                         now: str, *, reconcile: bool = True) -> int:
         count = 0
         incoming_uids: list[str] = []
         for contact in contacts:
@@ -510,8 +520,11 @@ class PostgresStorage:
         # partial/empty intake (fetch failure, robots-blocked page, budget
         # limit) must NEVER erase previously stored contact facts; if the
         # intake genuinely has zero contacts it simply leaves the stored set
-        # untouched. Mirrors PersistenceService._upsert_contacts exactly.
-        if incoming_uids:
+        # untouched. On a transient re-observation of an already verified
+        # station (``reconcile=False``) no deletion runs at all: the partial
+        # fresh set is not authoritative. Mirrors
+        # PersistenceService._upsert_contacts exactly.
+        if incoming_uids and reconcile:
             cur.execute(
                 "DELETE FROM contacts WHERE identity_key=%s "
                 "AND contact_uid != ALL(%s::text[])",
@@ -555,8 +568,10 @@ class PostgresStorage:
                       format_filter: str | None = None,
                       country: str | None = None,
                       min_confidence: float | None = None,
-                      exclude_dev: bool = False
-                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
+                      exclude_dev: bool = False,
+                      exclude_quarantined: bool = False
+                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
+                            | tuple[list[dict], int, int, int]:
         clauses, params = [], []
         if q:
             clauses.append("name ILIKE %s")
@@ -578,35 +593,58 @@ class PostgresStorage:
             params.append(float(min_confidence))
         base_where = " AND ".join(clauses)
         where = f"WHERE {base_where}" if base_where else ""
+
+        visible_clauses = list(clauses)
         if exclude_dev:
-            dev_clause = "(" + _DEV_FIXTURE_EXCLUSION_SQL + ")"
-            dev_where = (f"WHERE {base_where} AND {dev_clause}"
-                         if base_where else f"WHERE {dev_clause}")
-            with self._guard() as conn:
-                cur = conn.cursor()
-                cur.execute(f"SELECT COUNT(*) AS n FROM organizations {dev_where}",
-                            params)
-                visible_total = int(cur.fetchone()["n"])
-                cur.execute(f"SELECT COUNT(*) AS n FROM organizations {where}",
-                            params)
-                full_total = int(cur.fetchone()["n"])
-                cur.execute(
-                    f"SELECT * FROM organizations {dev_where} "
-                    "ORDER BY lower(name), identity_key LIMIT %s OFFSET %s",
-                    [*params, int(limit), int(offset)])
-                rows = [_org_from_row(r) for r in cur.fetchall()]
-            return rows, visible_total, full_total - visible_total
+            visible_clauses.append("(" + _DEV_FIXTURE_EXCLUSION_SQL + ")")
+        if exclude_quarantined:
+            visible_clauses.append("NOT (" + _STATION_QUARANTINED_SQL + ")")
+        visible_where = (
+            "WHERE " + " AND ".join(visible_clauses)
+            if visible_clauses else "")
+
         with self._guard() as conn:
             cur = conn.cursor()
             cur.execute(f"SELECT COUNT(*) AS n FROM organizations {where}",
                         params)
-            total = int(cur.fetchone()["n"])
+            full_total = int(cur.fetchone()["n"])
             cur.execute(
-                f"SELECT * FROM organizations {where} "
+                f"SELECT COUNT(*) AS n FROM organizations {visible_where}",
+                params)
+            visible_total = int(cur.fetchone()["n"])
+            cur.execute(
+                f"SELECT * FROM organizations {visible_where} "
                 "ORDER BY lower(name), identity_key LIMIT %s OFFSET %s",
                 [*params, int(limit), int(offset)])
             rows = [_org_from_row(r) for r in cur.fetchall()]
-        return rows, total
+            dev_excluded = 0
+            if exclude_dev:
+                dev_where = (
+                    f"WHERE {base_where} AND NOT ({_DEV_FIXTURE_EXCLUSION_SQL})"
+                    if base_where
+                    else f"WHERE NOT ({_DEV_FIXTURE_EXCLUSION_SQL})")
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM organizations {dev_where}",
+                    params)
+                dev_excluded = int(cur.fetchone()["n"])
+            quarantined_excluded = 0
+            if exclude_quarantined:
+                q_where = (
+                    f"WHERE {base_where} AND {_STATION_QUARANTINED_SQL}"
+                    if base_where
+                    else f"WHERE {_STATION_QUARANTINED_SQL}")
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM organizations {q_where}",
+                    params)
+                quarantined_excluded = int(cur.fetchone()["n"])
+        if exclude_dev and exclude_quarantined:
+            return rows, int(visible_total), int(dev_excluded), \
+                int(quarantined_excluded)
+        if exclude_quarantined:
+            return rows, int(visible_total), int(quarantined_excluded)
+        if exclude_dev:
+            return rows, int(visible_total), int(dev_excluded)
+        return rows, int(visible_total)
 
     def get_station(self, identity_key: str) -> dict | None:
         with self._guard() as conn:
@@ -1384,6 +1422,37 @@ class PostgresStorage:
                 "UPDATE djs SET verification=%s::jsonb, last_stored_at=%s "
                 "WHERE dj_id=%s",
                 (_dumps(verification), utc_now_iso(), dj_id))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def update_station_qualification(self, identity_key: str,
+                                     qualification: dict | None) -> bool:
+        """Persist (or clear) one station's post-fetch qualification verdict.
+
+        Adds ``qualification`` onto (or removes it from) the stored
+        ``raw_metadata`` JSON, keeping every other stored fact, and touches
+        ``last_stored_at``. Rows are flagged, never deleted. Returns False
+        for an unknown identity_key.
+        """
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT raw_metadata FROM organizations "
+                "WHERE identity_key=%s",
+                (identity_key,))
+            row = cur.fetchone()
+            if row is None:
+                return False
+            meta = _j(row["raw_metadata"], {})
+            if qualification is None:
+                meta.pop("qualification", None)
+            else:
+                meta["qualification"] = qualification
+            cur.execute(
+                "UPDATE organizations SET raw_metadata=%s::jsonb, "
+                "last_stored_at=%s WHERE identity_key=%s",
+                (_dumps(meta), utc_now_iso(), identity_key))
             self._conn.commit()
             return cur.rowcount > 0
 

@@ -37,7 +37,12 @@ from discovery.events import (
 )
 
 from discovery.models import EnrichmentResult, Failure, utc_now_iso
-from discovery.radio.intelligence import build_intelligence_record
+from discovery.radio.intelligence import (
+    build_intelligence_record,
+    merge_contacts_from_pages,
+    rebuild_contact_channels,
+)
+from discovery.radio.readiness import compute_outreach_readiness
 from discovery.radio.schema import SourceFetchRecord
 from enrichment.confidence import score_contact
 
@@ -49,6 +54,7 @@ class EngineConfig:
         self,
         max_pages_per_station: int = 6,
         verify_pages_per_station: int = 8,
+        person_pages_per_station: int = 6,
         timeout_seconds: float = 15.0,
         rate_limit_seconds: float = 1.0,
         respect_robots: bool = True,
@@ -63,6 +69,13 @@ class EngineConfig:
         # routes.
         self.verify_pages_per_station = max(
             0, int(verify_pages_per_station))
+        # Dedicated budget for the contact-person discovery pass. It fetches
+        # EXACT already-discovered, still-unverified person-relevant URLs
+        # (about / staff / programming pages the verification budget may not
+        # have reached) and only ever parses what the station itself
+        # publishes. Never guesses a route; never fabricates a person/email.
+        self.person_pages_per_station = max(
+            0, int(person_pages_per_station))
         self.timeout_seconds = timeout_seconds
         self.rate_limit_seconds = rate_limit_seconds
         self.respect_robots = respect_robots
@@ -82,6 +95,29 @@ _VERIFY_CATEGORY_ORDER = {
     "other": 6,
 }
 
+# Useful-page categories whose fetched bodies may surface named people
+# (music/programming directors, DJs/hosts, station staff). Bodies of these
+# categories are parsed into person pages so contact evidence is merged in
+# without any extra fetch — verification budget is reused.
+_PERSON_PARSE_CATEGORIES = ("dj_directory", "contact", "programming")
+
+# Categories targeted by the dedicated person-discovery pass. Any still-
+# unverified person-relevant page that the verification budget did not reach
+# is a candidate; only exact discovered URLs are ever fetched.
+_PERSON_DISCOVER_CATEGORIES = _PERSON_PARSE_CATEGORIES + (
+    "about", "send_music", "submission_guidelines")
+
+# Order in which person-relevant categories are prioritized for the dedicated
+# person pass (most people-relevant first).
+_PERSON_DISCOVER_ORDER = {
+    "dj_directory": 0,
+    "contact": 1,
+    "programming": 2,
+    "about": 3,
+    "send_music": 4,
+    "submission_guidelines": 5,
+}
+
 
 class _UsefulPageVerifier:
     """Bounded reachability verification of already-discovered useful pages.
@@ -98,9 +134,9 @@ class _UsefulPageVerifier:
         self._fetcher = fetcher
         self._logger = logger
 
-    def verify(self, enriched, budget: int) -> list[SourceFetchRecord]:
+    def verify(self, enriched, budget: int) -> tuple[list[SourceFetchRecord], list[ParsedPage]]:
         if budget <= 0 or not enriched.useful_pages:
-            return []
+            return [], []
         already_fetched = _exact_ok_urls(enriched.fetches or [])
         # Order candidates: highest-value category first, then stable by URL.
         candidates = [
@@ -112,6 +148,7 @@ class _UsefulPageVerifier:
             _VERIFY_CATEGORY_ORDER.get(p.category, 6), p.url))
         to_check = candidates[:budget]
         new_records: list[SourceFetchRecord] = []
+        person_pages: list[ParsedPage] = []
         for page in to_check:
             url = page.url
             fetched_at = utc_now_iso()
@@ -140,7 +177,15 @@ class _UsefulPageVerifier:
             new_records.append(rec)
             log_event(self._logger, EVENT_ENRICHMENT_PAGE_FETCH,
                       url=url, ok=ok, status=getattr(fetch, "status", None))
-        return new_records
+            # Parse a reachable person-relevant page body (reusing the same
+            # verification fetch — no extra request) so named directors,
+            # DJs/hosts and staff contacts can be merged into the record.
+            if ok and getattr(fetch, "body", None) \
+                    and page.category in _PERSON_PARSE_CATEGORIES:
+                content_type = (getattr(fetch, "content_type", "") or "").lower()
+                if "html" in content_type or not content_type:
+                    person_pages.append(parse_html(url, fetch.body))
+        return new_records, person_pages
 
 
 def _exact_ok_urls(fetches) -> set[str]:
@@ -263,13 +308,14 @@ class EnrichmentEngine:
                 fetch_records.extend(extra_records)
 
         enriched = build_intelligence_record(record, pages, fetch_records)
+        person_pages: list[ParsedPage] = []
         if self.live:
             # Phase 6: bounded link-verification pass. Confirm which discovered
             # useful pages are truly reachable by fetching their EXACT URLs
             # (never guessing routes), writing reachable/status/rechecked_at
             # evidence so only verified links surface as actionable.
             verifier = _UsefulPageVerifier(self._fetcher, self.config.logger)
-            new_records = verifier.verify(
+            new_records, verified_person_pages = verifier.verify(
                 enriched,
                 budget=getattr(self.config, "verify_pages_per_station", 8))
             if new_records:
@@ -282,8 +328,43 @@ class EnrichmentEngine:
                 enriched.raw_metadata["useful_pages"] = [
                     p.to_dict() for p in enriched.useful_pages
                 ]
+            person_pages.extend(verified_person_pages)
+            # Phase 1 person-discovery pass: reach person-relevant useful
+            # pages the verification budget did not cover (about / staff /
+            # programming / submissions pages), still fetching only EXACT
+            # already-discovered URLs and honoring the per-station budget.
+            discover_records, discover_pages = self._discover_person_pages(
+                enriched,
+                budget=getattr(self.config, "person_pages_per_station", 6))
+            if discover_records:
+                fetch_records.extend(discover_records)
+                enriched.fetches = list(fetch_records)
+                enriched.raw_metadata["useful_pages"] = [
+                    p.to_dict() for p in enriched.useful_pages
+                ]
+            person_pages.extend(discover_pages)
+            # Phase 1 outreach-readiness: merge named people (directors,
+            # DJs/hosts, station staff) from verified person-relevant pages —
+            # reusing the same verification fetches, no extra request — then
+            # recompute the contact-channels bundle so newly surfaced director
+            # identities/emails feed the readiness projection.
+            if person_pages:
+                merge_contacts_from_pages(enriched, person_pages)
+                rebuild_contact_channels(enriched)
+        # Contact-person layer: conservative named-person candidates from ALL
+        # parsed pages (build + verify + person pass). Stored verbatim so the
+        # readiness projection can report the station's own published person
+        # and evidence; an unverified page/name/email is never invented here.
+        # (person.py is excluded from this deployment; readiness falls back to
+        # the evidence-backed director channels below.)
         if self._role_advisor is not None:
             self._apply_role_advisor(enriched)
+        # Outreach readiness is projected for every enriched record (offline and
+        # live): it keys off qualification, fetch/reachability evidence, and the
+        # evidence-backed contact/submission channels — never inventing a
+        # person, email, or URL.
+        enriched.raw_metadata["outreach_readiness"] = \
+            compute_outreach_readiness(enriched.to_dict())
         return enriched
 
     def _apply_role_advisor(self, enriched) -> None:
@@ -473,6 +554,70 @@ class EnrichmentEngine:
                 if "html" in content_type or not content_type:
                     pages.append(parse_html(url, fetch.body))
         return pages, records
+
+    def _discover_person_pages(
+        self,
+        enriched,
+        budget: int,
+    ) -> tuple[list[SourceFetchRecord], list[ParsedPage]]:
+        """Dedicated contact-person discovery pass over discovered pages.
+
+        Fetches person-relevant useful pages (staff/DJ directories, contact,
+        programming, about, submissions) that the verification budget did not
+        reach, in priority order, bounded by ``person_pages_per_station``.
+        Only EXACT URLs already discovered as links on crawled pages are ever
+        fetched — no routes are guessed, robots/rate limits are respected. For
+        each page it records a ``SourceFetchRecord``, writes reachability
+        evidence back onto the ``UsefulPage``, and parses a reachable body so
+        named people (and only published, role-associated ones) can surface.
+        """
+        if budget <= 0 or not getattr(enriched, "useful_pages", None):
+            return [], []
+        already_fetched = _exact_ok_urls(enriched.fetches or [])
+        candidates = [
+            p for p in enriched.useful_pages
+            if p.category in _PERSON_DISCOVER_CATEGORIES
+            and p.reachable is not True      # already verified/success: skip
+            and p.url not in already_fetched  # exact URL already fetched: skip
+        ]
+        candidates.sort(key=lambda p: (
+            _PERSON_DISCOVER_ORDER.get(p.category, 9), p.url))
+        to_check = candidates[:budget]
+        records: list[SourceFetchRecord] = []
+        person_pages: list[ParsedPage] = []
+        by_url = {p.url.rstrip("/"): p for p in candidates}
+        for url in [p.url for p in to_check]:
+            fetched_at = utc_now_iso()
+            try:
+                fetch = self._fetcher.fetch(url)
+            except Exception as exc:
+                rec = SourceFetchRecord(
+                    url=url, ok=False,
+                    error_kind=type(exc).__name__, fetched_at=fetched_at)
+                records.append(rec)
+                page = by_url.get(url.rstrip("/"))
+                if page is not None:
+                    page.reachable = False
+                    page.rechecked_at = fetched_at
+                continue
+            ok = bool(fetch.ok)
+            rec = SourceFetchRecord(
+                url=url, ok=ok, status=getattr(fetch, "status", None),
+                error_kind=getattr(fetch, "error_kind", None),
+                fetched_at=fetched_at)
+            records.append(rec)
+            log_event(self.config.logger, EVENT_ENRICHMENT_PAGE_FETCH,
+                      url=url, ok=ok, status=getattr(fetch, "status", None))
+            page = by_url.get(url.rstrip("/"))
+            if page is not None:
+                page.reachable = ok
+                page.status = getattr(fetch, "status", None)
+                page.rechecked_at = fetched_at
+            if ok and getattr(fetch, "body", None):
+                content_type = (getattr(fetch, "content_type", "") or "").lower()
+                if "html" in content_type or not content_type:
+                    person_pages.append(parse_html(url, fetch.body))
+        return records, person_pages
 
 
 # ---------------------------------------------------------------------------

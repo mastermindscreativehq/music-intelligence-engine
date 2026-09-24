@@ -329,17 +329,30 @@ def _handle(service, method: str, match: re.Match, params: dict,
     if path == "/api/v1/stations":
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
-        rows, total, dev_excluded = service.list_stations(
-            limit=limit, offset=offset, q=_first(params, "q"),
-            status=_first(params, "status"), genre=_first(params, "genre"),
-            format_filter=_first(params, "format"),
-            country=_first(params, "country"),
-            min_confidence=_min_confidence(params),
-            exclude_dev=True)
+        status = _first(params, "status")
+        if status is None:
+            rows, total, dev_excluded, quarantined_excluded = \
+                service.list_stations(
+                    limit=limit, offset=offset, q=_first(params, "q"),
+                    status=None, genre=_first(params, "genre"),
+                    format_filter=_first(params, "format"),
+                    country=_first(params, "country"),
+                    min_confidence=_min_confidence(params),
+                    exclude_dev=True, exclude_quarantined=True)
+        else:
+            rows, total, dev_excluded = service.list_stations(
+                limit=limit, offset=offset, q=_first(params, "q"),
+                status=status, genre=_first(params, "genre"),
+                format_filter=_first(params, "format"),
+                country=_first(params, "country"),
+                min_confidence=_min_confidence(params),
+                exclude_dev=True, exclude_quarantined=False)
+            quarantined_excluded = 0
         return 200, success_body({
             "stations": [station_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,
             "dev_fixtures_excluded": dev_excluded,
+            "quarantined_excluded": quarantined_excluded,
         })
 
     if path == "/api/v1/ingest":

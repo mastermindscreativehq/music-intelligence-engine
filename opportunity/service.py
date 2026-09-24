@@ -279,8 +279,9 @@ def compute_opportunities(
     outreach_status=None, sort="score", order="desc",
 ) -> dict:
     """Ranked opportunities for *track* across all active stations."""
-    stations, _total, _dev_excluded = repository.list_stations(
-        limit=MAX_STATIONS, offset=0, exclude_dev=True)
+    stations, _total, _dev_excluded, _q_excluded = repository.list_stations(
+        limit=MAX_STATIONS, offset=0, exclude_dev=True,
+        exclude_quarantined=True)
     outreach_rows, _ = repository.list_outreach(
         limit=MAX_OUTREACH_SCAN, offset=0)
     history_by_key: dict[str, list[dict]] = {}

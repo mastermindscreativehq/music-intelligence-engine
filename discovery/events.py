@@ -12,6 +12,7 @@ import logging
 
 EVENT_DISCOVERY_STARTED = "discovery_started"
 EVENT_CANDIDATE_FOUND = "candidate_found"
+EVENT_CANDIDATE_REJECTED = "candidate_rejected"
 EVENT_URL_NORMALIZED = "url_normalized"
 EVENT_PAGE_FETCHED = "page_fetched"
 EVENT_CONTACT_PAGE_FOUND = "contact_page_found"

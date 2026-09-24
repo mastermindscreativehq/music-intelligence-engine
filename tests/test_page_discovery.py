@@ -237,8 +237,10 @@ class TestEnrichmentEnginePageDiscovery(unittest.TestCase):
     def test_budget_respected_total(self):
         engine, fetcher = self._make_engine_and_fetcher(budget=3)
         # Isolate the discovery budget: disable the separate useful-page
-        # verification pass so this test measures discovery fetches alone.
+        # verification and person-discovery passes so this test measures
+        # discovery fetches alone.
         engine.config.verify_pages_per_station = 0
+        engine.config.person_pages_per_station = 0
         record = make_record()
         engine.enrich_records([record])
         # Should fetch at most 3 pages total
@@ -291,6 +293,7 @@ class TestBudgetBoundary(unittest.TestCase):
         engine = EnrichmentEngine(fetcher=fetcher)
         engine.config.max_pages_per_station = 1
         engine.config.verify_pages_per_station = 0  # isolate discovery budget
+        engine.config.person_pages_per_station = 0  # isolate discovery budget
         record = make_record()
         engine.enrich_records([record])
         self.assertEqual(len(fetcher.fetched), 1)
@@ -307,6 +310,7 @@ class TestBudgetBoundary(unittest.TestCase):
         engine = EnrichmentEngine(fetcher=fetcher)
         engine.config.max_pages_per_station = 2
         engine.config.verify_pages_per_station = 0  # isolate discovery budget
+        engine.config.person_pages_per_station = 0  # isolate discovery budget
         record = make_record()
         engine.enrich_records([record])
         self.assertEqual(len(fetcher.fetched), 2)

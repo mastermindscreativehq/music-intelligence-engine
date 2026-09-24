@@ -40,13 +40,20 @@ from discovery.models import (
     fact_observe_again,
 )
 from discovery.providers import DiscoveryProvider, SeedListProvider
-from discovery.queries import build_queries
+from discovery.radio.qualify import (
+    NEEDS_REVIEW,
+    REJECTED,
+    classify_station_candidate,
+    classify_station_site,
+)
+from discovery.radio.queries import build_radio_queries
 from discovery.radio.schema import ContactRecord, StationRecord
 
 from enrichment.confidence import rescore
 from enrichment.contacts import build_contacts_from_page
 from enrichment.dedupe import deduplicate_stations
 from enrichment.emails import email_quality, extract_emails_from_text
+from enrichment.geography import extract_location
 from enrichment.stations import classify_station, detect_social_urls
 
 logger = logging.getLogger("mie.discovery.radio")
@@ -112,7 +119,7 @@ class RadioDiscoveryEngine:
         result = DiscoveryResult(
             request=request.to_dict(), queries=[])
         try:
-            queries = build_queries(request)
+            queries = build_radio_queries(request)
             result.queries = queries
             ev.log_event(
                 self.log, ev.EVENT_DISCOVERY_STARTED,
@@ -178,10 +185,25 @@ class RadioDiscoveryEngine:
         request: DiscoveryRequest,
         result: DiscoveryResult,
     ) -> dict[str, list[tuple[Candidate, str]]]:
-        """Group by canonical domain; normalize once per candidate URL."""
+        """Group by canonical domain; normalize once per candidate URL.
+
+        Deterministic qualification runs first: unambiguous non-station
+        destinations (social/streaming/aggregator hosts, article/event/
+        lyrics/jobs/shop paths) are dropped before any fetch. Candidates
+        without a decisive signal are kept (``needs_review`` != disqualified).
+        """
         groups: dict[str, list[tuple[Candidate, str]]] = {}
         for candidate in candidates[: min(request.limit,
                                           self.config.max_candidates_hard_cap)]:
+            verdict = classify_station_candidate(
+                url=candidate.url, title=candidate.title,
+                snippet=candidate.snippet)
+            if verdict.verdict == REJECTED:
+                ev.log_event(
+                    self.log, ev.EVENT_CANDIDATE_REJECTED,
+                    url=candidate.url, kind=verdict.kind,
+                    reason=verdict.reason)
+                continue
             try:
                 normalized = normalize_url(candidate.url)
             except (InvalidUrlError, ValueError) as exc:
@@ -228,41 +250,19 @@ class RadioDiscoveryEngine:
             else utc_now_iso()
         record.last_observed_at = utc_now_iso()
 
-        # --- location: carry provided geography through the pipeline ---------
-        # The seed entry (per candidate) is the most specific source; the
-        # discovery request is a generic fallback. Values are only ever copied
-        # from what was provided — nothing is invented — and the origin is
-        # recorded alongside for provenance.
-        location_evidence: list[dict] = []
-        for field, fallback in (("country", request.country),
-                                ("state_or_region", request.state_or_region),
-                                ("city", request.city)):
-            value = _first_geo(group, field, fallback)
-            setattr(record, field, value)
-            if not value:
-                continue
-            for candidate, _ in group:
-                if getattr(candidate, field):
-                    location_evidence.append({
-                        "value": value,
-                        "field": field,
-                        "source_url": candidate.url,
-                        "source_type": "seed_data",
-                        "method": "carry_through",
-                        "discovered_at": utc_now_iso(),
-                    })
-                    break
-            else:
-                location_evidence.append({
-                    "value": value,
-                    "field": field,
-                    "source_url": homepage_url,
-                    "source_type": "discovery_request",
-                    "method": "carry_through",
-                    "discovered_at": utc_now_iso(),
-                })
-        if location_evidence:
-            record.raw_metadata["location_evidence"] = location_evidence
+        # --- location ---------------------------------------------------------
+        # Evidence-based geography is resolved from the station's own pages
+        # after the fetch (see enrichment.geography). The ONLY geography
+        # carried forward here is what the seed attached to THIS candidate —
+        # the discovery request's country/state/city scope is never blended in
+        # (a request scoped to "United States" never makes a Nanaimo station
+        # US). Seed values fill a field ONLY when the site itself shows no
+        # evidence.
+        seed_location: dict[str, str] = {}
+        for field in ("country", "state_or_region", "city"):
+            value = _first_geo(group, field, None)
+            if value:
+                seed_location[field] = value
 
         station_domain = canonical_domain(homepage_url)
 
@@ -281,12 +281,36 @@ class RadioDiscoveryEngine:
             ))
             record.name = clean_title(titles[0]) if titles else station_domain
             record.raw_metadata["candidate_snippet"] = snippets[0][:280] if snippets else ""
+            # No site content was verifiable: quarantine as needs_review
+            # (the automation path never ingests these; see jobs.py).
+            record.raw_metadata["qualification"] = classify_station_site(
+                website_url=homepage_url,
+                homepage_title="",
+                texts=(),
+                snippet=record.raw_metadata["candidate_snippet"],
+            ).to_dict()
             return record.to_dict()   # broken-site path; scorer penalizes
 
         record.website_reachable = True
         home_page = parse_html(home_result.final_url or homepage_url,
                                home_result.body or "")
         homepage_title = clean_title(home_page.title)
+
+        # --- early hard gate ------------------------------------------
+        # A hard-denied host (government/news/encyclopedia/Q&A/directory) can
+        # never be an official station site: record the verdict and skip the
+        # rest of the fetch budget.
+        early = classify_station_site(
+            website_url=homepage_url,
+            homepage_title=homepage_title,
+            texts=(home_page.text or "",))
+        if early.verdict == REJECTED:
+            record.name = homepage_title or clean_title(titles[0]) \
+                or station_domain
+            record.raw_metadata["homepage_title"] = homepage_title
+            record.raw_metadata["pages_fetched"] = [home_page.url]
+            record.raw_metadata["qualification"] = early.to_dict()
+            return record.to_dict()
 
         # --- focused page discovery --------------------------------------
         budget = max(0, self.config.max_pages_per_site - 1)
@@ -399,6 +423,40 @@ class RadioDiscoveryEngine:
                 best_programming, best_programming, "programming_page",
                 discovered_at=now_iso).to_dict()
 
+        # --- geography: evidence-based only --------------------------------
+        # country / state_or_region / city are derived from the station's own
+        # fetched pages, homepage title, and registrable domain. A discovery
+        # request's country scope is never a source. A value the seed attached
+        # to this candidate fills a field ONLY when site evidence resolves
+        # nothing.
+        loc = extract_location(url=homepage_url, title=homepage_title,
+                               pages=pages)
+        record.country = loc.country
+        record.state_or_region = loc.state_or_region
+        record.city = loc.city
+        location_evidence: list[dict] = []
+        if loc.evidence:
+            for entry in loc.evidence:
+                entry.setdefault("source_url") or entry.setdefault(
+                    "source_url", homepage_url)
+                if not entry.get("discovered_at"):
+                    entry["discovered_at"] = now_iso
+            location_evidence = list(loc.evidence)
+        for field in ("country", "state_or_region", "city"):
+            if getattr(record, field) is None and field in seed_location:
+                value = seed_location[field]
+                setattr(record, field, value)
+                location_evidence.append({
+                    "value": value,
+                    "field": field,
+                    "source_url": homepage_url,
+                    "source_type": "seed_data",
+                    "method": "carry_through",
+                    "discovered_at": now_iso,
+                })
+        if location_evidence:
+            record.raw_metadata["location_evidence"] = location_evidence
+
         # --- classification ---------------------------------------------------
         texts = [page.text or "" for page in pages] + snippets
         classification = classify_station(texts)
@@ -410,6 +468,16 @@ class RadioDiscoveryEngine:
             domain=domain, station_type=classification.station_type,
             confidence=round(classification.confidence, 2),
         )
+
+        # --- final hard gate ------------------------------------------------
+        # Verdict across ALL collected site text (pages + title + snippet).
+        final = classify_station_site(
+            website_url=homepage_url,
+            homepage_title=homepage_title,
+            texts=tuple(p.text or "" for p in pages),
+            snippet=" ".join(snippets),
+        )
+        record.raw_metadata["qualification"] = final.to_dict()
 
         record.raw_metadata["homepage_title"] = homepage_title
         record.raw_metadata["pages_fetched"] = [p.url for p in pages]
@@ -461,7 +529,12 @@ class RadioDiscoveryEngine:
         """Highest keyword-weight page whose URL matches the marker."""
         pattern = {
             "contact": re.compile(r"contact", re.I),
-            "submission": re.compile(r"submi", re.I),
+            # "submi" plus "send-us-a-song"-style route slugs that a station
+            # publishes for receiving tracks (never a fragment/query alone).
+            "submission": re.compile(
+                r"submi|send[-\s_]?(?:us|your|a)[-\s_]?(?:music|song|songs"
+                r"|track|tracks|audio)|send[-\s_]?(?:music|songs|tracks)"
+                r"|song[-\s_]?(?:submissions|suggestions)", re.I),
             "programming": re.compile(r"program|shows|schedule", re.I),
         }[marker]
         best_url: str | None = None

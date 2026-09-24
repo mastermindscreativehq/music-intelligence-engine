@@ -243,14 +243,24 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                       country: str | None = None,
                       min_confidence: float | None = Query(None, ge=0.0,
                                                            le=1.0)):
-        rows, total, dev_excluded = storage.list_stations(
-            limit=limit, offset=offset, q=q, status=status, genre=genre,
-            format_filter=format, country=country,
-            min_confidence=min_confidence, exclude_dev=True)
+        if status is None:
+            rows, total, dev_excluded, quarantined_excluded = storage.list_stations(
+                limit=limit, offset=offset, q=q, status=None, genre=genre,
+                format_filter=format, country=country,
+                min_confidence=min_confidence, exclude_dev=True,
+                exclude_quarantined=True)
+        else:
+            rows, total, dev_excluded = storage.list_stations(
+                limit=limit, offset=offset, q=q, status=status, genre=genre,
+                format_filter=format, country=country,
+                min_confidence=min_confidence, exclude_dev=True,
+                exclude_quarantined=False)
+            quarantined_excluded = 0
         return success_body({
             "stations": [station_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,
             "dev_fixtures_excluded": dev_excluded,
+            "quarantined_excluded": quarantined_excluded,
         })
 
     @app.get("/api/v1/stations/{key}")

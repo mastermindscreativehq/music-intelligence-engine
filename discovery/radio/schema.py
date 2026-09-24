@@ -245,6 +245,7 @@ class RadioIntelligenceRecord:
     phone_numbers: list[dict] = field(default_factory=list)  # Facts
     contacts: list[EnrichedContact] = field(default_factory=list)
     submission: SubmissionPath | None = None
+    contact_url: dict | None = None                        # Fact
     useful_pages: list[UsefulPage] = field(default_factory=list)
     social_urls: dict[str, str] = field(default_factory=dict)
     # sources & lifecycle
@@ -283,6 +284,7 @@ class RadioIntelligenceRecord:
             "phone_numbers": [dict(f) for f in self.phone_numbers],
             "contacts": [c.to_dict() for c in self.contacts],
             "submission": self.submission.to_dict() if self.submission else None,
+            "contact_url": dict(self.contact_url) if self.contact_url else None,
             "useful_pages": [p.to_dict() for p in self.useful_pages],
             "social_urls": dict(self.social_urls),
             "source_urls": list(self.source_urls),

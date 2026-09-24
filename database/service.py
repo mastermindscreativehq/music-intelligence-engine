@@ -49,6 +49,10 @@ from discovery.events import (
 )
 
 from discovery.models import utc_now_iso
+from discovery.radio.readiness import (
+    READINESS_OUTREACH_READY,
+    READINESS_REJECTED,
+)
 from enrichment.dedupe import identity_key
 
 EVENT_INGESTION_STARTED = "ingestion_started"
@@ -143,6 +147,108 @@ _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL = _outreach_dev_fixture_exclusion_sql("%")
 _DJ_REJECTED_SQL = (
     "COALESCE(json_extract(verification, '$.classification.verdict'), '') "
     "= 'rejected'")
+
+# Read-path exclusion for stations the post-fetch hard gate decided are not
+# (verifiably) radio stations: ``rejected`` (denied host / non-station) and
+# ``needs_review`` (site reached but no verifiable station evidence) are kept
+# in storage for review but hidden from the normal listing and from outreach
+# candidate selection.
+_STATION_QUARANTINED_SQL = (
+    "COALESCE(json_extract(raw_metadata, '$.qualification.verdict'), '') "
+    "IN ('needs_review', 'rejected')")
+
+
+# Fetch error kinds that indicate a TRANSIENT network-level failure rather
+# than verified content: dropped connection, TLS handshake failure, timeout,
+# DNS resolution miss, an error HTTP status, or an unexpected transport
+# error. A re-observation that could only produce these gathered NO new
+# verified evidence and must never erase a previously verified
+# outreach_ready outcome.
+_TRANSIENT_FETCH_ERROR_KINDS = frozenset({
+    "connection_error", "ssl_error", "timeout", "dns_error",
+    "http_status", "unexpected",
+})
+
+# raw_metadata sub-keys that carry VERIFIED station facts (the qualification
+# verdict, the outreach-readiness projection, the outreach person, discovered
+# person candidates, and the evidence-backed contact channels/routes). During
+# a transient re-observation these are locked: the stored verified value wins
+# over the degraded outcome.
+_VERIFIED_RAW_METADATA_KEYS = (
+    "qualification",
+    "outreach_readiness",
+    "person",
+    "person_candidates",
+    "contact_channels",
+    "useful_pages",
+)
+
+
+def _transient_fetch_failures(record: dict) -> list[dict]:
+    """Failed-fetch log entries attributable to transient network problems."""
+    failures = []
+    for fetch in record.get("fetches") or []:
+        if not isinstance(fetch, dict) or fetch.get("ok") is True:
+            continue
+        kind = fetch.get("error_kind")
+        if isinstance(kind, str) and kind in _TRANSIENT_FETCH_ERROR_KINDS:
+            failures.append({
+                "url": fetch.get("url"),
+                "error_kind": kind,
+                "status": fetch.get("status"),
+                "fetched_at": fetch.get("fetched_at"),
+            })
+    return failures
+
+
+def _is_transient_failure_reobservation(record: dict) -> bool:
+    """True when a run only observed transient network/fetch failures.
+
+    A discovery pass that could not reach the station homepage records
+    ``website_reachable=False``; fetch failures also carry a transient
+    ``error_kind``. Either signal means the run verified nothing new — never
+    a reason to erase previously verified station facts.
+    """
+    if record.get("website_reachable") is False:
+        return True
+    return bool(_transient_fetch_failures(record))
+
+
+def _preserve_verified_readiness(existing, incoming: dict) -> bool:
+    """Lock previously verified outreach_ready facts on a degraded re-run.
+
+    Fires only when ALL hold:
+
+    - the stored record is already ``outreach_ready``;
+    - the incoming re-observation is a downgrade (not ``outreach_ready``);
+    - the downgrade is NOT genuine new evidence: the incoming qualification is
+      not ``rejected`` (a rejection only comes from inspected content) and the
+      run itself only observed transient fetch failures.
+
+    Brand-new records (``existing is None``) always return False so an
+    unverifiable first sighting stays ``needs_review``.
+    """
+    if existing is None:
+        return False
+    stored_meta = existing.get("raw_metadata") or {}
+    if not isinstance(stored_meta, dict):
+        return False
+    stored_readiness = stored_meta.get("outreach_readiness") or {}
+    if not isinstance(stored_readiness, dict) \
+            or stored_readiness.get("status") != READINESS_OUTREACH_READY:
+        return False
+    new_meta = incoming.get("raw_metadata") or {}
+    if not isinstance(new_meta, dict):
+        return False
+    new_readiness = new_meta.get("outreach_readiness") or {}
+    if isinstance(new_readiness, dict) \
+            and new_readiness.get("status") == READINESS_OUTREACH_READY:
+        return False
+    new_qualification = new_meta.get("qualification") or {}
+    if isinstance(new_qualification, dict) \
+            and new_qualification.get("verdict") == READINESS_REJECTED:
+        return False
+    return _is_transient_failure_reobservation(incoming)
 
 
 class ValidationError(Exception):
@@ -366,15 +472,18 @@ class PersistenceService:
             # unions lists/dicts, which requires decoded values, not raw
             # serialized TEXT from the row.
             existing = self._station_from_row(row) if row else None
-            merged = self._merge_station_row(existing, clean, now)
+            preserve = _preserve_verified_readiness(existing, clean)
+            merged = self._merge_station_row(existing, clean, now,
+                                             preserve_verified=preserve)
             self._upsert_station(stable_id, kind, merged)
             self._sync_facts(stable_id, clean.get("emails") or [],
                              table="station_emails")
             self._sync_facts(stable_id, clean.get("phone_numbers") or [],
                              table="station_phones")
             report.contacts_upserted += self._upsert_contacts(
-                stable_id, clean.get("contacts") or [], now)
-            if clean.get("submission") is not None:
+                stable_id, clean.get("contacts") or [], now,
+                reconcile=not preserve)
+            if self._should_upsert_submission(existing, clean):
                 self._upsert_submission(stable_id, clean["submission"], now)
                 report.submissions_stored += 1
             self._replace_fetches(stable_id, clean.get("fetches") or [])
@@ -384,13 +493,18 @@ class PersistenceService:
                   contacts=len(clean.get("contacts") or []))
 
     @staticmethod
-    def _merge_station_row(existing, incoming: dict, now: str) -> dict:
+    def _merge_station_row(existing, incoming: dict, now: str,
+                           preserve_verified=None) -> dict:
         """Merge policy: newest non-null scalar wins; lists/dicts union;
         earliest discovery & first storage, latest observation kept.
 
         The merge iterates the UNION of old and incoming keys so a field
         absent from an incoming record is treated like null (kept, never
         erased) rather than dropped from the UPDATE.
+
+        When *preserve_verified* is True (a transient-failure re-observation
+        of an already outreach_ready station), verified raw_metadata facts are
+        locked so the degraded outcome cannot erase them.
         """
         if existing is None:
             merged = dict(incoming)
@@ -398,6 +512,9 @@ class PersistenceService:
             merged["last_stored_at"] = now
             return merged
         old = dict(existing)
+        if preserve_verified is None:
+            preserve_verified = _preserve_verified_readiness(existing,
+                                                             incoming)
         merged: dict = {}
         for key in set(old.keys()) | set(incoming.keys()):
             if key in ("first_stored_at", "last_stored_at"):
@@ -417,7 +534,38 @@ class PersistenceService:
                 merged[key] = _merge_dict(previous, value)
             elif key == "raw_metadata":
                 fresh = dict(previous or {})
-                fresh.update(value or {})
+                if preserve_verified:
+                    # A previously verified outreach_ready station was
+                    # re-observed by a run that could only fail transiently
+                    # (SSL/connection/timeout/DNS/error-status fetches, or an
+                    # unreachable homepage). The verified facts are LOCKED —
+                    # the degraded outcome must not erase them. The new
+                    # failure is recorded separately as fetch/verification
+                    # metadata instead of downgrading stored facts.
+                    incoming_meta = value or {}
+                    failures = _transient_fetch_failures(incoming)
+                    fresh["transient_fetch_failures"] = _merge_list(
+                        fresh.get("transient_fetch_failures"), failures)
+                    incoming_readiness = incoming_meta.get(
+                        "outreach_readiness") or {}
+                    if not isinstance(incoming_readiness, dict):
+                        incoming_readiness = {}
+                    reobservation = {
+                        "observed_at": now,
+                        "preserved_status": READINESS_OUTREACH_READY,
+                        "incoming_status": incoming_readiness.get("status"),
+                        "incoming_reasons": incoming_readiness.get("reasons"),
+                    }
+                    fresh["readiness_reobservations"] = list(
+                        fresh.get("readiness_reobservations") or [])
+                    fresh["readiness_reobservations"].append(reobservation)
+                    mergeable = {
+                        k: v for k, v in incoming_meta.items()
+                        if k not in _VERIFIED_RAW_METADATA_KEYS
+                        or fresh.get(k) is None}
+                    fresh.update(mergeable)
+                else:
+                    fresh.update(value or {})
                 merged[key] = fresh
             else:
                 # Ingest evidence is additive and NULL-only: an existing
@@ -508,7 +656,7 @@ class PersistenceService:
                 (stable_id, str(value), _dumps(fact)))
 
     def _upsert_contacts(self, stable_id: str, contacts: list[dict],
-                         now: str) -> int:
+                         now: str, *, reconcile: bool = True) -> int:
         count = 0
         for contact in contacts:
             uid = contact_uid(stable_id, contact)
@@ -562,15 +710,32 @@ class PersistenceService:
         # partial/empty intake (fetch failure, robots-blocked page, budget
         # limit) must NEVER erase previously stored contact facts; if the
         # intake genuinely has zero contacts it simply leaves the stored set
-        # untouched. Mirrors PostgresStorage._upsert_contacts exactly.
+        # untouched. On a transient re-observation of an already verified
+        # station (``reconcile=False``) no deletion runs at all: the partial
+        # fresh set is not authoritative. Mirrors
+        # PostgresStorage._upsert_contacts exactly.
         incoming_uids = {contact_uid(stable_id, c) for c in contacts}
-        if incoming_uids:
+        if incoming_uids and reconcile:
             marks = ",".join(["?"] * len(incoming_uids))
             self._conn.execute(
                 f"DELETE FROM contacts WHERE identity_key=? "
                 f"AND contact_uid NOT IN ({marks})",
                 [stable_id, *sorted(incoming_uids)])
         return count
+
+    @staticmethod
+    def _should_upsert_submission(existing, clean: dict) -> bool:
+        """Whether the incoming submission payload may be stored.
+
+        A transient re-observation carries no new verified evidence: its
+        (route-less) submission payload must never clobber the previously
+        verified route row stored for the station.
+        """
+        if clean.get("submission") is None:
+            return False
+        if _preserve_verified_readiness(existing, clean):
+            return False
+        return True
 
     def _upsert_submission(self, stable_id: str, payload: dict,
                            now: str) -> None:
@@ -604,8 +769,10 @@ class PersistenceService:
                       format_filter: str | None = None,
                       country: str | None = None,
                       min_confidence: float | None = None,
-                      exclude_dev: bool = False
-                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
+                      exclude_dev: bool = False,
+                      exclude_quarantined: bool = False
+                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
+                            | tuple[list[dict], int, int, int]:
         clauses, params = [], []
         if q:
             clauses.append("name LIKE ? ESCAPE '\\'")
@@ -629,34 +796,53 @@ class PersistenceService:
             params.append(float(min_confidence))
         base_where = " AND ".join(clauses)
         where = f"WHERE {base_where}" if base_where else ""
+
+        visible_clauses = list(clauses)
         if exclude_dev:
-            dev_clause = "(" + _DEV_FIXTURE_EXCLUSION_SQL + ")"
-            dev_where = (f"WHERE {base_where} AND {dev_clause}"
-                         if base_where else f"WHERE {dev_clause}")
-            with self._lock:
-                visible_total = self._conn.execute(
-                    f"SELECT COUNT(*) AS n FROM stations {dev_where}",
-                    params).fetchone()["n"]
-                full_total = self._conn.execute(
-                    f"SELECT COUNT(*) AS n FROM stations {where}",
-                    params).fetchone()["n"]
-                rows = self._conn.execute(
-                    f"SELECT * FROM stations {dev_where} "
-                    "ORDER BY name COLLATE NOCASE, identity_key "
-                    "LIMIT ? OFFSET ?",
-                    [*params, int(limit), int(offset)]).fetchall()
-            return ([self._station_from_row(r) for r in rows],
-                    int(visible_total), int(full_total - visible_total))
+            visible_clauses.append("(" + _DEV_FIXTURE_EXCLUSION_SQL + ")")
+        if exclude_quarantined:
+            visible_clauses.append("NOT (" + _STATION_QUARANTINED_SQL + ")")
+        visible_where = (
+            "WHERE " + " AND ".join(visible_clauses)
+            if visible_clauses else "")
+
         with self._lock:
-            total = self._conn.execute(
+            full_total = self._conn.execute(
                 f"SELECT COUNT(*) AS n FROM stations {where}",
                 params).fetchone()["n"]
+            visible_total = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM stations {visible_where}",
+                params).fetchone()["n"]
             rows = self._conn.execute(
-                f"SELECT * FROM stations {where} "
+                f"SELECT * FROM stations {visible_where} "
                 "ORDER BY name COLLATE NOCASE, identity_key "
                 "LIMIT ? OFFSET ?",
                 [*params, int(limit), int(offset)]).fetchall()
-        return [self._station_from_row(r) for r in rows], int(total)
+            dev_excluded = 0
+            if exclude_dev:
+                dev_where = (
+                    f"{where} AND NOT ({_DEV_FIXTURE_EXCLUSION_SQL})"
+                    if where else f"WHERE NOT ({_DEV_FIXTURE_EXCLUSION_SQL})")
+                dev_excluded = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM stations {dev_where}",
+                    params).fetchone()["n"]
+            quarantined_excluded = 0
+            if exclude_quarantined:
+                q_where = (
+                    f"{where} AND {_STATION_QUARANTINED_SQL}"
+                    if where else f"WHERE {_STATION_QUARANTINED_SQL}")
+                quarantined_excluded = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM stations {q_where}",
+                    params).fetchone()["n"]
+        rows = [self._station_from_row(r) for r in rows]
+        if exclude_dev and exclude_quarantined:
+            return rows, int(visible_total), int(dev_excluded), \
+                int(quarantined_excluded)
+        if exclude_quarantined:
+            return rows, int(visible_total), int(quarantined_excluded)
+        if exclude_dev:
+            return rows, int(visible_total), int(dev_excluded)
+        return rows, int(visible_total)
 
     def get_station(self, identity_key: str) -> dict | None:
         with self._lock:
@@ -869,6 +1055,32 @@ class PersistenceService:
             "started_at": row["started_at"],
             "completed_at": row["completed_at"] or None,
         }
+
+    def update_station_qualification(self, identity_key: str,
+                                     qualification: dict | None) -> bool:
+        """Persist (or clear) one station's post-fetch qualification verdict.
+
+        Writes ``raw_metadata.qualification`` (keeping every other stored
+        fact) and touches ``last_stored_at``; ``None`` removes the key
+        (cleanup reversal). Rows are flagged, never deleted. Returns False
+        for an unknown identity_key.
+        """
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT raw_metadata FROM stations WHERE identity_key=?",
+                (identity_key,)).fetchone()
+            if row is None:
+                return False
+            meta = _loads(row["raw_metadata"], default={})
+            if qualification is None:
+                meta.pop("qualification", None)
+            else:
+                meta["qualification"] = qualification
+            cur = self._conn.execute(
+                "UPDATE stations SET raw_metadata=?, last_stored_at=? "
+                "WHERE identity_key=?",
+                (_dumps(meta), utc_now_iso(), identity_key))
+            return cur.rowcount > 0
 
     # -- submission assets + link accessibility (Phase 8) ----------------------
     # track_id ('sha256:<hex>') is the only asset identifier at this

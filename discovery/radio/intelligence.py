@@ -125,11 +125,13 @@ _SUBMISSION_LOCALPARTS = {"music", "submissions", "submit", "md",
 # href. First rule to match wins (more specific categories come first).
 _USEFUL_CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("send_music", re.compile(
-        r"send[\s\-_]?us[\s\-_]?(your)?[\s\-_]?music|"
+        r"send[\s\-_]?us[\s\-_]?(some|your|a)?[\s\-_]?(music|song|songs|"
+        r"track|tracks|audio)|"
         r"send[\s\-_]?(your|us)[\s\-_]?music|"
         r"submit[\s\-_]?(your)?[\s\-_]?music|"
-        r"music[\s\-_]?submissions?|give[\s\-_]?us[\s\-_]?(your)?[\s\-_]?music|"
-        r"promo" , re.I)),
+        r"music[\s\-_]?submissions?|give[\s\-_]?us[\s\-_]?(your)?"
+        r"[\s\-_]?music|"
+        r"promo", re.I)),
     ("submission_guidelines", re.compile(
         r"submission[\s\-_]?guidelines|how[\s\-_]?to[\s\-_]?submit|"
         r"(guidelines|requirements)\b", re.I)),
@@ -185,6 +187,117 @@ def _unknown_page_reachable(url: str, fetch_records) -> tuple[bool | None, int |
         except AttributeError:
             pass
     return None, None
+
+
+def _absorb_page_contacts(
+    record: RadioIntelligenceRecord,
+    pages: list[ParsedPage],
+    contacts_by_email: dict[str, EnrichedContact],
+    contacts_by_person_role: dict[tuple[str, str], EnrichedContact],
+    ordered: list[EnrichedContact],
+) -> None:
+    """Merge person contacts extracted from *pages* into in-memory indexes.
+
+    Shared by :func:`build_intelligence_record` (initial build) and
+    :func:`merge_contacts_from_pages` (post-verify contact merge) so both
+    apply the exact same qualification and dedupe rules. Idempotent:
+    re-merging the same raw contacts never duplicates an entry — provenance is
+    unioned and missing fields are backfilled instead.
+    """
+    for page in pages:
+        for raw in build_contacts_from_page(page):
+            if not _is_qualified_contact(raw):
+                continue
+            email = raw.get("email")
+            name = (raw.get("name") or "").strip()
+            match = contacts_by_email.get(email) if email else None
+            # Deduplicate the same person+role discovered on multiple
+            # pages (e.g. the same staffer listed on several pages), even
+            # when they have no email.  Prevents duplicate contacts and
+            # merges useful provenance from each source.
+            if match is None and name:
+                match = contacts_by_person_role.get((name.lower(),
+                                                     str(raw.get("role")
+                                                         or "unknown")))
+            if match is None:
+                fresh = EnrichedContact(
+                    station_id=record.station_id,
+                    name=raw.get("name"),
+                    role=str(raw.get("role") or "unknown"),
+                    email=email,
+                    phone=raw.get("phone"),
+                    source_url=raw.get("source_url") or page.url,
+                    provenance=list(raw.get("provenance") or []),
+                )
+                ordered.append(fresh)
+                if email:
+                    contacts_by_email[email] = fresh
+                if fresh.name:
+                    contacts_by_person_role[(fresh.name.strip().lower(),
+                                             fresh.role)] = fresh
+            else:
+                for prov in raw.get("provenance") or []:
+                    if prov not in match.provenance:
+                        match.provenance.append(prov)
+                if match.name is None and raw.get("name"):
+                    match.name = raw["name"]
+                if match.phone is None and raw.get("phone"):
+                    match.phone = raw["phone"]
+                if raw.get("email") and not match.email:
+                    match.email = raw["email"]
+                    contacts_by_email[match.email] = match
+
+
+def merge_contacts_from_pages(
+    record: RadioIntelligenceRecord,
+    pages: list[ParsedPage],
+) -> RadioIntelligenceRecord:
+    """Merge person contacts discovered on *pages* into an existing record.
+
+    Post-verify merge: pages confirmed reachable through the enrichment
+    engine's bounded verification pass (e.g. DJ directories, contact pages,
+    programming pages) are parsed for named people and their roles/emails.
+    The same qualification and dedupe rules as ``build_intelligence_record``
+    are applied, so a merge is indistinguishable from an initial build.
+    Re-running with the same pages is idempotent — no duplicate contacts are
+    created. Returns the same (mutated) record.
+    """
+    if not pages:
+        return record
+    contacts_by_email: dict[str, EnrichedContact] = {}
+    contacts_by_person_role: dict[tuple[str, str], EnrichedContact] = {}
+    for contact in record.contacts:
+        if contact.email:
+            contacts_by_email[contact.email] = contact
+        if contact.name:
+            contacts_by_person_role[(contact.name.strip().lower(),
+                                     contact.role)] = contact
+    _absorb_page_contacts(
+        record, pages, contacts_by_email, contacts_by_person_role,
+        record.contacts)
+
+    site_domains = {record.domain} if record.domain else set()
+    for contact in record.contacts:
+        score, reasons = score_contact(contact.to_dict(), site_domains)
+        contact.confidence_score = score
+        contact.confidence_reasons = reasons
+    record.contacts.sort(key=lambda c: (
+        _CONTACT_RELEVANCE.get(c.role, _RELEVANCE_DEFAULT),
+        -c.confidence_score,
+    ))
+    return record
+
+
+def rebuild_contact_channels(record: RadioIntelligenceRecord) -> dict:
+    """Recompute the evidence-backed contact-channels bundle.
+
+    Called after a post-verify contact merge so the persisted/API
+    ``raw_metadata["contact_channels"]`` reflects the newly surfaced director
+    identities and emails. Returns the recomputed bundle.
+    """
+    channels = _contact_channels(record)
+    record.raw_metadata["contact_channels"] = channels
+    return channels
 
 
 def build_intelligence_record(
@@ -307,48 +420,8 @@ def build_intelligence_record(
         if contact.name:
             contacts_by_person_role[(contact.name.strip().lower(),
                                      contact.role)] = contact
-    for page in pages:
-        for raw in build_contacts_from_page(page):
-            if not _is_qualified_contact(raw):
-                continue
-            email = raw.get("email")
-            name = (raw.get("name") or "").strip()
-            match = contacts_by_email.get(email) if email else None
-            # Deduplicate the same person+role discovered on multiple
-            # pages (e.g. the same staffer listed on several pages), even
-            # when they have no email.  Prevents duplicate contacts and
-            # merges useful provenance from each source.
-            if match is None and name:
-                match = contacts_by_person_role.get((name.lower(),
-                                                     str(raw.get("role")
-                                                         or "unknown")))
-            if match is None:
-                fresh = EnrichedContact(
-                    station_id=record.station_id,
-                    name=raw.get("name"),
-                    role=str(raw.get("role") or "unknown"),
-                    email=email,
-                    phone=raw.get("phone"),
-                    source_url=raw.get("source_url") or page.url,
-                    provenance=list(raw.get("provenance") or []),
-                )
-                ordered.append(fresh)
-                if email:
-                    contacts_by_email[email] = fresh
-                if fresh.name:
-                    contacts_by_person_role[(fresh.name.strip().lower(),
-                                             fresh.role)] = fresh
-            else:
-                for prov in raw.get("provenance") or []:
-                    if prov not in match.provenance:
-                        match.provenance.append(prov)
-                if match.name is None and raw.get("name"):
-                    match.name = raw["name"]
-                if match.phone is None and raw.get("phone"):
-                    match.phone = raw["phone"]
-                if raw.get("email") and not match.email:
-                    match.email = raw["email"]
-                    contacts_by_email[match.email] = match
+    _absorb_page_contacts(record, pages, contacts_by_email,
+                          contacts_by_person_role, ordered)
 
     for contact in ordered:
         score, reasons = score_contact(contact.to_dict(), site_domains)
@@ -386,6 +459,14 @@ def build_intelligence_record(
         "enrichment_mode": "pages" if pages else "offline_facts_only",
     }
 
+    # Carry the Phase 2 qualification verdict forward so enrichment output
+    # (and the outreach-readiness projection) stays rooted in the same
+    # evidence that admitted the station. Never invented here, never dropped.
+    _carried_qualification = (station.get("raw_metadata") or {}).get("qualification")
+    if isinstance(_carried_qualification, dict) \
+            and _carried_qualification.get("verdict"):
+        record.raw_metadata["qualification"] = dict(_carried_qualification)
+
     # --- station-level useful pages (evidence-backed discovered links) --------
     # Built before submission intelligence so Phase 2 route recognition can
     # promote a discovered send-music page into the submission record.
@@ -404,6 +485,19 @@ def build_intelligence_record(
     record.raw_metadata["useful_pages"] = [
         p.to_dict() for p in record.useful_pages
     ]
+
+    # --- station-level contact page -----------------------------------------
+    # Prefer the Phase 2 contact-page Fact; otherwise surface an evidence-
+    # backed discovered /contact/ page. Never fabricates a URL.
+    record.contact_url = _contact_url_fact(station, record)
+
+    # --- contact channels bundle --------------------------------------------
+    # Everything the station's own site exposes about who to reach: music
+    # submission URL/email, named music/program directors (identity only ever
+    # comes from extracted person-name+role evidence), a general contact
+    # email, and the contact page. Generic contact forms are never turned
+    # into an email, and no value is ever synthesized.
+    record.raw_metadata["contact_channels"] = _contact_channels(record)
 
     # --- location provenance --------------------------------------------------
     # Preserve evidence recorded at discovery time (seed carry-through). For a
@@ -551,8 +645,11 @@ def _build_submission_path(
     path.confidence_score = min(round(score, 2), 0.95)
     path.confidence_reasons = reasons
 
-    if path.submission_url is None and not submission_email \
-            and path.instructions is None and not music_contacts:
+    # A station-published send-music / submission-guidelines page is a real
+    # submission route even when structured facts coexist: promote it into the
+    # submission URL whenever Phase 2 produced none. Only when no route AND no
+    # submission evidence of any kind exist does the path stay unset.
+    if path.submission_url is None:
         promoted = _promote_send_music_page(record)
         if promoted is not None:
             path.submission_url = promoted
@@ -560,9 +657,149 @@ def _build_submission_path(
                 path.confidence_score + 0.35, 2), 0.95)
             path.confidence_reasons.append(
                 "published send-music page identified")
-            return path
-        return None
+        elif not (submission_email or path.instructions or music_contacts):
+            return None
     return path
+
+
+def _contact_url_fact(
+    station: dict,
+    record: RadioIntelligenceRecord,
+) -> dict | None:
+    """Station contact-page URL as a Fact (Phase 2 markdown wins)."""
+    phase2 = station.get("contact_url")
+    if isinstance(phase2, dict) and (phase2.get("value") or ""):
+        return dict(phase2)
+    for page in record.useful_pages:
+        if page.category != "contact":
+            continue
+        if not isinstance(page.url, str) or not page.url:
+            continue
+        return {
+            "value": page.url,
+            "source_url": page.source_url or page.url,
+            "source_type": "official_website_page",
+            "method": "link",
+            "discovered_at": page.discovered_at or "",
+            "also_seen_at": [],
+        }
+    return None
+
+
+def _general_mailbox_localparts() -> set[str]:
+    return {
+        "info", "contact", "office", "general", "hello", "station", "mail",
+        "management", "frontdesk", "reception", "main",
+    }
+
+
+def _pick_general_email(record: RadioIntelligenceRecord) -> str | None:
+    """Best evidence-backed general contact email for the station.
+
+    Priority: a contact/director with an explicit ``general`` role → an own-
+    domain generic mailbox (info@, contact@, …) → the first own-domain email
+    that is not already the music-submission address → the first own-domain
+    email recorded. A form-rendered address (no real mailto/email text) is
+    never synthesized.
+    """
+    try:
+        domain = urlsplit((record.website or "")).hostname.lower()
+    except (ValueError, AttributeError):
+        domain = None
+
+    def own_host(host: str | None) -> bool:
+        if host is None or domain is None:
+            return False
+        return host == domain or host.endswith("." + domain)
+
+    submission_email = None
+    if record.submission and record.submission.submission_email:
+        submission_email = record.submission.submission_email.lower()
+
+    emails: list[dict] = []
+    for fact in record.emails:
+        value = (fact.get("value") or "").strip()
+        if not value:
+            continue
+        try:
+            host = value.rsplit("@", 1)[1].lower()
+        except (IndexError, AttributeError):
+            continue
+        if own_host(host):
+            emails.append(fact)
+
+    for contact in record.contacts:
+        if contact.role == "general" and contact.email:
+            return contact.email
+
+    generic = _general_mailbox_localparts()
+    for fact in emails:
+        local = fact["value"].rsplit("@", 1)[0].lower()
+        if local in generic:
+            return fact["value"]
+
+    for fact in emails:
+        if fact["value"].lower() != submission_email:
+            return fact["value"]
+
+    return emails[0]["value"] if emails else None
+
+
+def _contact_channels(record: RadioIntelligenceRecord) -> dict:
+    """Evidence-backed contact-channel summary (computed, never fabricated)."""
+    channels: dict = {
+        "music_submission_url": None,
+        "music_submission_email": None,
+        "music_director_name": None,
+        "music_director_email": None,
+        "program_director_name": None,
+        "program_director_email": None,
+        "general_contact_email": None,
+        "contact_url": None,
+    }
+
+    if record.submission:
+        if record.submission.submission_url \
+                and (record.submission.submission_url.get("value") or ""):
+            channels["music_submission_url"] = record.submission.submission_url
+        channels["music_submission_email"] = \
+            record.submission.submission_email
+
+    for contact in record.contacts:
+        if contact.role == "music_director":
+            if channels["music_director_name"] is None:
+                channels["music_director_name"] = \
+                    {"value": contact.name,
+                     "source_url": contact.source_url} if contact.name \
+                    else None
+            if channels["music_director_email"] is None and contact.email:
+                channels["music_director_email"] = {
+                    "value": contact.email,
+                    "source_url": contact.source_url,
+                }
+            continue
+        if contact.role == "program_director":
+            if channels["program_director_name"] is None:
+                channels["program_director_name"] = \
+                    {"value": contact.name,
+                     "source_url": contact.source_url} if contact.name \
+                    else None
+            if channels["program_director_email"] is None and contact.email:
+                channels["program_director_email"] = {
+                    "value": contact.email,
+                    "source_url": contact.source_url,
+                }
+
+    general = _pick_general_email(record)
+    if general:
+        channels["general_contact_email"] = general
+
+    if record.contact_url and (record.contact_url.get("value") or ""):
+        channels["contact_url"] = record.contact_url
+
+    # A listener Q&A / feedback page is never a music-submission channel; a
+    # generic contact form is never an email. Those cases already stay None.
+    return channels
 
 
 def _promote_send_music_page(

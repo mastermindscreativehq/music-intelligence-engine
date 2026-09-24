@@ -33,8 +33,13 @@ class IntelligenceRepository(Protocol):
                       format_filter: str | None = ...,
                       country: str | None = ...,
                       min_confidence: float | None = ...,
-                      ) -> tuple[list[dict], int]:
-        """Filtered listing; returns (rows, total)."""
+                      exclude_quarantined: bool = ...,
+                      ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
+                            | tuple[list[dict], int, int, int]:
+        """Filtered listing; returns (rows, total[, dev_excluded]).
+        When ``exclude_quarantined`` is set, stations whose post-fetch hard
+        gate verdict is ``needs_review``/``rejected`` are hidden (kept for
+        review, disabled from outreach)."""
         ...
 
     def get_station(self, identity_key: str) -> dict | None: ...
@@ -172,6 +177,17 @@ class IntelligenceRepository(Protocol):
 
     def get_dj(self, dj_id: str) -> dict | None:
         """One DJ row (JSON columns decoded) or None."""
+        ...
+
+    def update_station_qualification(self, identity_key: str,
+                                     qualification: dict | None) -> bool:
+        """Persist (or clear) one station's post-fetch qualification verdict.
+
+        Writes ``raw_metadata.qualification`` (keeping every other stored
+        fact) and touches ``last_stored_at``; ``None`` removes the key
+        (cleanup reversal). Rows are flagged — never deleted. Returns True
+        when the row existed.
+        """
         ...
 
     def get_dj_channels(self, dj_id: str) -> list[dict]:
