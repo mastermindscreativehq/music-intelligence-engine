@@ -252,12 +252,13 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                 min_confidence=min_confidence, exclude_dev=True,
                 exclude_quarantined=True)
         else:
-            rows, total, dev_excluded = storage.list_stations(
+            # A status filter refines the SAME normal listing and must never
+            # re-admit dev fixtures or quarantined rows.
+            rows, total, dev_excluded, quarantined_excluded = storage.list_stations(
                 limit=limit, offset=offset, q=q, status=status, genre=genre,
                 format_filter=format, country=country,
                 min_confidence=min_confidence, exclude_dev=True,
-                exclude_quarantined=False)
-            quarantined_excluded = 0
+                exclude_quarantined=True)
         return success_body({
             "stations": [station_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,

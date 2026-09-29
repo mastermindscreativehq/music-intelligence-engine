@@ -345,14 +345,17 @@ def _handle(service, method: str, match: re.Match, params: dict,
                     min_confidence=_min_confidence(params),
                     exclude_dev=True, exclude_quarantined=True)
         else:
-            rows, total, dev_excluded = service.list_stations(
-                limit=limit, offset=offset, q=_first(params, "q"),
-                status=status, genre=_first(params, "genre"),
-                format_filter=_first(params, "format"),
-                country=_first(params, "country"),
-                min_confidence=_min_confidence(params),
-                exclude_dev=True, exclude_quarantined=False)
-            quarantined_excluded = 0
+            # A status filter is a refinement of the SAME normal listing; it
+            # must never re-admit dev fixtures or quarantined (rejected /
+            # needs_review) rows that the unfiltered listing hides.
+            rows, total, dev_excluded, quarantined_excluded = \
+                service.list_stations(
+                    limit=limit, offset=offset, q=_first(params, "q"),
+                    status=status, genre=_first(params, "genre"),
+                    format_filter=_first(params, "format"),
+                    country=_first(params, "country"),
+                    min_confidence=_min_confidence(params),
+                    exclude_dev=True, exclude_quarantined=True)
         return 200, success_body({
             "stations": [station_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,

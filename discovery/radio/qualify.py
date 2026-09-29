@@ -19,15 +19,22 @@ station tables:
    evidence qualifies — a page is never promoted from search metadata alone.
    Verdicts:
 
-   - ``qualified``    — decisive on-site station evidence (callsign,
-                        frequency/band, broadcast self-reference, on-air /
-                        listen-live / programming language, station type).
+   - ``qualified``    — decisive self-identification on the site's own entry
+                         point (callsign or frequency TOGETHER WITH a
+                         self-reference such as "our frequency", "we
+                         broadcast", "broadcasting from …", "listen live").
    - ``rejected``     — the host is a hard-denied destination (government,
-                        news organization, encyclopedia, Q&A site, directory,
-                        social/streaming platform) — nothing on it can ever
-                        be an official station site.
+                         news organization, encyclopedia, Q&A site, directory,
+                         social/streaming platform), or the page is a
+                         per-item/article path — nothing on it can ever be an
+                         official station site.
    - ``needs_review`` — the site was reachable but carries no verifiable
-                        station evidence; it is quarantined, never promoted.
+                         self-identification; it is quarantined, never
+                         promoted. A page that only REFERENCES a station
+                         (``mentions_station``) lands here too.
+
+   A station record must represent an actual station, not an article or page
+   that happens to mention one.
 
 Both gates are deterministic and generic (no per-station hardcoding).
 """
@@ -82,6 +89,32 @@ _REJECT_PATH_RE = re.compile(
     r"review|reviews|top-?\d+"
     r")(?:/|$)",
     re.I,
+)
+
+# --- article / per-item page segments (compound + locale tolerant) ----------
+#
+# A station's OFFICIAL site lives on its entry point (the site root, or a
+# shallow station route). It does not live under ``/news/``,
+# ``/news-events/``, ``/en-int/about/news-info/`` or ``/blog/``. Matching any
+# path SEGMENT — not just the first — is what catches compound and
+# locale-prefixed forms that the anchored ``_REJECT_PATH_RE`` misses, e.g.
+# ``/twin-cities.umn.edu/news-events/real-college-radio-...``,
+# ``/rode.com/en-int/about/news-info/they-killed-local-radio-...`` and
+# ``/frontiersin.org/journals/communication/articles/10.3389/.../full``.
+_ARTICLE_SEGMENT_EXACT = frozenset({
+    "news", "newsroom", "news-update", "news-updates", "newsupdate",
+    "newsletter", "newsletters",
+    "article", "articles", "interview", "interviews", "editorial",
+    "blog", "blogs", "post", "posts", "story", "stories",
+    "press", "press-releases", "press-release", "pressroom", "media-center",
+    "feature", "features", "opinion", "opinions",
+    "review", "reviews", "podcast", "podcasts", "episode", "episodes",
+    "magazine", "publication", "publications",
+})
+# Compound roots whose first token is itself an article root: ``news-events``,
+# ``news-info``, ``blog-post``, ``press-release`` … Normalised below.
+_ARTICLE_SEGMENT_PREFIXES = (
+    "news-", "news_", "press-", "press_", "blog-", "blog_",
 )
 
 # Title/snippet phrases that unambiguously describe a non-station page.
@@ -203,7 +236,7 @@ _SITE_BROADCAST_SELF_RE = re.compile(
     r"we broadcast(?:ing|s)?|we are on the air|we are (?:a|an) radio|"
     r"this station (?:broadcasts|plays|is)|"
     r"broadcasting (?:from|live|on|via|in)|broadcasting station|"
-    r"radio station(?:,| which)? (?:we|that)|on-air station|"
+    r"radio station(?:,| which)? (?:we|that we)|on-air station|"
     r"our (?:call letters|callsign|frequency|station|programming)"
     r")\b",
     re.I,
@@ -230,6 +263,29 @@ _SITE_SCHEDULE_RE = re.compile(
 _SITE_BRAND_RADIO_RE = re.compile(
     r"\b(?:[A-Za-z0-9&.'\- ]{2,40}\s)?"
     r"(?:radio|fm|am|station)\b(?![^\n]{0,20}\b(?:jobs|courses|history)\b)",
+    re.I,
+)
+
+# --- station SELF-identification -------------------------------------------
+#
+# A callsign or a frequency only identifies a station when the site presents
+# it as its OWN. Inside article prose ("KCPR 91.7 FM broadcasts from ...")
+# the same words are a REFERENCE to some other station, so decisive evidence
+# is only accepted together with a self-reference from this site. Quoted or
+# third-party prose is deliberately not covered by any of these patterns.
+_SITE_SELF_REFERENCE_RE = re.compile(
+    r"\b("
+    r"our (?:call letters|callsign|frequency|station|programming|schedule"
+    r"|lineup|studios?|signal|transmitter)|"
+    r"we broadcast(?:ing|s)?|we are (?:on the air|an? (?:radio|station)"
+    r"|listening)|"
+    r"broadcasting (?:from|live|on|via|in)|broadcasting station|"
+    r"this (?:radio )?station (?:broadcasts|plays|is|transmits)|"
+    r"radio station(?:,| which)? (?:we|that we)|on-air station|"
+    r"listen (?:live|now|online)|tune in|now on air|on the air now|"
+    r"currently on air|we are live|live stream(?:ing)?|now playing|"
+    r"currently playing|press play|the player below"
+    r")\b",
     re.I,
 )
 # Decisive text that a reachable page is an information page, not a station
@@ -276,6 +332,40 @@ def _platform_host(host: str) -> str | None:
     return None
 
 
+def _norm_segment(segment: str) -> str:
+    """One path segment reduced to a comparable form (lowercase, ``_``→``-``,
+    surrounding noise stripped) so ``news_events`` == ``news-events``."""
+    return segment.strip().strip(".,;:*").lower().replace("_", "-")
+
+
+def article_path_segment(url: str) -> str | None:
+    """The first per-item/article path segment in *url*, or ``None``.
+
+    An article is never a station's official entry point, so this is the
+    page-type precedence check applied BEFORE any station-evidence scan.
+    """
+    for raw_segment in _path(url).split("/"):
+        segment = _norm_segment(raw_segment)
+        if not segment:
+            continue
+        if segment in _ARTICLE_SEGMENT_EXACT:
+            return segment
+        if segment.startswith(_ARTICLE_SEGMENT_PREFIXES):
+            return segment
+    return None
+
+
+def _is_per_item_path(url: str) -> tuple[bool, str]:
+    """``(is_per_item, reason)`` for an obviously non-entry-point URL."""
+    if _REJECT_PATH_RE.match(_path(url)):
+        return True, f"path {_path(url)!r} is a per-item/non-station page"
+    segment = article_path_segment(url)
+    if segment is not None:
+        return True, (f"path {_path(url)!r} is an article/per-item page "
+                      f"(segment {segment!r}), not a station entry point")
+    return False, ""
+
+
 def classify_station_candidate(
     *, url: str, title: str = "", snippet: str = "",
 ) -> CandidateVerdict:
@@ -288,10 +378,9 @@ def classify_station_candidate(
             f"host {host!r} is a {platform} page, not a station site",
             [f"host={host}"])
 
-    if _REJECT_PATH_RE.match(_path(url)):
+    if _is_per_item_path(url)[0]:
         return CandidateVerdict(
-            REJECTED, "non_station_path",
-            f"path {_path(url)!r} is a per-item/non-station page",
+            REJECTED, "non_station_path", _is_per_item_path(url)[1],
             [f"path={_path(url)}"])
 
     text = " ".join(f"{title or ''} {snippet or ''}".split())
@@ -333,6 +422,7 @@ def classify_station_site(
     homepage_title: str = "",
     texts: tuple[str, ...] = (),
     snippet: str = "",
+    secondary_texts: tuple[str, ...] = (),
 ) -> SiteVerdict:
     """The HARD gate: decide whether a fetched site is an actual station.
 
@@ -341,11 +431,28 @@ def classify_station_site(
     snippet). A site qualifies ONLY on verifiable on-site station evidence —
     never on a search snippet's mention of "radio".
 
+    Two rules keep a page that merely TALKS ABOUT a station from becoming a
+    station record:
+
+    1. **Page-type precedence.** A per-item/article path (any segment: bare,
+       compound such as ``news-events``/``news-info``, or locale-prefixed
+       such as ``/en-int/about/news-info/``) is never a station's own entry
+       point, so it is rejected before any evidence is examined.
+    2. **Self-identification on the entry point.** Only *texts* (the site's
+       own homepage/primary entry page) may promote a verdict to
+       ``qualified``, and decisive evidence (a callsign or a frequency) is
+       only accepted together with a self-reference from this site.
+       ``secondary_texts`` (linked sub-pages) are still scanned for deny /
+       information signals and are reported in the evidence, but they can
+       never promote a page to ``qualified``.
+
     - denied host (government / news / encyclopedia / Q&A / directory /
       platform) -> REJECTED, no further text is examined.
-    - otherwise QUALIFIED when decisive evidence is present.
-    - a reachable site with no station evidence -> NEEDS_REVIEW (quarantined,
-      never promoted).
+    - otherwise QUALIFIED when decisive self-identification is present.
+    - a reachable site that only references stations -> NEEDS_REVIEW
+      (``mentions_station``), quarantined, never promoted.
+    - a reachable site with no station evidence -> NEEDS_REVIEW
+      (``no_station_evidence``), quarantined, never promoted.
     """
     evaluated_at = utc_now_iso()
     host = _host(website_url)
@@ -362,10 +469,24 @@ def classify_station_site(
             "not a station",
             [f"host={host}"], evaluated_at)
 
-    text = " ".join(
-        part for part in (homepage_title, *texts, snippet) if part)
-    text = " ".join(text.split())
-    if not text:
+    # (1) page-type precedence: an article is never the station's own site.
+    per_item, per_item_reason = _is_per_item_path(website_url)
+    if per_item:
+        return SiteVerdict(
+            REJECTED, "non_station_path", per_item_reason,
+            [f"path={_path(website_url)}"], evaluated_at)
+
+    # Entry-point text: what THIS site says about ITSELF. Secondary text
+    # (linked sub-pages) is deliberately excluded from promotion.
+    entry_parts = [part for part in (homepage_title, *texts) if part]
+    entry_text = " ".join(" ".join(entry_parts).split())
+
+    # Deny/information rules still see everything the site publishes.
+    everything = " ".join(
+        part for part in (homepage_title, *texts, *secondary_texts, snippet)
+        if part)
+    everything = " ".join(everything.split())
+    if not everything:
         return SiteVerdict(
             NEEDS_REVIEW, "no_station_evidence",
             "site reachable but no text evidence to verify it as a station",
@@ -380,52 +501,108 @@ def classify_station_site(
         ("listen_air", _SITE_LISTEN_AIR_RE),
         ("schedule", _SITE_SCHEDULE_RE),
     ):
-        if pattern.search(text):
+        if pattern.search(entry_text):
             evidence.append(name)
+    # Sub-page evidence is recorded for review but cannot promote.
+    secondary_evidence: list[str] = []
+    for name, pattern in (
+        ("callsign", _SITE_CALLSIGN_RE),
+        ("frequency", _SITE_FREQ_RE),
+        ("station_type", _SITE_STATION_TYPE_RE),
+        ("broadcast_self", _SITE_BROADCAST_SELF_RE),
+        ("listen_air", _SITE_LISTEN_AIR_RE),
+        ("schedule", _SITE_SCHEDULE_RE),
+    ):
+        if pattern.search(" ".join(secondary_texts)):
+            secondary_evidence.append(f"subpage:{name}")
+
+    self_reference = bool(_SITE_SELF_REFERENCE_RE.search(entry_text))
+    if self_reference:
+        evidence.append("self_reference")
+
+    # A station's own entry point usually BRANDS its identity: its callsign
+    # or frequency appears in the page title. This is recorded as supporting
+    # evidence only. It is deliberately NOT required for promotion, because
+    # the primary page is frequently an interior page ("Music Submissions -
+    # Radio Laurier", "How to Submit Music") whose title carries no callsign;
+    # requiring it would demote real stations. The first-person requirement
+    # below is the load-bearing gate.
+    title_text = " ".join((homepage_title or "").split())
+    branded_decisive = any(
+        pattern.search(title_text)
+        for pattern in (_SITE_CALLSIGN_RE, _SITE_FREQ_RE))
+    if branded_decisive:
+        evidence.append("branded_identity")
 
     decisive = {"callsign", "frequency"}
     support = {"station_type", "broadcast_self", "listen_air", "schedule"}
     strong = [e for e in evidence if e in decisive]
     supporting = [e for e in evidence if e in support]
 
+    if _SITE_INFO_RE.search(everything):
+        verdict = CandidateVerdict(
+            REJECTED, "non_station_info",
+            "page text reads as information, not a station",
+            [f"match={_SITE_INFO_RE.search(everything).group(0)}"])
+        return _as_site_verdict(verdict, evaluated_at, secondary_evidence)
+
+    # (2) Self-identification required, on the site's OWN entry point. The
+    # page must speak about ITSELF in the first person as an on-air service.
+    # Third-person station mentions ("KCPR broadcasts from the University of
+    # Minnesota", "Radio K is a low-power station") are REFERENCES -- article
+    # prose, a directory listing, a news report -- and are quarantined rather
+    # than promoted. This, not the title, is what separates a station's own
+    # homepage from a page that merely talks about stations.
+    if not self_reference:
+        if strong or supporting or _SITE_BRAND_RADIO_RE.search(entry_text):
+            referenced = strong + supporting
+            if referenced:
+                why = ("page references a radio station ("
+                       + ", ".join(referenced)
+                       + ") but the site never identifies itself as one")
+            else:
+                why = ("page talks about radio but the site never identifies "
+                       "itself as a station")
+            return SiteVerdict(
+                NEEDS_REVIEW, "mentions_station", why,
+                evidence + secondary_evidence, evaluated_at)
+        return SiteVerdict(
+            NEEDS_REVIEW, "no_station_evidence",
+            "site reachable but no verifiable station evidence found",
+            evidence + secondary_evidence, evaluated_at)
+
     if strong:
         verdict = CandidateVerdict(
             QUALIFIED, "station_signals",
             "station signals present on site: " + ", ".join(evidence),
             evidence)
-        return _as_site_verdict(verdict, evaluated_at)
+        return _as_site_verdict(verdict, evaluated_at, secondary_evidence)
 
     if len(supporting) >= 2:
         verdict = CandidateVerdict(
             QUALIFIED, "broadcast_signals",
             "broadcast language present on site: " + ", ".join(supporting),
             evidence)
-        return _as_site_verdict(verdict, evaluated_at)
+        return _as_site_verdict(verdict, evaluated_at, secondary_evidence)
 
     # A branded name ("KQXR Radio", "The Wire FM") plus any single on-air /
     # programming signal is verifiable self-identification.
-    if _SITE_BRAND_RADIO_RE.search(text) and supporting:
+    if _SITE_BRAND_RADIO_RE.search(entry_text) and supporting:
         verdict = CandidateVerdict(
             QUALIFIED, "branded_station",
             "station-branded site with on-site broadcast signal: "
             + ", ".join(supporting),
             ["brand_radio", *supporting])
-        return _as_site_verdict(verdict, evaluated_at)
-
-    if _SITE_INFO_RE.search(text):
-        verdict = CandidateVerdict(
-            REJECTED, "non_station_info",
-            "page text reads as information, not a station",
-            [f"match={_SITE_INFO_RE.search(text).group(0)}"])
-        return _as_site_verdict(verdict, evaluated_at)
+        return _as_site_verdict(verdict, evaluated_at, secondary_evidence)
 
     return SiteVerdict(
         NEEDS_REVIEW, "no_station_evidence",
         "site reachable but no verifiable station evidence found",
-        evidence, evaluated_at)
+        evidence + secondary_evidence, evaluated_at)
 
 
-def _as_site_verdict(verdict: CandidateVerdict, evaluated_at: str) -> SiteVerdict:
+def _as_site_verdict(verdict: CandidateVerdict, evaluated_at: str,
+                     secondary: list[str] | None = None) -> SiteVerdict:
     return SiteVerdict(
         verdict.verdict, verdict.kind, verdict.reason,
-        list(verdict.evidence), evaluated_at)
+        list(verdict.evidence) + list(secondary or []), evaluated_at)

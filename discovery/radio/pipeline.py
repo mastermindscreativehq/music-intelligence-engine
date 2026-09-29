@@ -470,12 +470,17 @@ class RadioDiscoveryEngine:
         )
 
         # --- final hard gate ------------------------------------------------
-        # Verdict across ALL collected site text (pages + title + snippet).
+        # Verdict from ALL collected site text (pages + title + snippet), but
+        # only the site's OWN entry point (pages[0], the homepage) may promote
+        # a verdict to qualified: linked sub-pages are passed as
+        # ``secondary_texts`` so a station mentioned only in an article can
+        # never create a station record.
         final = classify_station_site(
             website_url=homepage_url,
             homepage_title=homepage_title,
-            texts=tuple(p.text or "" for p in pages),
+            texts=(pages[0].text or "",),
             snippet=" ".join(snippets),
+            secondary_texts=tuple(p.text or "" for p in pages[1:]),
         )
         record.raw_metadata["qualification"] = final.to_dict()
 
