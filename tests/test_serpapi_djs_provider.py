@@ -198,10 +198,17 @@ class SerpApiSearchDjsProviderTests(unittest.TestCase):
         self.assertEqual(provider.search(_request(), ["DJ"]), [])
 
     def test_serpapi_error_body_treated_as_failure_not_fabrication(self):
+        # SerpAPI answers HTTP 200 with a JSON error body (e.g. a quota or
+        # key error): no candidate may be fabricated AND the query must be
+        # recorded as an honest Failure so the run's partial-failure behavior
+        # surfaces it.
         provider, _ = self._provider(pages={
             "https://serpapi.com/search?engine=google&q=DJ&api_key=K-TOKEN":
             _FetchResult(body=json.dumps({"error": "Key is missing"}))})
         self.assertEqual(provider.search(_request(), ["DJ"]), [])
+        self.assertEqual(len(provider.failures), 1)
+        self.assertIn("provider_error", provider.failures[0].error_kind)
+        self.assertIn("Key is missing", provider.failures[0].message)
 
     # -- the API key must never leak ------------------------------------------
 

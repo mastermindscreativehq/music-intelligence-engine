@@ -219,8 +219,18 @@ class SerpApiSearchDjsProvider:
             if not isinstance(payload, dict):
                 continue
             # SerpAPI reports provider errors as a JSON body, e.g.
-            # ``{"error": "..."}`` — treat as a failed query, never fabricate.
+            # ``{"error": "..."}`` (often HTTP 200 with an error payload) —
+            # record an honest Failure with the provider's own message and
+            # continue with the remaining queries (partial-failure behavior),
+            # never fabricate a result for a failed query.
             if payload.get("error"):
+                failure = self._query_failure(
+                    query, "provider_error",
+                    _clean(str(payload["error"])) or "serpapi returned an error")
+                logger.warning(
+                    "serpapi_google error payload: %s; continuing with "
+                    "remaining queries.", failure.message)
+                self.failures.append(failure)
                 continue
             entries = payload.get("organic_results")
             if not isinstance(entries, list):

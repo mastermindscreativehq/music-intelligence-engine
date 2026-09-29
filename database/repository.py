@@ -67,6 +67,14 @@ class IntelligenceRepository(Protocol):
         """
         ...
 
+    def clone(self):
+        """A new independent storage bound to the same database.
+
+        The background discovery worker runs on its own connection so an
+        in-flight job never blocks polling status reads.
+        """
+        ...
+
     def get_discovery_job(self, run_id: str) -> dict | None:
         """One stored automation discovery job run (or None)."""
         ...
