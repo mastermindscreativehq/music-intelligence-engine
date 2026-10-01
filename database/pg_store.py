@@ -91,6 +91,21 @@ _STATION_QUARANTINED_SQL = (
     "COALESCE(raw_metadata::jsonb->'qualification'->>'verdict', '') "
     "IN ('needs_review', 'rejected')")
 
+# Operator-audited exclusion, stored under ``raw_metadata.exclusion`` (see
+# ``PostgresStorage.set_station_exclusion``). Mirror of
+# database.service._STATION_EXCLUDED_SQL — a SEPARATE marker from
+# ``qualification``, so requalification can neither overwrite nor undo it.
+# Only the boolean ``active`` field is read here; the reason and audit-source
+# fields are provenance only.
+_STATION_EXCLUDED_SQL = (
+    "COALESCE(raw_metadata::jsonb->'exclusion'->>'active', 'false') "
+    "IN ('true', '1')")
+
+# Hidden from the normal listing AND from outreach/opportunity selection:
+# the post-fetch gate could not confirm the station, OR an operator excluded it.
+_STATION_HIDDEN_SQL = (
+    "(" + _STATION_QUARANTINED_SQL + " OR " + _STATION_EXCLUDED_SQL + ")")
+
 _JSON = frozenset({
     "classification_evidence", "formats", "genres", "genre_evidence",
     "social_urls", "source_urls", "confidence_reasons", "raw_metadata",
@@ -598,7 +613,7 @@ class PostgresStorage:
         if exclude_dev:
             visible_clauses.append("(" + _DEV_FIXTURE_EXCLUSION_SQL + ")")
         if exclude_quarantined:
-            visible_clauses.append("NOT (" + _STATION_QUARANTINED_SQL + ")")
+            visible_clauses.append("NOT (" + _STATION_HIDDEN_SQL + ")")
         visible_where = (
             "WHERE " + " AND ".join(visible_clauses)
             if visible_clauses else "")
@@ -630,9 +645,9 @@ class PostgresStorage:
             quarantined_excluded = 0
             if exclude_quarantined:
                 q_where = (
-                    f"WHERE {base_where} AND {_STATION_QUARANTINED_SQL}"
+                    f"WHERE {base_where} AND {_STATION_HIDDEN_SQL}"
                     if base_where
-                    else f"WHERE {_STATION_QUARANTINED_SQL}")
+                    else f"WHERE {_STATION_HIDDEN_SQL}")
                 cur.execute(
                     f"SELECT COUNT(*) AS n FROM organizations {q_where}",
                     params)
@@ -1478,6 +1493,41 @@ class PostgresStorage:
                 meta.pop("qualification", None)
             else:
                 meta["qualification"] = qualification
+            cur.execute(
+                "UPDATE organizations SET raw_metadata=%s::jsonb, "
+                "last_stored_at=%s WHERE identity_key=%s",
+                (_dumps(meta), utc_now_iso(), identity_key))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_station_exclusion(self, identity_key: str,
+                              exclusion: dict | None) -> bool:
+        """Persist (or clear) one station's operator-audited exclusion.
+
+        Writes ``raw_metadata.exclusion`` (keeping every other stored fact,
+        including ``raw_metadata.qualification``) and touches
+        ``last_stored_at``; ``None`` removes the key (reversal). Rows are
+        flagged, never deleted, and no contact/submission/fetch/outreach row
+        is touched. Returns False for an unknown identity_key.
+
+        The marker is stored on its own rather than as a qualification
+        verdict so requalification can neither overwrite nor undo it.
+        """
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT raw_metadata FROM organizations "
+                "WHERE identity_key=%s",
+                (identity_key,))
+            row = cur.fetchone()
+            if row is None:
+                return False
+            meta = _j(row["raw_metadata"], {})
+            if exclusion is None:
+                meta.pop("exclusion", None)
+            else:
+                meta["exclusion"] = exclusion
             cur.execute(
                 "UPDATE organizations SET raw_metadata=%s::jsonb, "
                 "last_stored_at=%s WHERE identity_key=%s",

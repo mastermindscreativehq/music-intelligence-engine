@@ -157,6 +157,23 @@ _STATION_QUARANTINED_SQL = (
     "COALESCE(json_extract(raw_metadata, '$.qualification.verdict'), '') "
     "IN ('needs_review', 'rejected')")
 
+# Operator-audited exclusion, stored under ``raw_metadata.exclusion`` (see
+# ``PersistenceService.set_station_exclusion``). This is a SEPARATE marker
+# from ``qualification``: the qualification verdict is engine-owned evidence
+# that requalification rewrites on every run, whereas the exclusion is an
+# explicit operator decision that must survive a re-observation and stay
+# reversible. Only the boolean ``active`` field is read here; every other
+# field (reason, audit source, timestamps) is stored for provenance and is
+# never consulted to hide a row.
+_STATION_EXCLUDED_SQL = (
+    "COALESCE(json_extract(raw_metadata, '$.exclusion.active'), 0) = 1")
+
+# A station row stays in storage for review, but is hidden from the normal
+# listing AND from outreach/opportunity selection when the post-fetch gate
+# could not confirm it as a station, OR an operator has excluded it.
+_STATION_HIDDEN_SQL = (
+    "(" + _STATION_QUARANTINED_SQL + " OR " + _STATION_EXCLUDED_SQL + ")")
+
 
 # Fetch error kinds that indicate a TRANSIENT network-level failure rather
 # than verified content: dropped connection, TLS handshake failure, timeout,
@@ -566,6 +583,16 @@ class PersistenceService:
                     fresh.update(mergeable)
                 else:
                     fresh.update(value or {})
+                # ``exclusion`` is OPERATOR-OWNED, not engine-owned: only
+                # set_station_exclusion() writes it. Ingestion therefore
+                # carries the stored marker across verbatim and discards any
+                # incoming one, so a re-ingest or requalification can neither
+                # silently erase an audited exclusion nor forge a new one.
+                stored_exclusion = (previous or {}).get("exclusion")
+                if isinstance(previous, dict) and stored_exclusion is not None:
+                    fresh["exclusion"] = stored_exclusion
+                else:
+                    fresh.pop("exclusion", None)
                 merged[key] = fresh
             else:
                 # Ingest evidence is additive and NULL-only: an existing
@@ -801,7 +828,7 @@ class PersistenceService:
         if exclude_dev:
             visible_clauses.append("(" + _DEV_FIXTURE_EXCLUSION_SQL + ")")
         if exclude_quarantined:
-            visible_clauses.append("NOT (" + _STATION_QUARANTINED_SQL + ")")
+            visible_clauses.append("NOT (" + _STATION_HIDDEN_SQL + ")")
         visible_where = (
             "WHERE " + " AND ".join(visible_clauses)
             if visible_clauses else "")
@@ -829,8 +856,8 @@ class PersistenceService:
             quarantined_excluded = 0
             if exclude_quarantined:
                 q_where = (
-                    f"{where} AND {_STATION_QUARANTINED_SQL}"
-                    if where else f"WHERE {_STATION_QUARANTINED_SQL}")
+                    f"{where} AND {_STATION_HIDDEN_SQL}"
+                    if where else f"WHERE {_STATION_HIDDEN_SQL}")
                 quarantined_excluded = self._conn.execute(
                     f"SELECT COUNT(*) AS n FROM stations {q_where}",
                     params).fetchone()["n"]
@@ -1099,6 +1126,36 @@ class PersistenceService:
                 meta.pop("qualification", None)
             else:
                 meta["qualification"] = qualification
+            cur = self._conn.execute(
+                "UPDATE stations SET raw_metadata=?, last_stored_at=? "
+                "WHERE identity_key=?",
+                (_dumps(meta), utc_now_iso(), identity_key))
+            return cur.rowcount > 0
+
+    def set_station_exclusion(self, identity_key: str,
+                              exclusion: dict | None) -> bool:
+        """Persist (or clear) one station's operator-audited exclusion.
+
+        Writes ``raw_metadata.exclusion`` (keeping every other stored fact,
+        including ``raw_metadata.qualification``) and touches
+        ``last_stored_at``; ``None`` removes the key (reversal). Rows are
+        flagged, never deleted, and no contact/submission/fetch/outreach row
+        is touched. Returns False for an unknown identity_key.
+
+        The marker is stored on its own rather than as a qualification
+        verdict so requalification cannot silently overwrite or undo it.
+        """
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT raw_metadata FROM stations WHERE identity_key=?",
+                (identity_key,)).fetchone()
+            if row is None:
+                return False
+            meta = _loads(row["raw_metadata"], default={})
+            if exclusion is None:
+                meta.pop("exclusion", None)
+            else:
+                meta["exclusion"] = exclusion
             cur = self._conn.execute(
                 "UPDATE stations SET raw_metadata=?, last_stored_at=? "
                 "WHERE identity_key=?",

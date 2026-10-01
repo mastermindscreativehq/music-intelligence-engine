@@ -39,7 +39,8 @@ class IntelligenceRepository(Protocol):
         """Filtered listing; returns (rows, total[, dev_excluded]).
         When ``exclude_quarantined`` is set, stations whose post-fetch hard
         gate verdict is ``needs_review``/``rejected`` are hidden (kept for
-        review, disabled from outreach)."""
+        review, disabled from outreach), as are stations carrying an active
+        operator-audited ``raw_metadata.exclusion``. Nothing is ever deleted."""
         ...
 
     def get_station(self, identity_key: str) -> dict | None: ...
@@ -191,9 +192,23 @@ class IntelligenceRepository(Protocol):
                                      qualification: dict | None) -> bool:
         """Persist (or clear) one station's post-fetch qualification verdict.
 
-        Writes ``raw_metadata.qualification`` (keeping every other stored
+Writes ``raw_metadata.qualification`` (keeping every other stored
         fact) and touches ``last_stored_at``; ``None`` removes the key
         (cleanup reversal). Rows are flagged — never deleted. Returns True
+        when the row existed.
+        """
+        ...
+
+    def set_station_exclusion(self, identity_key: str,
+                              exclusion: dict | None) -> bool:
+        """Persist (or clear) one station's operator-audited exclusion.
+
+        Writes ``raw_metadata.exclusion`` (keeping every other stored fact,
+        including ``raw_metadata.qualification``) and touches
+        ``last_stored_at``; ``None`` removes the key (reversal). The marker
+        is stored separately from ``qualification`` so requalification can
+        neither overwrite nor undo it. Rows are flagged — never deleted, and
+        no contact/submission/fetch/outreach row is touched. Returns True
         when the row existed.
         """
         ...

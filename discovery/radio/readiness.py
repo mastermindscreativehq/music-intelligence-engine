@@ -21,6 +21,10 @@ evidence):
 - ``site_unreachable``: a live run fetched pages, and every fetch failed.
 - ``insufficient_station_evidence``: qualification did not confirm the site as
   a station (needs_review / missing verdict).
+- ``operator_excluded``: an operator has actively excluded the station via
+  ``raw_metadata.exclusion``. This is a separate, reversible marker (see
+  ``PersistenceService.set_station_exclusion``) that outranks every evidence
+  signal and is never cleared by requalification.
 - ``submission_route_unclear``: no usable music-submission route found.
 - ``contact_not_verified``: no contact evidence at all (no contact page, no
   general contact email, no music/programming director contact, no contact
@@ -43,6 +47,11 @@ REASON_SITE_UNREACHABLE = "site_unreachable"
 REASON_SUBMISSION_ROUTE_UNCLEAR = "submission_route_unclear"
 REASON_CONTACT_NOT_VERIFIED = "contact_not_verified"
 REASON_INSUFFICIENT_STATION_EVIDENCE = "insufficient_station_evidence"
+REASON_OPERATOR_EXCLUDED = "operator_excluded"
+
+# Operator-audited exclusion marker, stored under ``raw_metadata.exclusion``
+# (written by ``PersistenceService.set_station_exclusion``). It is kept
+# separate from ``qualification`` so requalification cannot overwrite it.
 
 # How each reason reads as a one-line human note.
 _REASON_LABELS = {
@@ -54,6 +63,8 @@ _REASON_LABELS = {
         "no verified contact pathway found",
     REASON_INSUFFICIENT_STATION_EVIDENCE:
         "station qualification not confirmed",
+    REASON_OPERATOR_EXCLUDED:
+        "excluded after review",
 }
 
 # Person contact slots that may carry a named music/programming director.
@@ -227,6 +238,27 @@ def _qualification(record: dict) -> dict:
     return {}
 
 
+def _exclusion(record: dict) -> dict:
+    try:
+        meta = record.get("raw_metadata") or {}
+    except AttributeError:
+        meta = {}
+    if isinstance(meta, dict) and isinstance(meta.get("exclusion"), dict):
+        return meta["exclusion"]
+    return {}
+
+
+def _is_excluded(record: dict) -> bool:
+    """True when an operator has actively excluded this station.
+
+    Only the boolean ``active`` flag decides exclusion; the marker's other
+    fields (reason, audit source, timestamps) are provenance and are never
+    interpreted here. An explicit ``active: false`` (a reversal) leaves the
+    station fully eligible again.
+    """
+    return _exclusion(record).get("active") is True
+
+
 def compute_outreach_readiness(record: dict) -> dict:
     """Compute the outreach-readiness projection for one intelligence record."""
     qualification = _qualification(record)
@@ -234,6 +266,23 @@ def compute_outreach_readiness(record: dict) -> dict:
     reasons: list[str] = []
     route = None
     person = _person(record)
+
+    # An operator exclusion outranks every evidence signal: the record is
+    # never actionable, so no route is even derived from it.
+    if _is_excluded(record):
+        return {
+            "status": READINESS_REJECTED,
+            "reasons": [REASON_OPERATOR_EXCLUDED],
+            "reason_labels": [_REASON_LABELS[REASON_OPERATOR_EXCLUDED]],
+            "route": None,
+            "person": person,
+            "evidence": {
+                "qualification": qualification,
+                "exclusion": _exclusion(record),
+                "website": record.get("website"),
+            },
+            "evaluated_at": utc_now_iso(),
+        }
 
     if verdict == "rejected":
         return {
