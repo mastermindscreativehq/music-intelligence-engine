@@ -82,6 +82,7 @@ from backend.contracts import (
     success_body,
     track_projection,
     tracks_payload,
+    validate_override_payload,
 )
 
 from submissions import service as submission_service
@@ -133,7 +134,9 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     # MIE_CORS_ORIGINS env var (comma-separated absolute origins). Unset or
     # empty means no cross-origin is allowed, preserving the historical
     # same-origin behavior. Credentials stay off: the API is unauthenticated
-    # and same-origin cookies are never needed across hosts.
+    # and same-origin cookies are never needed across hosts. ``Authorization``
+    # is allowed only so a future authenticated console can send a bearer
+    # token; it grants nothing by itself and is still checked per request.
     cors_origins = []
     for origin in os.environ.get("MIE_CORS_ORIGINS", "").split(","):
         origin = origin.strip()
@@ -149,8 +152,8 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             CORSMiddleware,
             allow_origins=cors_origins,
             allow_credentials=False,
-            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=["Content-Type", "Accept"],
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "Accept", "Authorization"],
         )
 
     def _json(status: int, body: dict) -> JSONResponse:
@@ -291,6 +294,55 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             contacts=storage.get_station_contacts(key),
             submission=storage.get_submission(key),
         ))
+
+    # -- authenticated operator station edits --------------------------------
+    #
+    # The ONLY write endpoint over station field values. It never writes a
+    # column directly: every change goes through
+    # storage.set_station_overrides(), which records the operator correction
+    # (with the displaced automated value snapshotted) and keeps re-ingestion
+    # from undoing it. Validation is EXPLICIT here because the storage layer
+    # silently drops non-overridable fields - a client typo must not come back
+    # as a 200 that quietly did nothing.
+
+    def _operator_auth_ok(request: Request) -> bool:
+        """Fail-closed bearer gate for operator endpoints.
+
+        Deliberately stricter than ``_check_automation_auth``: an automation
+        token that is unset turns its gate OFF for zero-config local dev, which
+        is acceptable for a scheduler trigger but NOT for a data-mutation
+        endpoint. Here a missing or empty MIE_OPERATOR_TOKEN denies everything;
+        there is no path that falls back to unauthenticated access. Comparison
+        is constant-time and the token is never logged or echoed.
+        """
+        expected = os.environ.get("MIE_OPERATOR_TOKEN", "").strip()
+        if not expected:
+            return False
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return False
+        import hmac
+        return hmac.compare_digest(auth[7:].strip(), expected)
+
+    @app.patch("/api/v1/stations/{key}/overrides")
+    async def patch_station_overrides(key: str, request: Request):
+        if not _operator_auth_ok(request):
+            return _json(401, error_body(
+                "unauthorized",
+                "an Authorization: Bearer token matching MIE_OPERATOR_TOKEN "
+                "is required for operator endpoints"))
+        try:
+            payload = await _json_request(request)
+        except ValueError as exc:
+            return _json(400, error_body("bad_request", str(exc)))
+        overrides, error = validate_override_payload(payload)
+        if error is not None:
+            return _json(400, error_body("bad_request", error))
+        # set_station_overrides returns False for an unknown identity_key; the
+        # storage layer never creates a row from this path.
+        if not storage.set_station_overrides(key, overrides):
+            raise StationNotFound(f"unknown station {key!r}")
+        return success_body(station_detail(_require_station(key)))
 
     @app.get("/api/v1/stations/{key}/verification")
     def get_verification(key: str):

@@ -43,6 +43,7 @@ from backend.contracts import (
     success_body,
     track_projection,
     tracks_payload,
+    validate_override_payload,
 )
 
 from submissions import service as submission_service
@@ -110,6 +111,12 @@ ROUTE_TABLE = (
      "/api/v1/stations/{key}/intelligence", ()),
     ("GET", re.compile(r"^/api/v1/stations/(?P<key>[^/]+)/contacts$"),
      "/api/v1/stations/{key}/contacts", ()),
+    # Authenticated operator station-field edits. Fail-closed bearer gate on
+    # MIE_OPERATOR_TOKEN; writes go through set_station_overrides() only, so
+    # a correction is recorded (with the displaced automated value
+    # snapshotted) and survives re-ingestion. Never a way to change identity.
+    ("PATCH", re.compile(r"^/api/v1/stations/(?P<key>[^/]+)/overrides$"),
+     "/api/v1/stations/{key}/overrides", ()),
     ("GET", re.compile(r"^/api/v1/stations/(?P<key>[^/]+)/verification$"),
      "/api/v1/stations/{key}/verification", ()),
     ("POST",
@@ -241,6 +248,28 @@ def _automation_token_ok(headers) -> bool:
     expected = os.environ.get("MIE_AUTOMATION_TOKEN", "").strip()
     if not expected:
         return True
+    raw = headers.get("Authorization") if headers is not None else None
+    if not isinstance(raw, str):
+        return False
+    scheme, _, credential = raw.partition(" ")
+    if scheme.strip().lower() != "bearer" or not credential.strip():
+        return False
+    return hmac.compare_digest(credential.strip(), expected)
+
+
+def _operator_token_ok(headers) -> bool:
+    """Fail-closed shared-secret gate for the operator endpoints.
+
+    Mirrors ``_automation_token_ok`` (Bearer scheme, constant-time compare,
+    never logged) but INVERTS the unset-token behavior. An automation token
+    that is absent disables its gate for zero-config local dev, which is fine
+    for a scheduler trigger and wrong for a data-mutation endpoint: here a
+    missing or empty ``MIE_OPERATOR_TOKEN`` denies every request. There is no
+    branch that falls back to unauthenticated access.
+    """
+    expected = os.environ.get("MIE_OPERATOR_TOKEN", "").strip()
+    if not expected:
+        return False
     raw = headers.get("Authorization") if headers is not None else None
     if not isinstance(raw, str):
         return False
@@ -619,6 +648,24 @@ def _handle(service, method: str, match: re.Match, params: dict,
             submission=service.get_submission(key),
             fetches=service.get_fetches(key),
         ))
+    if path.endswith("/overrides"):
+        if not _operator_token_ok(headers):
+            return 401, error_body(
+                "unauthorized",
+                "an Authorization: Bearer token matching MIE_OPERATOR_TOKEN "
+                "is required for operator endpoints")
+        try:
+            payload = _parse_json_body(body)
+        except ValueError as exc:
+            return 400, error_body("bad_request", str(exc))
+        overrides, error = validate_override_payload(payload)
+        if error is not None:
+            return 400, error_body("bad_request", error)
+        # Returns False for an unknown identity_key; this path never creates
+        # a row.
+        if not service.set_station_overrides(key, overrides):
+            raise StationNotFound(f"unknown station {key!r}")
+        return 200, success_body(station_detail(require_station(key)))
     if path.endswith("/contacts"):
         row = require_station(key)
         return 200, success_body(contacts_payload(

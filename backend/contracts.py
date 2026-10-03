@@ -18,6 +18,7 @@ credentials are ever included.
 from __future__ import annotations
 
 from backend import outreach_intel
+from database.service import OVERRIDABLE_FIELDS, _OPERATOR_OVERRIDES_KEY
 from discovery.radio.contract import derive_location_status
 
 from djs.service import DJ_CHANNEL_ROUTE_CLASS, DJ_CHANNEL_ROUTE_LABEL
@@ -38,6 +39,79 @@ STATION_SUMMARY_FIELDS = (
     "station_type", "confidence_score", "status", "genres", "formats",
     "discovered_at", "last_observed_at",
 )
+
+# Fields an operator edit endpoint must refuse outright, even though a caller
+# would never plausibly send them as an override. Listed so the 400 message can
+# name them, and so a future field addition cannot quietly become editable.
+OVERRIDE_FORBIDDEN_FIELDS = frozenset((
+    "identity_key", "identity_kind", "raw_metadata", "exclusion",
+    "qualification", "confidence_score", "confidence_reasons",
+    "classification_evidence", "discovered_at", "last_observed_at",
+    "last_verified_at", "first_stored_at", "last_stored_at", "status",
+    "source_urls", "social_urls", "domain", "language", "description",
+    "location_status", "research_status", "organization_type",
+))
+
+
+def validate_override_payload(payload: object) -> tuple[dict, str | None]:
+    """Validate a station override edit body.
+
+    Returns ``(overrides, None)`` when every key is an overridable station
+    field, otherwise ``({}, message)`` describing the rejection. The allowed
+    set is imported from ``database.service.OVERRIDABLE_FIELDS`` so this
+    endpoint can never drift from what the storage layer will actually accept.
+
+    Semantics of the accepted body:
+
+    * key absent  -> leave that field's existing override untouched
+    * key = value -> create or update the override
+    * key = null  -> clear the override and restore the previous value
+
+    ``mode`` is deliberately NOT client-settable: list overrides always use
+    the storage layer's replace semantics, and a union mode has no caller.
+
+    Unknown or forbidden keys are REJECTED rather than ignored. The storage
+    layer drops them silently, so without this check a typo would return 200
+    having changed nothing.
+    """
+    if not isinstance(payload, dict):
+        return {}, "body must be a JSON object"
+    if not payload:
+        return {}, "body must contain at least one field to change"
+    unknown = sorted(key for key in payload
+                     if key not in OVERRIDABLE_FIELDS)
+    if unknown:
+        forbidden = [key for key in unknown
+                     if key in OVERRIDE_FORBIDDEN_FIELDS]
+        detail = ""
+        if forbidden:
+            detail = (f" {', '.join(forbidden)} may never be edited by an "
+                      f"operator.")
+        return {}, (f"unknown or non-editable field(s): "
+                   f"{', '.join(unknown)}.{detail} editable fields are: "
+                   f"{', '.join(sorted(OVERRIDABLE_FIELDS))}.")
+    overrides = {}
+    for field, value in payload.items():
+        if value is None:
+            overrides[field] = None
+        elif field in ("genres", "formats"):
+            if not isinstance(value, list) or not all(
+                    isinstance(item, str) for item in value):
+                return {}, f"'{field}' must be a list of strings"
+            overrides[field] = list(value)
+        elif isinstance(value, dict):
+            # set_station_overrides also accepts a per-field dict carrying
+            # 'mode'/'actor'; 'mode' is not client-settable here.
+            return {}, (f"'{field}' must be a plain value, not an object; "
+                        f"override metadata is set by the server")
+        elif not isinstance(value, str):
+            return {}, f"'{field}' must be a string or null"
+        else:
+            stripped = value.strip()
+            if not stripped:
+                return {}, f"'{field}' must not be empty; use null to clear it"
+            overrides[field] = stripped
+    return overrides, None
 
 
 def station_summary(row: dict) -> dict:
@@ -76,9 +150,59 @@ def derive_station_research_status(row: dict) -> str:
     return "needs_research"
 
 
+def overridden_fields(row: dict) -> list[str]:
+    """Names of the station fields an operator override currently pins.
+
+    Derived from the STORED ``raw_metadata.operator_overrides`` map — never
+    from anything a client sent — and only for entries that are still active
+    (``cleared_at`` unset with a ``value`` present), matching
+    ``database.service._active_override``. Sorted for a stable response.
+    """
+    meta = row.get("raw_metadata")
+    stored = meta.get(_OPERATOR_OVERRIDES_KEY) if isinstance(meta, dict) else None
+    if not isinstance(stored, dict):
+        return []
+    return sorted(
+        field for field, entry in stored.items()
+        if isinstance(entry, dict)
+        and entry.get("cleared_at") is None
+        and "value" in entry)
+
+
+def _public_raw_metadata(meta: object) -> dict:
+    """``raw_metadata`` with the operator override map removed.
+
+    The override map is OPERATOR-INTERNAL: it carries the ``actor`` who made
+    the correction, the ``previous`` automated value it displaced, and the
+    ``set_at``/``cleared_at`` audit timestamps. ``station_detail`` is served
+    from an UNAUTHENTICATED endpoint, so publishing that map would leak
+    operator identity and an audit trail to anyone.
+
+    Only the field NAMES are published, via the derived ``overridden_fields``
+    list, so a consumer can still see that a value is operator-corrected
+    without seeing who, from what, or when. Every OTHER stored key -
+    ``exclusion``, ``qualification``, ``location_evidence``, and any
+    provenance the engine has accumulated - is preserved verbatim.
+    """
+    if not isinstance(meta, dict):
+        return meta
+    public = {key: value for key, value in meta.items()
+              if key != _OPERATOR_OVERRIDES_KEY}
+    return public
+
+
 def station_detail(row: dict) -> dict:
-    """Full stored station fields (JSON columns already decoded)."""
+    """Full stored station fields (JSON columns already decoded).
+
+    One exception to "every stored column is part of the contract":
+    ``raw_metadata.operator_overrides`` is stripped, because this endpoint is
+    unauthenticated and the map holds operator identity and audit history.
+    Its effect is reported as the derived ``overridden_fields`` list instead.
+    """
     detail = dict(row)   # every stored column is part of the contract
+    if "raw_metadata" in detail:
+        detail["raw_metadata"] = _public_raw_metadata(detail["raw_metadata"])
+    detail["overridden_fields"] = overridden_fields(row)
     detail["location_status"] = derive_location_status(
         row.get("country"), row.get("state_or_region"),
         row.get("city"), row.get("market_area"),
