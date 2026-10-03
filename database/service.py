@@ -174,6 +174,60 @@ _STATION_EXCLUDED_SQL = (
 _STATION_HIDDEN_SQL = (
     "(" + _STATION_QUARANTINED_SQL + " OR " + _STATION_EXCLUDED_SQL + ")")
 
+# ---------------------------------------------------------------------------
+# Operator field overrides (``raw_metadata.operator_overrides``)
+# ---------------------------------------------------------------------------
+# A manual correction made by an operator, stored as structured metadata ONLY:
+# value, mode (lists), actor, set_at, cleared_at, and ``previous`` (the
+# automated value snapshotted when the override was first created, so clearing
+# the lock can restore it instead of leaving the field empty).
+#
+# Deliberately NO free-form ``reason``/note field: ``station_detail`` is an
+# unguarded ``dict(row)`` and therefore publishes raw_metadata verbatim through
+# an unauthenticated endpoint, so prose would be public. Operators must never
+# store anything here that should not be.
+#
+# This key is INDEPENDENT of ``exclusion``: exclusion decides whether a station
+# is visible/selectable, overrides decide which field values win. Neither reads
+# or writes the other. Same mechanism, same merge protection, different concern.
+_OPERATOR_OVERRIDES_KEY = "operator_overrides"
+
+# Station columns an operator may correct. Every one is a plain column on the
+# stations/organizations row, so an override needs no schema change and no
+# migration.
+_OVERRIDABLE_SCALARS = (
+    "name", "website", "country", "state_or_region", "city",
+    "market_area", "station_type",
+)
+
+# List-valued columns. ``mode`` is currently only ``replace``; union mode is
+# not implemented because no existing architecture requires it.
+_OVERRIDABLE_LISTS = ("genres", "formats")
+
+OVERRIDABLE_FIELDS = frozenset(_OVERRIDABLE_SCALARS + _OVERRIDABLE_LISTS)
+
+
+def _active_override(raw_metadata, field: str) -> dict | None:
+    """The stored override for *field* while it is still locking the value.
+
+    Returns None when the field is not overridden, was never overridden, or
+    its lock has been released (cleared_at set) — in all three cases normal
+    ingestion merge behaviour applies again.
+    """
+    if not isinstance(raw_metadata, dict):
+        return None
+    stored = raw_metadata.get(_OPERATOR_OVERRIDES_KEY)
+    if not isinstance(stored, dict):
+        return None
+    entry = stored.get(field)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("cleared_at") is not None:
+        return None
+    if "value" not in entry:
+        return None
+    return entry
+
 
 # Fetch error kinds that indicate a TRANSIENT network-level failure rather
 # than verified content: dropped connection, TLS handshake failure, timeout,
@@ -532,6 +586,11 @@ class PersistenceService:
         if preserve_verified is None:
             preserve_verified = _preserve_verified_readiness(existing,
                                                              incoming)
+        # Operator-locked fields. Resolved once, up front, from the STORED
+        # raw_metadata only — an incoming record can never introduce a lock
+        # (see the raw_metadata branch below), so this map is authoritative
+        # and unspoofable by ingestion.
+        overrides = old.get("raw_metadata") or {}
         merged: dict = {}
         for key in set(old.keys()) | set(incoming.keys()):
             if key in ("first_stored_at", "last_stored_at"):
@@ -546,7 +605,16 @@ class PersistenceService:
                 merged[key] = max(candidates) if candidates else None
             elif key in ("source_urls", "genres", "formats",
                          "confidence_reasons", "classification_evidence"):
-                merged[key] = _merge_list(previous, value)
+                # An operator replace-mode override on a list field is
+                # authoritative in FULL: the guard must wrap the union itself,
+                # because _merge_list would otherwise re-append the value the
+                # operator deliberately removed.
+                locked = _active_override(overrides, key)
+                if locked is not None and key in _OVERRIDABLE_LISTS \
+                        and locked.get("mode", "replace") == "replace":
+                    merged[key] = list(locked["value"] or [])
+                else:
+                    merged[key] = _merge_list(previous, value)
             elif key in ("social_urls", "genre_evidence"):
                 merged[key] = _merge_dict(previous, value)
             elif key == "raw_metadata":
@@ -593,13 +661,31 @@ class PersistenceService:
                     fresh["exclusion"] = stored_exclusion
                 else:
                     fresh.pop("exclusion", None)
+                # ``operator_overrides`` is likewise OPERATOR-OWNED: only
+                # set_station_overrides() writes it. The stored map is carried
+                # across verbatim and any incoming map is discarded, so a
+                # re-ingest can neither silently erase a correction nor forge
+                # one. Independent of ``exclusion`` — different key, different
+                # concern, neither consults the other.
+                stored_overrides = (previous or {}).get(_OPERATOR_OVERRIDES_KEY)
+                if isinstance(previous, dict) and stored_overrides is not None:
+                    fresh[_OPERATOR_OVERRIDES_KEY] = stored_overrides
+                else:
+                    fresh.pop(_OPERATOR_OVERRIDES_KEY, None)
                 merged[key] = fresh
             else:
+                # An operator override on a scalar column is authoritative:
+                # the stored (operator) value wins over the incoming
+                # automated one. Applied before the NULL-only rule so a locked
+                # field is never refreshed by research.
+                if key in _OVERRIDABLE_SCALARS \
+                        and _active_override(overrides, key) is not None:
+                    merged[key] = previous
                 # Ingest evidence is additive and NULL-only: an existing
                 # fact is NEVER overwritten — re-enrichment only fills
                 # still-empty columns. ``status`` is workflow state (not a
                 # stored fact) so it may still progress (new -> enriched).
-                if key == "status":
+                elif key == "status":
                     merged[key] = value if value is not None else previous
                 else:
                     merged[key] = previous if previous is not None else value
@@ -1160,6 +1246,137 @@ class PersistenceService:
                 "UPDATE stations SET raw_metadata=?, last_stored_at=? "
                 "WHERE identity_key=?",
                 (_dumps(meta), utc_now_iso(), identity_key))
+            return cur.rowcount > 0
+
+    def set_station_overrides(self, identity_key: str,
+                              overrides: dict | None) -> bool:
+        """Persist (or clear) operator field overrides for one station.
+
+        Writes ``raw_metadata.operator_overrides`` (keeping every other stored
+        fact, including ``raw_metadata.exclusion`` and
+        ``raw_metadata.qualification``) and touches ``last_stored_at``.
+
+        *Each field in* ``overrides`` is stored as an entry carrying only
+        structured metadata: ``value``, ``mode`` for lists, an optional
+        ``actor`` identifier, ``set_at``, ``cleared_at`` and ``previous`` — the
+        automated value snapshotted when the override was first created, so
+        releasing the lock restores it instead of leaving the column empty.
+        There is deliberately no free-form reason/note field: station_detail
+        publishes raw_metadata verbatim and is unauthenticated.
+
+        Only keys in ``OVERRIDABLE_FIELDS`` are accepted; anything else is
+        ignored so engine-owned telemetry (confidence, timestamps, evidence)
+        can never be pinned by an operator.
+
+        Passing ``None`` for a single field CLEARS that override: the
+        snapshotted automated value is restored to the column and the entry
+        keeps its audit timestamps (``cleared_at`` set). Passing ``None`` for
+        the whole argument clears every override.
+
+        Rows are flagged, never deleted, and no contact/submission/fetch/
+        outreach row is touched. Returns False for an unknown identity_key.
+
+        Independent of ``set_station_exclusion``: exclusion controls whether a
+        station is listed/selectable, overrides control which field values win.
+        """
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM stations WHERE identity_key=?",
+                (identity_key,)).fetchone()
+            if row is None:
+                return False
+            meta = _loads(row["raw_metadata"], default={})
+            if not isinstance(meta, dict):
+                meta = {}
+            stored = meta.get(_OPERATOR_OVERRIDES_KEY)
+            stored = dict(stored) if isinstance(stored, dict) else {}
+            current = self._station_from_row(row)
+
+            def restore(field: str, entry: dict) -> None:
+                """Release one lock, reinstating the snapshotted value."""
+                previous = entry.get("previous")
+                if field in _OVERRIDABLE_SCALARS:
+                    self._conn.execute(
+                        f"UPDATE stations SET {field}=? WHERE identity_key=?",
+                        (previous, identity_key))
+                elif field in _OVERRIDABLE_LISTS:
+                    self._conn.execute(
+                        f"UPDATE stations SET {field}=? WHERE identity_key=?",
+                        (_dumps(previous) if previous is not None else None,
+                         identity_key))
+
+            if overrides is None:
+                # Clear every lock, keeping each entry's audit timestamps so
+                # the history of what was overridden (and when it was
+                # released) survives the reversal.
+                for field, entry in list(stored.items()):
+                    if isinstance(entry, dict) and entry.get("cleared_at") is None:
+                        restore(field, entry)
+                        entry["cleared_at"] = now
+                        entry.pop("value", None)
+                        entry.pop("mode", None)
+                meta[_OPERATOR_OVERRIDES_KEY] = stored
+            else:
+                for field, value in overrides.items():
+                    if field not in OVERRIDABLE_FIELDS:
+                        continue
+                    if value is None:
+                        entry = stored.get(field)
+                        if isinstance(entry, dict) \
+                                and entry.get("cleared_at") is None:
+                            restore(field, entry)
+                            entry["cleared_at"] = now
+                            entry.pop("value", None)
+                            entry.pop("mode", None)
+                        continue
+                    if isinstance(value, dict) and "value" in value:
+                        new_value = value["value"]
+                        mode = value.get("mode")
+                        actor = value.get("actor")
+                    else:
+                        new_value = value
+                        mode = None
+                        actor = None
+                    prior = stored.get(field)
+                    if isinstance(prior, dict) and prior.get("cleared_at") is None:
+                        # Re-setting an active override: keep the ORIGINAL
+                        # snapshot so the lock can still restore the true
+                        # automated value, not a previous operator value.
+                        snapshot = prior.get("previous")
+                        set_at = prior.get("set_at") or now
+                    else:
+                        snapshot = current.get(field)
+                        set_at = now
+                    entry = {"value": new_value, "set_at": set_at,
+                             "cleared_at": None, "previous": snapshot}
+                    if mode:
+                        entry["mode"] = mode
+                    elif field in _OVERRIDABLE_LISTS:
+                        entry["mode"] = "replace"
+                    if actor:
+                        entry["actor"] = actor
+                    stored[field] = entry
+                    # The correction becomes the stored column value NOW, so
+                    # every read path reports it immediately without waiting
+                    # for a merge. Re-ingestion cannot undo it: the column is
+                    # already the operator value and the lock holds it.
+                    if field in _OVERRIDABLE_SCALARS:
+                        self._conn.execute(
+                            f"UPDATE stations SET {field}=? "
+                            f"WHERE identity_key=?",
+                            (new_value, identity_key))
+                    elif field in _OVERRIDABLE_LISTS:
+                        self._conn.execute(
+                            f"UPDATE stations SET {field}=? "
+                            f"WHERE identity_key=?",
+                            (_dumps(new_value), identity_key))
+                meta[_OPERATOR_OVERRIDES_KEY] = stored
+
+            cur = self._conn.execute(
+                "UPDATE stations SET raw_metadata=?, last_stored_at=? "
+                "WHERE identity_key=?",
+                (_dumps(meta), now, identity_key))
             return cur.rowcount > 0
 
     # -- submission assets + link accessibility (Phase 8) ----------------------

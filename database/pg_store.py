@@ -54,6 +54,10 @@ from database.service import (
     normalize_intelligence_record,
     validate_intelligence_record,
     _dj_dev_fixture_exclusion_sql,
+    _OPERATOR_OVERRIDES_KEY,
+    _OVERRIDABLE_LISTS,
+    _OVERRIDABLE_SCALARS,
+    OVERRIDABLE_FIELDS,
     _outreach_dev_fixture_exclusion_sql,
 )
 
@@ -1532,6 +1536,121 @@ class PostgresStorage:
                 "UPDATE organizations SET raw_metadata=%s::jsonb, "
                 "last_stored_at=%s WHERE identity_key=%s",
                 (_dumps(meta), utc_now_iso(), identity_key))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_station_overrides(self, identity_key: str,
+                              overrides: dict | None) -> bool:
+        """Persist (or clear) operator field overrides for one station.
+
+        Column-for-column behavioural mirror of
+        ``PersistenceService.set_station_overrides``: read-modify-write of
+        ``raw_metadata.operator_overrides`` preserving every sibling fact
+        (including ``exclusion`` and ``qualification``), ``None`` releases the
+        lock and restores the snapshotted automated value, unknown identity
+        returns False, ``last_stored_at`` is touched, and no
+        contact/submission/fetch/outreach row is modified.
+
+        Only ``OVERRIDABLE_FIELDS`` are accepted. No schema change and no
+        migration: the map lives in the existing ``raw_metadata`` jsonb column.
+        """
+        now = utc_now_iso()
+        with self._lock:
+            self._ensure_connection()
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM organizations WHERE identity_key=%s",
+                (identity_key,))
+            row = cur.fetchone()
+            if row is None:
+                return False
+            meta = _j(row["raw_metadata"], {})
+            if not isinstance(meta, dict):
+                meta = {}
+            stored = meta.get(_OPERATOR_OVERRIDES_KEY)
+            stored = dict(stored) if isinstance(stored, dict) else {}
+            current = _org_from_row(row)
+
+            def restore(field: str, entry: dict) -> None:
+                """Release one lock, reinstating the snapshotted value."""
+                previous = entry.get("previous")
+                if field in _OVERRIDABLE_SCALARS:
+                    cur.execute(
+                        f"UPDATE organizations SET {field}=%s "
+                        f"WHERE identity_key=%s",
+                        (previous, identity_key))
+                elif field in _OVERRIDABLE_LISTS:
+                    cur.execute(
+                        f"UPDATE organizations SET {field}=%s::jsonb "
+                        f"WHERE identity_key=%s",
+                        (_dumps(previous) if previous is not None else None,
+                         identity_key))
+
+            if overrides is None:
+                for field, entry in list(stored.items()):
+                    if isinstance(entry, dict) and entry.get("cleared_at") is None:
+                        restore(field, entry)
+                        entry["cleared_at"] = now
+                        entry.pop("value", None)
+                        entry.pop("mode", None)
+                meta[_OPERATOR_OVERRIDES_KEY] = stored
+            else:
+                for field, value in overrides.items():
+                    if field not in OVERRIDABLE_FIELDS:
+                        continue
+                    if value is None:
+                        entry = stored.get(field)
+                        if isinstance(entry, dict) \
+                                and entry.get("cleared_at") is None:
+                            restore(field, entry)
+                            entry["cleared_at"] = now
+                            entry.pop("value", None)
+                            entry.pop("mode", None)
+                        continue
+                    if isinstance(value, dict) and "value" in value:
+                        new_value = value["value"]
+                        mode = value.get("mode")
+                        actor = value.get("actor")
+                    else:
+                        new_value = value
+                        mode = None
+                        actor = None
+                    prior = stored.get(field)
+                    if isinstance(prior, dict) and prior.get("cleared_at") is None:
+                        snapshot = prior.get("previous")
+                        set_at = prior.get("set_at") or now
+                    else:
+                        snapshot = current.get(field)
+                        set_at = now
+                    entry = {"value": new_value, "set_at": set_at,
+                             "cleared_at": None, "previous": snapshot}
+                    if mode:
+                        entry["mode"] = mode
+                    elif field in _OVERRIDABLE_LISTS:
+                        entry["mode"] = "replace"
+                    if actor:
+                        entry["actor"] = actor
+                    stored[field] = entry
+                    # The correction becomes the stored column value NOW, so
+                    # every read path reports it immediately without waiting
+                    # for a merge. Re-ingestion cannot undo it: the column is
+                    # already the operator value and the lock holds it.
+                    if field in _OVERRIDABLE_SCALARS:
+                        cur.execute(
+                            f"UPDATE organizations SET {field}=%s "
+                            f"WHERE identity_key=%s",
+                            (new_value, identity_key))
+                    elif field in _OVERRIDABLE_LISTS:
+                        cur.execute(
+                            f"UPDATE organizations SET {field}=%s::jsonb "
+                            f"WHERE identity_key=%s",
+                            (_dumps(new_value), identity_key))
+                meta[_OPERATOR_OVERRIDES_KEY] = stored
+
+            cur.execute(
+                "UPDATE organizations SET raw_metadata=%s::jsonb, "
+                "last_stored_at=%s WHERE identity_key=%s",
+                (_dumps(meta), now, identity_key))
             self._conn.commit()
             return cur.rowcount > 0
 

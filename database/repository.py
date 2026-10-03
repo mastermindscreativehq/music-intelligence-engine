@@ -213,6 +213,30 @@ Writes ``raw_metadata.qualification`` (keeping every other stored
         """
         ...
 
+    def set_station_overrides(self, identity_key: str,
+                              overrides: dict | None) -> bool:
+        """Persist (or clear) operator field overrides for one station.
+
+        Writes ``raw_metadata.operator_overrides`` (keeping every other stored
+        fact, including ``exclusion`` and ``qualification``) and touches
+        ``last_stored_at``. Each entry stores structured metadata only —
+        ``value``, ``mode`` for lists, optional ``actor``, ``set_at``,
+        ``cleared_at``, and ``previous`` (the automated value snapshotted at
+        override time so releasing the lock restores it). There is no
+        free-form note field: station_detail publishes raw_metadata verbatim.
+
+        Only ``OVERRIDABLE_FIELDS`` are accepted; engine telemetry
+        (confidence, timestamps, evidence) can never be pinned. ``None`` for a
+        field clears that override and reinstates the snapshot; ``None`` for
+        the whole argument clears every override. Rows are flagged — never
+        deleted, and no contact/submission/fetch/outreach row is touched.
+        Returns True when the row existed.
+
+        Independent of ``set_station_exclusion``: exclusion controls listing
+        and selection visibility, overrides control which field values win.
+        """
+        ...
+
     def get_dj_channels(self, dj_id: str) -> list[dict]:
         """Source-backed channels for one DJ, grouped by channel name."""
         ...
