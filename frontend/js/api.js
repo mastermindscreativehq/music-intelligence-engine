@@ -60,6 +60,16 @@ function deadlineError(path) {
   );
 }
 
+function mergeHeaders(base, extra) {
+  if (!extra) return base || {};
+  const h = new Headers(base || {});
+  for (const [k, v] of Object.entries(extra)) {
+    if (v === null || v === undefined) continue;
+    h.set(k, v);
+  }
+  return h;
+}
+
 function searchParams(params) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params || {})) {

@@ -304,6 +304,18 @@ function submissionInformationCard(detail, intel, usefulPages, contactsPayload) 
         el("span", { class: "dim action-sub" }, detail.domain ?? website))));
   }
 
+  const sub = intel && intel.submission ? intel.submission : {};
+  const subDetails = [
+    ['submission email', sub.submission_email || null],
+    ['programming contact role', sub.programming_contact_role || null],
+    ['instructions', sub.instructions ? (sub.instructions.value || sub.instructions) : null],
+    ['restrictions', Array.isArray(sub.restrictions) ? sub.restrictions.join(', ') : (sub.restrictions || null)],
+    ['methods', Array.isArray(sub.methods) ? sub.methods.join(', ') : null],
+    ['confidence', sub.confidence_score != null ? Math.round(sub.confidence_score*100)+'%' : null],
+  ].filter(([,v]) => v);
+  const detailsBox = subDetails.length ? el('div', { class: 'card' },
+    el('h3', {}, 'Submission details'),
+    el('dl', { class: 'kv' }, subDetails.map(([k,v])=>[el('dt',{},k), el('dd',{},v)]).flat())) : null;
   return el("section", { class: "card action-bar", id: "station-actions" },
     el("p", { class: "dim section-label" }, "Submission information"),
     el("h2", {}, "How to send your music"),
@@ -315,7 +327,7 @@ function submissionInformationCard(detail, intel, usefulPages, contactsPayload) 
       " ",
       contactStatusChip(emailContact, contactPage)),
     el("div", { class: "action-grid" }, tiles),
-    usefulPagesCard(usefulPages, route));
+    usefulPagesCard(usefulPages, route), detailsBox));
 }
 
 function usefulPagesCard(usefulPages, canonicalRoute) {
@@ -1027,7 +1039,8 @@ export function renderStationView(root, identityKey, basket) {
       outreachSection(detail, contactsPayload, intel, intel.useful_pages,
         identityKey, basket),
       intelligenceDetails(detail, intel, verification, submissionData,
-        identityKey));
+        identityKey),
+      operatorPanel(detail, identityKey));
   }).catch((error) => {
     root.replaceChildren(errorBanner(error));
   });
