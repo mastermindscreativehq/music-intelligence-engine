@@ -327,7 +327,7 @@ function submissionInformationCard(detail, intel, usefulPages, contactsPayload) 
       " ",
       contactStatusChip(emailContact, contactPage)),
     el("div", { class: "action-grid" }, tiles),
-    usefulPagesCard(usefulPages, route), detailsBox));
+    usefulPagesCard(usefulPages, route), detailsBox);
 }
 
 function usefulPagesCard(usefulPages, canonicalRoute) {
