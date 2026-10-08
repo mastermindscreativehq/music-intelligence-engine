@@ -1046,6 +1046,17 @@ export function renderStationView(root, identityKey, basket) {
   });
 }
 
+
+function operatorPanel(detail, identityKey) {
+  const overrides = Array.isArray(detail.overridden_fields) && detail.overridden_fields.length ? detail.overridden_fields : [];
+  return el("details", { class: "card" },
+    el("summary", {}, "Operator overrides (authenticated)"),
+    el("div", { class: "detail-body" },
+      el("p", { class: "dim" }, "OVERRIDABLE_FIELDS: " + overrides.join(", "))
+    ));
+}
+
+
 export function teardownStationView() {
   for (const off of unsubscribeFns.splice(0)) off();
 }
