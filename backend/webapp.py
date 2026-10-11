@@ -29,6 +29,7 @@ are never logged or echoed into responses.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import sys
@@ -44,7 +45,7 @@ load_dotenv(
     verbose=False,
 )
 
-from backend.routes import dispatch
+from backend.routes import dispatch, redirect_target
 
 from database.service import PersistenceService
 from submissions import service as submission_service
@@ -102,6 +103,19 @@ def build_handler(service, static_root: Path, track_store=None,
             self._send(status, "application/json; charset=utf-8", payload,
                        {"Cache-Control": "no-store"})
 
+        def _send_redirect(self, location: str) -> None:
+            # Top-level OAuth hop: tell the browser where the SPA lives. The
+            # tiny HTML body mirrors the Location header as a <meta> refresh
+            # so even a client that ignores 303 lands on the app.
+            safe = html.escape(location)
+            payload = (
+                '<!doctype html><html><head>'
+                f'<meta http-equiv="refresh" content="0; url={safe}">'
+                "</head><body>Redirecting…</body></html>"
+            ).encode("utf-8")
+            self._send(303, "text/html; charset=utf-8", payload,
+                       {"Location": location, "Cache-Control": "no-store"})
+
         def _read_body(self) -> bytes | None:
             length = int(self.headers.get("Content-Length") or 0)
             if length <= 0:
@@ -155,7 +169,11 @@ def build_handler(service, static_root: Path, track_store=None,
                     discover_fetcher=discover_fetcher,
                     headers=self.headers,
                     discovery_scheduler=discovery_scheduler)
-                self._send_json(status, body)
+                location = redirect_target(body)
+                if location is not None:
+                    self._send_redirect(location)
+                else:
+                    self._send_json(status, body)
             except Exception:
                 self._send_json(500, {
                     "ok": False, "data": None,

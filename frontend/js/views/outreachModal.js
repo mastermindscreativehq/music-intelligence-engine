@@ -7,16 +7,16 @@
  *  - compose mode (from the station OUTREACH section and the outreach
  *    page for a fresh handoff): pick a release from My music, compose a
  *    subject + message, then CREATE the outreach record (POST /outreach).
- *    For an email recipient the record then hands off via mailto and the
- *    handoff is recorded as an 'opened_in_email' ATTEMPT (never as a
- *    stored status).
  *  - record mode (existing record from the outreach page): prefilled from
- *    the record; "Open in My Email" appends the handoff attempt; webform
- *    records open the verified submission page instead of a composer.
+ *    the record. An email record can be sent from the operator's CONNECTED
+ *    Gmail account (review + confirm, then POST /outreach/{id}/send — the
+ *    record only becomes 'sent' when Gmail confirms); it can also be handed
+ *    off via mailto, recorded as an 'opened_in_email' ATTEMPT. A webform
+ *    record opens the verified submission page.
  *
- * Recipient & email come ONLY from verified backend evidence. Handoff is
- * mailto / copy / opening the real submission page — this application never
- * sends anything. Nothing here constructs or infers an address.
+ * Recipient & email come ONLY from verified backend evidence. The Gmail
+ * send uses the connected account's address as the sender — never a typed
+ * or inferred one. Nothing here constructs an address.
  *
  * Rendered through overlay helpers (a layered <div> view); re-uses el() and
  * addEventListener, never innerHTML.
@@ -298,12 +298,9 @@ export function openOutreachModal(context) {
     musicSelect = releaseSelector(context.preselectedTrackId || "", null);
   }
 
-  subjectInput.addEventListener("input",
-    () => setSenderPref(fromInput.value));
-  bodyInput.addEventListener("input",
-    () => setSenderPref(fromInput.value));
-  fromInput.addEventListener("input",
-    () => setSenderPref(fromInput.value));
+  fromInput.addEventListener("input", () => setSenderPref(fromInput.value));
+
+  let recordId = record && record.outreach_id ? record.outreach_id : null;
 
   const addGreeting = () => {
     const body = bodyInput.value;
@@ -326,9 +323,6 @@ export function openOutreachModal(context) {
     status.textContent = "Draft saved in this browser session.";
   };
 
-  /* primary hand-off action */
-  let primary;
-
   /* Appends an append-only ATTEMPT in the ledger; never changes the stored
    * status. Only a provider-confirmed send earns 'sent'. */
   function recordHandoff(outreachId) {
@@ -345,38 +339,135 @@ export function openOutreachModal(context) {
       });
   }
 
-  /* The actions row may or may not be in the DOM yet: if it is, swap the
-   * node in place; otherwise the row picks up the freshly assigned var. */
-  function takePrimary(next) {
-    if (primary.parentNode) primary.replaceWith(next);
-    else primary = next;
-  }
-
-  function switchToRecordMode(outreachId) {
-    subjectInput.disabled = true;
-    bodyInput.disabled = true;
-    fromInput.disabled = true;
-    if (email) {
-      const mail = el("button", { class: "primary" }, "Open in My Email");
-      mail.addEventListener("click", () => {
-        openInMyEmail(email, subjectInput.value, bodyInput.value);
-        save();
-        recordHandoff(outreachId);
-      });
-      takePrimary(mail);
-    } else if (isWebform) {
-      const open = el("a", {
-        class: "primary",
-        href: recipient.submission_url,
-        target: "_blank",
-        rel: "noopener noreferrer",
-      }, "Open submission page →");
-      takePrimary(open);
+  /* Kick off the Google OAuth connect flow (works signed-in or anonymous;
+   * the callback mints a session for an anonymous connect). */
+  async function startGoogleConnect(button) {
+    button.disabled = true;
+    status.textContent = "Redirecting to Google…";
+    try {
+      const res = await api.googleStart();
+      if (res && res.auth_url) {
+        window.location.href = res.auth_url;
+        return;
+      }
+      throw new Error("no authorization URL returned");
+    } catch (error) {
+      button.disabled = false;
+      status.textContent = `Could not start Google sign-in: ${
+        error && error.message ? error.message : String(error)}`;
     }
   }
 
+  /* Gmail controls live in the actions row from the start; compose mode keeps
+   * them hidden until a record exists to send. A review step sits between the
+   * click and the irreversible POST — nothing sends on a single tap. */
+  async function renderGmailState(container, outreachId) {
+    container.replaceChildren(
+      el("span", { class: "dim" }, "Checking Gmail…"));
+    if (!email) {
+      container.replaceChildren(el("span", { class: "dim" },
+        "This recipient uses a submission page — open it above."));
+      return;
+    }
+    let me = null;
+    try {
+      me = await api.me();
+    } catch (error) {
+      me = null;
+    }
+    const loggedIn = Boolean(me && me.user);
+    const connected = Boolean(me && me.gmail_connected);
+    const gmailEmail = me && me.gmail_email ? me.gmail_email : "";
+
+    if (!connected) {
+      const connect = el("button", { class: "primary" },
+        loggedIn ? "Connect Gmail" : "Log in with Gmail");
+      connect.addEventListener("click", () => startGoogleConnect(connect));
+      container.replaceChildren(
+        el("div", { class: "gmail-line" },
+          el("span", { class: "dim" },
+            loggedIn
+              ? "No Gmail account connected yet."
+              : "Sign in with Google to send from your own Gmail."),
+          connect),
+        el("div", { class: "dim hint" },
+          "No Gmail? Use “Open in My Email” below and finish sending in ",
+          "your email app."));
+      return;
+    }
+
+    const sendButton = el("button", { class: "primary" }, "Send via Gmail");
+    const confirmButton = el("button", { class: "primary" }, "Confirm send");
+    const cancelButton = el("button", { class: "subtle" }, "Cancel");
+    const review = el("div", { class: "gmail-review", hidden: true },
+      el("div", { class: "oc-line" },
+        el("span", { class: "oc-label" }, "From"),
+        el("span", { class: "verified" }, gmailEmail || "connected Gmail")),
+      el("div", { class: "oc-line" },
+        el("span", { class: "oc-label" }, "To"),
+        el("span", {}, email)),
+      el("div", { class: "oc-line" },
+        el("span", { class: "oc-label" }, "Subject"),
+        el("span", {}, subjectInput.value || "(none)")),
+      el("div", { class: "dim hint" },
+        "This sends the message above from your connected Gmail account ",
+        "and marks the record sent. It cannot be undone here."),
+      el("div", { class: "actions-row" }, confirmButton, cancelButton));
+
+    sendButton.addEventListener("click", () => {
+      review.hidden = false;
+      sendButton.hidden = true;
+    });
+    cancelButton.addEventListener("click", () => {
+      review.hidden = true;
+      sendButton.hidden = false;
+    });
+    confirmButton.addEventListener("click", async () => {
+      confirmButton.disabled = true;
+      sendButton.disabled = true;
+      status.textContent = "Sending via Gmail…";
+      try {
+        const res = await api.sendOutreach(outreachId);
+        status.textContent =
+          `Sent via Gmail (message ${(res && res.message_id) || "ok"}; ` +
+          `record ${res && res.status}).`;
+        container.replaceChildren(
+          el("div", { class: "gmail-line" },
+            el("span", { class: "verified" }, "✓ sent"),
+            el("span", { class: "dim" },
+              ` from ${gmailEmail || "your connected Gmail"}`)));
+      } catch (error) {
+        status.textContent = `Send failed: ${
+          error && error.message ? error.message : String(error)}`;
+        confirmButton.disabled = false;
+        sendButton.disabled = false;
+      }
+    });
+
+    container.replaceChildren(
+      el("div", { class: "gmail-line" },
+        el("span", { class: "dim" },
+          `Sending as ${gmailEmail || "connected Gmail"}`),
+        sendButton),
+      review);
+  }
+
+  /* Enter record mode — idempotent and independent of DOM insertion order,
+   * so it is safe to call BEFORE the overlay exists (existing-record open)
+   * and after a fresh create. */
+  function enterRecordMode(outreachId) {
+    recordId = outreachId;
+    subjectInput.disabled = true;
+    bodyInput.disabled = true;
+    fromInput.disabled = true;
+    createButton.hidden = true;
+    gmailActions.hidden = false;
+    if (mailButton) mailButton.hidden = false;
+    renderGmailState(gmailActions, outreachId);
+  }
+
   const createButton = el("button", { class: "primary" },
-    isWebform ? "Create outreach record" : "Create outreach record");
+    "Create outreach record");
   createButton.addEventListener("click", async () => {
     if (createButton.disabled) return;
     createButton.disabled = true;
@@ -415,7 +506,7 @@ export function openOutreachModal(context) {
       save();
       status.textContent =
         `Record created (${created.outreach_id}, status ${created.status}).`;
-      switchToRecordMode(created.outreach_id);
+      enterRecordMode(created.outreach_id);
     } catch (error) {
       createButton.disabled = false;
       createButton.textContent = "Create outreach record";
@@ -424,12 +515,27 @@ export function openOutreachModal(context) {
     }
   });
 
-  primary = createButton;
-
-  /* Opening an EXISTING record: present it read-only and hand it off (or
-   * open its submission page) — never a second "Create" competing action. */
-  if (record && record.outreach_id) {
-    switchToRecordMode(record.outreach_id);
+  /* Handoff / submission controls — hidden until a record exists. */
+  const gmailActions = el("div", { class: "gmail-actions", hidden: true });
+  const mailButton = email
+    ? el("button", {}, "Open in My Email")
+    : (isWebform
+      ? el("a", {
+        class: "linkish",
+        href: recipient.submission_url || "#",
+        target: "_blank",
+        rel: "noopener noreferrer",
+      }, "Open submission page")
+      : null);
+  if (mailButton) {
+    mailButton.hidden = true;
+    if (email) {
+      mailButton.addEventListener("click", () => {
+        openInMyEmail(email, subjectInput.value, bodyInput.value);
+        save();
+        if (recordId) recordHandoff(recordId);
+      });
+    }
   }
 
   const copyEmailButton = email
@@ -458,7 +564,8 @@ export function openOutreachModal(context) {
     ? "Outreach record"
     : "Prepare outreach record";
   const modeSub = record
-    ? "Compose and hand this record to your email client; nothing sends here."
+    ? "Send from your connected Gmail, or hand this record to your email "
+      + "client. The record marks sent only when Gmail confirms."
     : "Pick a release, compose, then create a record for this recipient.";
 
   const backdrop = openOverlay(
@@ -482,17 +589,25 @@ export function openOutreachModal(context) {
         el("span", {}, "From (your email)"),
         fromInput,
         el("span", { class: "dim hint" },
-          "Your own address, saved only in this browser — not verified by ",
-          "this console.")),
+          "Only used by the mailto handoff; a Gmail send always uses your ",
+          "connected account as the sender.")),
       el("label", { class: "field" }, el("span", {}, "Subject"), subjectInput),
       el("label", { class: "field" }, el("span", {}, "Message"), bodyInput)),
     el("div", { class: "actions-row outreach-actions" },
-      primary,
+      createButton,
+      gmailActions,
+      mailButton,
       copyEmailButton,
       copyMessageButton,
       el("button", { class: "subtle", onClick: save }, "Save draft"),
       closeButton),
     status);
+
+  /* Opening an EXISTING record: present it read-only and offer the send /
+   * handoff actions — never a second "Create" competing action. */
+  if (recordId) {
+    enterRecordMode(recordId);
+  }
 
   return backdrop;
 }

@@ -143,6 +143,8 @@ ROUTE_TABLE = (
      OUTREACH_PARAMS),
     ("POST", re.compile(r"^/api/v1/outreach/(?P<outreach_id>[^/]+)/event$"),
      "/api/v1/outreach/{outreach_id}/event", ()),
+    ("POST", re.compile(r"^/api/v1/outreach/(?P<outreach_id>[^/]+)/send$"),
+     "/api/v1/outreach/{outreach_id}/send", ()),
     ("GET",
      re.compile(r"^/api/v1/outreach/(?P<outreach_id>om_[0-9a-f]+)$"),
      "/api/v1/outreach/{outreach_id}", ()),
@@ -155,6 +157,18 @@ ROUTE_TABLE = (
     # live public-web candidates (never radio-station-derived).
     ("POST", re.compile(r"^/api/v1/djs/discover$"),
      "/api/v1/djs/discover", DJ_DISCOVER_PARAMS),
+    ("POST", re.compile(r"^/api/v1/auth/login$"),
+     "/api/v1/auth/login", ()),
+    ("POST", re.compile(r"^/api/v1/auth/logout$"),
+     "/api/v1/auth/logout", ()),
+    ("GET", re.compile(r"^/api/v1/auth/me$"),
+     "/api/v1/auth/me", ()),
+    ("GET", re.compile(r"^/api/v1/auth/google/start$"),
+     "/api/v1/auth/google/start", ()),
+    ("GET", re.compile(r"^/api/v1/auth/google/callback$"),
+     "/api/v1/auth/google/callback", ()),
+    ("POST", re.compile(r"^/api/v1/auth/google/disconnect$"),
+     "/api/v1/auth/google/disconnect", ()),
     ("GET", re.compile(r"^/api/v1/djs$"), "/api/v1/djs", DJ_PARAMS),
     ("POST", re.compile(r"^/api/v1/djs$"), "/api/v1/djs", ()),
     ("GET", re.compile(r"^/api/v1/djs/(?P<dj_id>dj_[0-9a-f]+)$"),
@@ -257,6 +271,148 @@ def _automation_token_ok(headers) -> bool:
     return hmac.compare_digest(credential.strip(), expected)
 
 
+def _get_current_user(service, headers):
+    auth = headers.get("authorization") if headers else ""
+    if not auth or not auth.startswith("Bearer "):
+        auth = headers.get("Authorization") if headers else ""
+    if not isinstance(auth, str) or not auth.startswith("Bearer "):
+        return None
+    token = auth[7:].strip()
+    from auth.service import AuthService
+    svc = AuthService(service)
+    sess = svc.get_session(token)
+    if not sess:
+        return None
+    with service._lock:
+        row = service._conn.execute(
+            "SELECT * FROM users WHERE user_id=?", (sess["user_id"],)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def redirect_target(body) -> str | None:
+    """Relative redirect target inside a success envelope, else None.
+
+    The Google OAuth callback finishes through the standard envelope with
+    ``data.redirect``; every server layer translates that into an HTTP
+    redirect so the browser's top-level OAuth hop never lands on a JSON
+    screen. Only same-origin relative targets are ever emitted (the value is
+    built server-side, but a path check keeps any future caller honest).
+    """
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        return None
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return None
+    target = data.get("redirect")
+    if isinstance(target, str) and target.startswith("/") \
+            and not target.startswith("//"):
+        return target
+    return None
+
+
+def _finish_google_callback(svc, service, code: str, state: str) -> tuple[int, dict]:
+    """Finish a Google OAuth hop: validate+consume state, exchange the code,
+    resolve the operator user, upsert their connected Gmail account.
+
+    The state row is single-use, ten-minute-lifetime CSRF protection minted by
+    ``/auth/google/start`` and bound to whoever started the flow. Anonymous
+    starts (``user_id`` NULL) create the operator's user row from the Google
+    identity and mint a fresh session; logged-in starts keep the existing
+    session the SPA already holds. Success answers a redirect target the
+    server layers turn into a Location header — the SPA must NEVER see raw
+    tokens, and the browser must never render a JSON screen.
+    """
+    bound = svc.consume_oauth_state(state)
+    if bound is None:
+        return 400, error_body(
+            "oauth_state_invalid", "expired or reused OAuth state")
+    from auth.google_oauth import GoogleOAuth
+    oauth = GoogleOAuth()
+    if not oauth.configured:
+        return 503, error_body(
+            "oauth_not_configured", "Google OAuth not configured")
+    try:
+        tokens = oauth.exchange_code(code, bound.get("code_verifier"))
+    except Exception as exc:  # noqa: BLE001 — surface the provider reason
+        return 400, error_body("oauth_exchange_failed", str(exc))
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    creds = Credentials(
+        token=tokens.get("access_token"),
+        refresh_token=tokens.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+        client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+    )
+    oauth2 = build("oauth2", "v2", credentials=creds, cache_discovery=False)
+    info = oauth2.userinfo().get().execute()
+    email = (info.get("email") or "").strip().lower()
+    if not email:
+        return 400, error_body(
+            "oauth_email_missing", "Google did not return an account email")
+
+    from auth.service import iso_now
+    now = iso_now()
+    user = None
+    if bound.get("user_id"):
+        with service._lock:
+            row = service._conn.execute(
+                "SELECT * FROM users WHERE user_id=?", (bound["user_id"],)
+            ).fetchone()
+        user = dict(row) if row else None
+    if user is None:
+        # Anonymous start: the Google identity IS the operator.
+        user = svc.get_user_by_email(email) or svc.create_user(
+            email, info.get("name"))
+
+    google_id = info.get("id")
+    picture = info.get("picture")
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    expiry = tokens.get("token_expiry")
+    scopes = ",".join(GoogleOAuth.SCOPES)
+    with service._lock:
+        row = service._conn.execute(
+            "SELECT * FROM user_google_accounts "
+            "WHERE (google_id=? AND ? IS NOT NULL) OR (user_id=? AND email=?) "
+            "ORDER BY id DESC LIMIT 1",
+            (google_id, google_id, user["user_id"], email),
+        ).fetchone()
+    if row is None:
+        with service._lock, service._conn:
+            service._conn.execute(
+                "INSERT INTO user_google_accounts "
+                "(user_id, google_id, email, picture, access_token, "
+                " refresh_token, token_expiry, scopes, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user["user_id"], google_id, email, picture, access_token,
+                 refresh_token, expiry, scopes, now, now),
+            )
+    else:
+        with service._lock, service._conn:
+            service._conn.execute(
+                "UPDATE user_google_accounts "
+                "SET access_token=?, "
+                "    refresh_token=COALESCE(?, refresh_token), "
+                "    token_expiry=?, scopes=?, "
+                "    picture=COALESCE(?, picture), "
+                "    google_id=COALESCE(?, google_id), updated_at=? "
+                "WHERE id=?",
+                (access_token, refresh_token, expiry, scopes, picture,
+                 google_id, now, row["id"]),
+            )
+
+    redirect_url = "/?oauth=connected"
+    if not bound.get("user_id"):
+        # Anonymous connect: hand the fresh session to the SPA. Tokens never
+        # appear in the URL; the session token is a short-lived opaque bearer
+        # the SPA strips from the address bar on boot.
+        session = svc.create_session(user["user_id"])
+        redirect_url = f"/?oauth=connected&auth={session['session_token']}"
+    return 200, success_body({"redirect": redirect_url})
+
+
 def _operator_token_ok(headers) -> bool:
     """Fail-closed shared-secret gate for the operator endpoints.
 
@@ -342,6 +498,81 @@ def _handle(service, method: str, match: re.Match, params: dict,
             allow_private=False, discover_fetcher=None,
             headers=None, discovery_scheduler=None) -> tuple[int, dict]:
     path = match.group(0)
+
+    # Auth routes
+    if path.startswith("/api/v1/auth"):
+        from auth.service import AuthService
+        svc = AuthService(service)
+        if path == "/api/v1/auth/login" and method == "POST":
+            payload = _parse_json_body(body) if body else {}
+            email = str(payload.get("email") or "").strip().lower()
+            if not email:
+                raise ValueError("email required")
+            user = svc.get_user_by_email(email) or svc.create_user(email)
+            sess = svc.create_session(user["user_id"])
+            return 200, success_body({"user": {"user_id": user["user_id"], "email": user["email"], "name": user.get("name")}, "session": sess})
+        if path == "/api/v1/auth/logout" and method == "POST":
+            auth = headers.get("authorization") or headers.get("Authorization") or ""
+            if isinstance(auth, str) and auth.startswith("Bearer "):
+                svc.revoke_session(auth[7:].strip())
+            return 200, success_body({"ok": True})
+        if path == "/api/v1/auth/me" and method == "GET":
+            user = _get_current_user(service, headers)
+            if not user:
+                return 401, error_body("unauthorized", "not logged in")
+            from gmail_provider import GmailProvider
+            gp = GmailProvider(service)
+            account = gp.connected_account(user["user_id"])
+            return 200, success_body({
+                "user": {
+                    "user_id": user["user_id"],
+                    "email": user["email"],
+                    "name": user.get("name"),
+                },
+                "gmail_connected": account is not None,
+                "gmail_email": (account.get("email") or user.get("email"))
+                if account else None,
+            })
+        if path == "/api/v1/auth/google/start" and method == "GET":
+            # The connect flow is reachable from the outreach composer for BOTH
+            # a signed-in operator and an anonymous one (the callback mints
+            # their session after Google confirms the email).
+            user = _get_current_user(service, headers)
+            from auth.google_oauth import GoogleOAuth
+            oauth = GoogleOAuth()
+            if not oauth.configured:
+                return 503, error_body(
+                    "oauth_not_configured", "Google OAuth not configured")
+            verifier = oauth.new_code_verifier()
+            state = svc.create_oauth_state(
+                user["user_id"] if user else None, verifier)
+            auth_url, _ = oauth.get_auth_url(state, verifier)
+            return 200, success_body({"auth_url": auth_url})
+        if path == "/api/v1/auth/google/callback" and method == "GET":
+            raw_state = (params.get("state") or [None])[0]
+            if not raw_state:
+                return 400, error_body(
+                    "bad_request", "state required")
+            code = (params.get("code") or [None])[0]
+            if not code:
+                return 400, error_body("bad_request", "code required")
+            return _finish_google_callback(svc, service, code, raw_state)
+        if path == "/api/v1/auth/google/disconnect" and method == "POST":
+            # Disconnect Gmail without ending the session: the operator stays
+            # signed in, but their stored Google credentials are removed so
+            # outreach sends fail closed until they reconnect.
+            user = _get_current_user(service, headers)
+            if not user:
+                return 401, error_body("unauthorized", "not logged in")
+            from gmail_provider import GmailProvider
+            gp = GmailProvider(service)
+            disconnected = gp.disconnect_account(user["user_id"])
+            return 200, success_body({
+                "gmail_connected": False,
+                "gmail_email": None,
+                "disconnected": disconnected,
+            })
+        return 405, error_body("method_not_allowed", "method not allowed on this route")
 
     def require_station(key: str) -> dict:
         row = service.get_station(key)
@@ -451,6 +682,54 @@ def _handle(service, method: str, match: re.Match, params: dict,
             raise ValueError("invalid outreach event")
         record = outreach_service.record_outreach_event(
             service, outreach_id, event=event, meta=payload.get("meta"))
+        return 200, success_body(record)
+
+    if path.startswith("/api/v1/outreach/") and path.endswith("/send"):
+        outreach_id = match.group("outreach_id")
+        user = _get_current_user(service, headers)
+        if not user:
+            return 401, error_body("unauthorized", "not logged in")
+        record = outreach_service.get_outreach(service, outreach_id)
+        if record is None:
+            raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
+        recipient = record.get("recipient") or {}
+        recipient_email = recipient.get("email")
+        if not recipient_email:
+            return 400, error_body(
+                "bad_request", "recipient has no email address; "
+                "open in your email app instead")
+        from gmail_provider import GmailProvider, GmailSendError
+        gp = GmailProvider(service)
+        try:
+            res = gp.send_email(
+                user["user_id"],
+                recipient_email,
+                record.get("subject") or "",
+                record.get("message") or "",
+            )
+        except GmailSendError as e:
+            msg = str(e)
+            if "no_connected_gmail" in msg:
+                return 400, error_body(
+                    "no_connected_gmail", "Connect Gmail first")
+            outreach_service.record_outreach_event(
+                service, outreach_id, event="failed",
+                meta={"error": msg, "provider": "gmail_user"})
+            return 500, error_body("gmail_send_failed", msg)
+        except Exception as e:  # noqa: BLE001
+            outreach_service.record_outreach_event(
+                service, outreach_id, event="failed",
+                meta={"error": str(e), "provider": "gmail_user"})
+            return 500, error_body("send_failed", str(e))
+        record = outreach_service.record_outreach_event(
+            service,
+            outreach_id,
+            event="sent",
+            meta={"provider": "gmail_user",
+                  "message_id": res.get("message_id"),
+                  "thread_id": res.get("thread_id"),
+                  "sender_email": res.get("sender_email")},
+        )
         return 200, success_body(record)
 
     if path.startswith("/api/v1/outreach/"):

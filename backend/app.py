@@ -67,7 +67,7 @@ load_dotenv(
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.contracts import (
@@ -231,7 +231,111 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             raise StationNotFound(f"unknown station {key!r}")
         return row
 
-    # -- routes ----------------------------------------------------------------
+    def _get_current_user(request: Request):
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return None
+        token = auth[7:].strip()
+        from auth.service import AuthService
+        svc = AuthService(storage)
+        sess = svc.get_session(token)
+        if not sess:
+            return None
+        with storage._lock:
+            row = storage._conn.execute(
+                "SELECT * FROM users WHERE user_id=?", (sess["user_id"],)
+            ).fetchone()
+        return dict(row) if row else None
+
+    @app.post("/api/v1/auth/login")
+    async def auth_login(request: Request):
+        payload = await _json_request(request)
+        email = str(payload.get("email") or "").strip().lower()
+        if not email:
+            raise ValueError("email required")
+        from auth.service import AuthService
+        svc = AuthService(storage)
+        user = svc.get_user_by_email(email) or svc.create_user(email)
+        sess = svc.create_session(user["user_id"])
+        return success_body({"user": {"user_id": user["user_id"], "email": user["email"], "name": user.get("name")}, "session": sess})
+
+    @app.post("/api/v1/auth/logout")
+    async def auth_logout(request: Request):
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            from auth.service import AuthService
+            svc = AuthService(storage)
+            svc.revoke_session(auth[7:].strip())
+        return success_body({"ok": True})
+
+    @app.get("/api/v1/auth/me")
+    async def auth_me(request: Request):
+        user = _get_current_user(request)
+        if not user:
+            return _json(401, error_body("unauthorized", "not logged in"))
+        from gmail_provider import GmailProvider
+        gp = GmailProvider(storage)
+        account = gp.connected_account(user["user_id"])
+        return success_body({
+            "user": {"user_id": user["user_id"], "email": user["email"],
+                     "name": user.get("name")},
+            "gmail_connected": account is not None,
+            "gmail_email": (account.get("email") or user.get("email"))
+            if account else None,
+        })
+
+    @app.get("/api/v1/auth/google/start")
+    async def google_start(request: Request):
+        # Reachable signed-in OR anonymous; the callback mints the session
+        # for an anonymous start after Google confirms the account email.
+        user = _get_current_user(request)
+        from auth.google_oauth import GoogleOAuth
+        oauth = GoogleOAuth()
+        if not oauth.configured:
+            return _json(503, error_body("oauth_not_configured",
+                                         "Google OAuth not configured"))
+        from auth.service import AuthService
+        svc = AuthService(storage)
+        verifier = oauth.new_code_verifier()
+        state = svc.create_oauth_state(user["user_id"] if user else None,
+                                       verifier)
+        auth_url, _ = oauth.get_auth_url(state, verifier)
+        return success_body({"auth_url": auth_url})
+
+    @app.get("/api/v1/auth/google/callback")
+    async def google_callback(code: str | None = None,
+                              state: str | None = None):
+        if not state:
+            return _json(400, error_body("bad_request", "state required"))
+        if not code:
+            return _json(400, error_body("bad_request", "code required"))
+        from backend.routes import _finish_google_callback, redirect_target
+        from auth.service import AuthService
+        svc = AuthService(storage)
+        status, body = _finish_google_callback(svc, storage, code, state)
+        location = redirect_target(body)
+        if location is not None:
+            return RedirectResponse(url=location, status_code=303,
+                                    headers={"Cache-Control": "no-store"})
+        return _json(status, body)
+
+    @app.post("/api/v1/auth/google/disconnect")
+    async def google_disconnect(request: Request):
+        # Disconnect Gmail without ending the session: the operator stays
+        # signed in, but their stored Google credentials are removed so
+        # outreach sends fail closed until they reconnect.
+        user = _get_current_user(request)
+        if not user:
+            return _json(401, error_body("unauthorized", "not logged in"))
+        from gmail_provider import GmailProvider
+        gp = GmailProvider(storage)
+        disconnected = gp.disconnect_account(user["user_id"])
+        return success_body({
+            "gmail_connected": False,
+            "gmail_email": None,
+            "disconnected": disconnected,
+        })
+
 
     @app.get("/api/v1/health")
     def health():
@@ -483,6 +587,54 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             raise ValueError("invalid outreach event")
         record = outreach_service.record_outreach_event(
             storage, outreach_id, event=event, meta=payload.get("meta"))
+        return success_body(record)
+
+
+    @app.post("/api/v1/outreach/{outreach_id}/send")
+    async def outreach_send(outreach_id: str, request: Request):
+        user = _get_current_user(request)
+        if not user:
+            return _json(401, error_body("unauthorized", "not logged in"))
+        record = outreach_service.get_outreach(storage, outreach_id)
+        if record is None:
+            raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
+        recipient = record.get("recipient") or {}
+        recipient_email = recipient.get("email")
+        if not recipient_email:
+            return _json(400, error_body(
+                "bad_request",
+                "recipient has no email address; open in your email app instead"))
+        from gmail_provider import GmailProvider, GmailSendError
+        gp = GmailProvider(storage)
+        try:
+            res = gp.send_email(
+                user["user_id"],
+                recipient_email,
+                record.get("subject") or "",
+                record.get("message") or "",
+            )
+        except GmailSendError as e:
+            msg = str(e)
+            if "no_connected_gmail" in msg:
+                return _json(400, error_body("no_connected_gmail", "Connect Gmail first"))
+            outreach_service.record_outreach_event(
+                storage, outreach_id, event="failed", meta={"error": msg, "provider": "gmail_user"}
+            )
+            return _json(500, error_body("gmail_send_failed", msg))
+        except Exception as e:
+            outreach_service.record_outreach_event(
+                storage, outreach_id, event="failed", meta={"error": str(e), "provider": "gmail_user"}
+            )
+            return _json(500, error_body("send_failed", str(e)))
+        record = outreach_service.record_outreach_event(
+            storage,
+            outreach_id,
+            event="sent",
+            meta={"provider": "gmail_user",
+                  "message_id": res.get("message_id"),
+                  "thread_id": res.get("thread_id"),
+                  "sender_email": res.get("sender_email")},
+        )
         return success_body(record)
 
     # -- Phase 4b: independent DJs -------------------------------------------

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 11
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -429,6 +429,75 @@ CREATE INDEX IF NOT EXISTS idx_discovery_jobs_started
     ON discovery_jobs(started_at);
 CREATE INDEX IF NOT EXISTS idx_discovery_jobs_org
     ON discovery_jobs(organization_type);
+"""),
+
+    # Auth + Google Gmail integration (minimal vertical slice)
+    (9, """
+CREATE TABLE IF NOT EXISTS users (
+    user_id           TEXT PRIMARY KEY,
+    email             TEXT UNIQUE NOT NULL,
+    name              TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    last_login_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS user_google_accounts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    google_id         TEXT UNIQUE,
+    email             TEXT NOT NULL,
+    picture           TEXT,
+    access_token      TEXT,
+    refresh_token     TEXT,
+    token_expiry      TEXT,
+    scopes            TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    UNIQUE(user_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_uga_user ON user_google_accounts(user_id);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    session_token     TEXT PRIMARY KEY,
+    user_id           TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    created_at        TEXT NOT NULL,
+    expires_at        TEXT NOT NULL,
+    revoked_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_us_user ON user_sessions(user_id);
+"""),
+
+    # OAuth CSRF state for the Google connect flow. A row is minted by
+    # /auth/google/start, embedded in the authorization URL, and consumed
+    # once by /auth/google/callback (single-use, short-lived). ``state`` is
+    # cryptographically random and only ever lives server-side; the callback
+    # requires a match against this table, so a third party can never splice
+    # an authorization code into another user's flow. ``user_id`` is the
+    # logged-in operator who started the flow (NULL lets an anonymous
+    # operator connect Gmail; the callback then creates their user + session).
+    (10, """
+CREATE TABLE IF NOT EXISTS oauth_state (
+    state          TEXT PRIMARY KEY,
+    user_id        TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL,
+    consumed_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_state_user
+    ON oauth_state(user_id);
+"""),
+
+    # PKCE code verifier for the Google connect flow. google-auth-oauthlib
+    # generates the verifier inside Flow.authorization_url() and puts the
+    # matching challenge in the authorization URL; the token exchange in the
+    # callback must replay the SAME verifier or Google answers
+    # ``invalid_grant: Missing code verifier``. The verifier is bound to the
+    # single-use ``state`` row (never a cookie), so it survives the redirect
+    # identically for local HTTP and production HTTPS, and concurrent login
+    # attempts each keep their own verifier.
+    (11, """
+ALTER TABLE oauth_state ADD COLUMN code_verifier TEXT;
 """),
 ]
 

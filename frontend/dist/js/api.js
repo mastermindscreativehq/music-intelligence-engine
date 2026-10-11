@@ -60,12 +60,66 @@ function deadlineError(path) {
   );
 }
 
+function authToken() {
+  try {
+    return localStorage.getItem("mie_auth_token") || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function setAuthToken(token) {
+  try {
+    if (token) {
+      localStorage.setItem("mie_auth_token", token);
+    } else {
+      localStorage.removeItem("mie_auth_token");
+    }
+  } catch (error) {
+    /* ignore */
+  }
+}
+
+// Adopt the session handed back by the Google OAuth redirect. The callback
+// lands the browser on "/?oauth=connected[&auth=<token>]"; we store the
+// token and strip it from the address bar (history.replaceState) so it never
+// lingers in the URL, browser history, or a shared link. Returns a small
+// descriptor so boot code can route the operator back to the composer.
+export function adoptAuthFromUrl() {
+  let url;
+  try {
+    url = new URL(window.location.href);
+  } catch (error) {
+    return { adopted: false, oauth: null };
+  }
+  const token = url.searchParams.get("auth") || "";
+  const oauth = url.searchParams.get("oauth");
+  if (token) {
+    setAuthToken(token);
+  }
+  if (token || oauth) {
+    url.searchParams.delete("auth");
+    url.searchParams.delete("oauth");
+    const cleaned = url.pathname + (url.search || "") + url.hash;
+    try {
+      window.history.replaceState(null, "", cleaned);
+    } catch (error) {
+      /* ignore */
+    }
+  }
+  return { adopted: Boolean(token), oauth };
+}
+
 function mergeHeaders(base, extra) {
   if (!extra) return base || {};
   const h = new Headers(base || {});
   for (const [k, v] of Object.entries(extra)) {
     if (v === null || v === undefined) continue;
     h.set(k, v);
+  }
+  const token = authToken();
+  if (token) {
+    h.set("Authorization", "Bearer " + token);
   }
   return h;
 }
@@ -86,7 +140,7 @@ async function requestOnce(path, params) {
     let response;
     try {
       response = await fetch(path + searchParams(params), {
-        headers: { Accept: "application/json" },
+        headers: mergeHeaders({ Accept: "application/json" }),
         credentials: "same-origin",
         signal: controller.signal,
       });
@@ -211,6 +265,35 @@ export const api = {
   deleteOutreach: (id) =>
     send(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}`,
       { method: "DELETE" }),
+  sendOutreach: (id) =>
+    send(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}/send`,
+      { method: "POST" }),
+  // Auth
+  login: async (email) => {
+    const res = await send(API_BASE_URL + "/api/v1/auth/login",
+      { method: "POST", body: JSON.stringify({ email }),
+        headers: { "Content-Type": "application/json" } });
+    if (res && res.session && res.session.session_token) {
+      setAuthToken(res.session.session_token);
+    }
+    return res;
+  },
+  me: () => request(API_BASE_URL + "/api/v1/auth/me"),
+  logout: async () => {
+    // Revoke server-side FIRST (send() attaches the current bearer), then
+    // drop the local token — clearing first would strand the session.
+    try {
+      return await send(API_BASE_URL + "/api/v1/auth/logout",
+        { method: "POST" });
+    } finally {
+      setAuthToken(null);
+    }
+  },
+  googleStart: () => request(API_BASE_URL + "/api/v1/auth/google/start"),
+  disconnectGmail: () =>
+    send(API_BASE_URL + "/api/v1/auth/google/disconnect",
+      { method: "POST" }),
+  isLoggedIn: () => Boolean(authToken()),
   // Phase 3: opportunity intelligence for a selected release.
   opportunities: (params) =>
     request(API_BASE_URL + "/api/v1/opportunities", params),
@@ -226,15 +309,11 @@ export const api = {
     send(API_BASE_URL + "/api/v1/djs/discover",
       { method: "POST", body: JSON.stringify(payload),
         headers: { "Content-Type": "application/json" } }),
-  // Phase 4c: independent public-web DJ discovery. No secrets ever sent;
-  // the backend answers honestly when the provider is unconfigured.
-  discoverDjs: (payload) =>
-    send(API_BASE_URL + "/api/v1/djs/discover",
-      { method: "POST", body: JSON.stringify(payload),
-        headers: { "Content-Type": "application/json" } }),
   deleteDj: (id) =>
     send(API_BASE_URL + `/api/v1/djs/${encodeURIComponent(id)}`,
       { method: "DELETE" }),
+  setAuthToken,
+  adoptAuthFromUrl,
 };
 
 /* Phase 8 addition: POST-capable companion to request(), sharing the same
@@ -247,6 +326,8 @@ export async function send(path, init, params) {
     try {
       const headers = { Accept: "application/json" };
       if (init && init.headers) Object.assign(headers, init.headers);
+      const token = authToken();
+      if (token) headers.Authorization = "Bearer " + token;
       response = await fetch(path + searchParams(params), {
         credentials: "same-origin",
         ...init,

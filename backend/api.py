@@ -32,6 +32,7 @@ or echoed into responses.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
 import os
@@ -39,7 +40,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from backend.routes import dispatch
+from backend.routes import dispatch, redirect_target
 
 from database.schema import SCHEMA_VERSION
 from database.service import PersistenceService
@@ -72,13 +73,29 @@ def build_handler(service: PersistenceService, track_store=None,
         # -- plumbing ------------------------------------------------------
         def _send_json(self, status: int, body: dict) -> None:
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self._send(status, "application/json; charset=utf-8", payload)
+
+        def _send(self, status: int, content_type: str, payload: bytes,
+                  extra_headers: dict | None = None) -> None:
             self.send_response(status)
-            self.send_header("Content-Type",
-                             "application/json; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("X-Content-Type-Options", "nosniff")
+            if extra_headers:
+                for name, value in extra_headers.items():
+                    self.send_header(name, value)
             self.end_headers()
             self.wfile.write(payload)
+
+        def _send_redirect(self, location: str) -> None:
+            safe = html.escape(location)
+            payload = (
+                '<!doctype html><html><head>'
+                f'<meta http-equiv="refresh" content="0; url={safe}">'
+                "</head><body>Redirecting…</body></html>"
+            ).encode("utf-8")
+            self._send(303, "text/html; charset=utf-8", payload,
+                       {"Location": location, "Cache-Control": "no-store"})
 
         def _read_body(self) -> bytes | None:
             length = int(self.headers.get("Content-Length") or 0)
@@ -97,7 +114,11 @@ def build_handler(service: PersistenceService, track_store=None,
                     discover_fetcher=discover_fetcher,
                     headers=self.headers,
                     discovery_scheduler=discovery_scheduler)
-                self._send_json(status, body)
+                location = redirect_target(body)
+                if location is not None:
+                    self._send_redirect(location)
+                else:
+                    self._send_json(status, body)
             except Exception:
                 LOGGER.exception("handler failure")
                 self._send_json(500, {

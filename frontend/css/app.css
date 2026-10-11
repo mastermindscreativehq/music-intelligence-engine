@@ -55,6 +55,29 @@ body {
 .badge-accent { color: var(--accent); border-color: var(--accent); }
 .badge-fail { color: var(--danger); border-color: var(--danger); }
 
+.account-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.account-area .account-email {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-area .account-status {
+  color: var(--danger);
+  font-size: 12px;
+}
+.account-area .account-btn {
+  padding: 4px 10px;
+  font-size: 12.5px;
+}
+
 .epistemics-note {
   margin: 10px 18px;
   color: var(--text-dim);
