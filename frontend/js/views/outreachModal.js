@@ -356,9 +356,12 @@ export function openOutreachModal(context) {
 
   /* Honest link state + a live preview of exactly what the email will carry.
    * Selecting a release auto-fills its SAVED listening URL; when the release
-   * has none we say so and clear the field rather than inventing a link. */
+   * has none we say so rather than inventing a link, and a link the operator
+   * typed by hand is never silently replaced by a later selection. */
   const linkHint = el("p", { class: "dim hint" });
   const linkPreview = el("p", { class: "dim music-link-preview" });
+  let autoLinkValue = "";
+  let linkEdited = Boolean(draftLink);
 
   function updateLinkPreview() {
     const url = musicLinkInput.value.trim();
@@ -374,22 +377,43 @@ export function openOutreachModal(context) {
   }
 
   function applyReleaseLink(track) {
-    if (!track) return;
-    const saved = String(track.listen_url || "").trim();
-    if (saved) {
-      musicLinkInput.value = saved;
+    const saved = track ? String(track.listen_url || "").trim() : "";
+    const current = musicLinkInput.value.trim();
+    if (!track) {
+      if (!linkEdited) {
+        musicLinkInput.value = "";
+        autoLinkValue = "";
+      }
       linkHint.replaceChildren(
-        "Using the saved listening URL for this release.");
-    } else {
+        "No release selected — a music link is optional.");
+    } else if (saved) {
+      if (linkEdited && current && current !== autoLinkValue) {
+        // Never silently replace a link the operator typed by hand.
+        linkHint.replaceChildren(
+          "This release's saved link differs from the link you entered. ",
+          "Clear the field to use the saved link.");
+      } else {
+        musicLinkInput.value = saved;
+        autoLinkValue = saved;
+        linkEdited = false;
+        linkHint.replaceChildren(
+          "Using the saved listening URL for this release.");
+      }
+    } else if (!linkEdited) {
       musicLinkInput.value = "";
+      autoLinkValue = "";
       linkHint.replaceChildren(
         "No listening URL is saved for this release — add one in My music. ",
         "Nothing is invented here.");
+    } else {
+      linkHint.replaceChildren(
+        "This release has no saved link; you'll send the link you entered.");
     }
     updateLinkPreview();
   }
 
   musicLinkInput.addEventListener("input", () => {
+    linkEdited = true;
     linkHint.replaceChildren();
     updateLinkPreview();
   });
@@ -593,6 +617,28 @@ export function openOutreachModal(context) {
     }
   });
 
+  /* Never prepare an email for a release that has no saved music link: ask
+   * the operator to add one in My music (or paste a link) instead of
+   * inventing a link or sending without one. */
+  function selectedReleaseId() {
+    return (typeof musicSelect === "object" && musicSelect.value)
+      ? musicSelect.value : "";
+  }
+
+  function askForLinkIfMissing() {
+    if (selectedReleaseId() && !musicLinkInput.value.trim()) {
+      linkHint.replaceChildren(
+        "No listening URL is saved for this release — add one in My music. ",
+        "Nothing is invented here.");
+      status.textContent =
+        "This release has no saved listening URL. Add one in My music, or " +
+        "paste a link above, before handing off.";
+      musicLinkInput.focus();
+      return false;
+    }
+    return true;
+  }
+
   /* Primary handoff: create the record if it does not exist yet, log the
    * opened_in_email attempt, then open the operator's own email client. No
    * Google account is involved anywhere in this path. */
@@ -602,6 +648,7 @@ export function openOutreachModal(context) {
   if (handoffButton) {
     handoffButton.addEventListener("click", async () => {
       if (handoffButton.disabled) return;
+      if (!askForLinkIfMissing()) return;
       handoffButton.disabled = true;
       handoffButton.textContent = "opening…";
       try {
