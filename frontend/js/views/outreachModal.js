@@ -27,11 +27,22 @@
  * addEventListener, never innerHTML.
  */
 
-import { api } from "../api.js";
+import { api, ApiError } from "../api.js";
 import { el } from "../dom.js";
 
 const DRAFT_PREFIX = "mie.outreach.draft.";
 const SENDER_PREF_KEY = "mie.outreach.from.address";
+
+/* Mirrors outreach.ai_writer.STYLES on the backend. The key is what the API
+ * accepts; the label is what the operator reads. Kept in sync by hand. */
+const EMAIL_STYLES = [
+  ["professional", "Professional and direct"],
+  ["warm", "Warm and personal"],
+  ["story", "Story-driven and emotional"],
+  ["concise", "Concise radio submission"],
+  ["industry", "Music-industry introduction"],
+  ["pitch", "Curator or playlist pitch"],
+];
 
 export function senderPref() {
   try {
@@ -291,6 +302,18 @@ export function openOutreachModal(context) {
     ? ((record.context && record.context.music_link)
       || (record.track && record.track.listen_url) || "")
     : "";
+  const recordTrack = record && record.track && typeof record.track === "object"
+    ? record.track : null;
+  const recordTrackId = recordTrack && recordTrack.track_id
+    ? String(recordTrack.track_id) : "";
+  // The artist name is taken from the signed-in operator's profile when
+  // available; the composer never invents an artist identity. AI drafting is
+  // separately gated behind a signed-in session on the backend, so an absent
+  // name simply means the draft is written without one.
+  let artistName = "";
+  api.me().then((me) => {
+    if (me && me.user && me.user.name) artistName = String(me.user.name);
+  }).catch(() => { /* not signed in: no artist name */ });
   let draftLink = "";
   let fromInput;
   let subjectInput;
@@ -443,6 +466,89 @@ export function openOutreachModal(context) {
     setSenderPref(fromInput.value);
     status.textContent = "Draft saved in this browser session.";
   };
+
+  /* ---- song-story-aware writing (draft only; user edits, then hand off) --
+   * The draft draws on the SELECTED release's saved song story and listening
+   * link, the recipient's verified context, and the operator's objective.
+   * It populates the SAME editable subject/message fields, so a generated
+   * draft is edited and handed off through the existing workflow — nothing
+   * is auto-sent. */
+  const styleSelect = el("select", { name: "style" },
+    EMAIL_STYLES.map(([value, label]) =>
+      el("option", { value, selected: value === "professional" }, label)));
+  const instructionsInput = el("input", {
+    type: "text",
+    placeholder: "Optional focus, e.g. emphasize the late-night theme",
+    autocomplete: "off",
+  });
+
+  function currentTrackId() {
+    if (record) return recordTrackId;
+    return typeof selectedReleaseId === "function"
+      ? selectedReleaseId() : "";
+  }
+
+  async function writeFromStory() {
+    const trackId = currentTrackId();
+    if (!trackId) {
+      status.textContent =
+        "Pick a release first, then write from its song story.";
+      return;
+    }
+    if (subjectInput.value.trim() || bodyInput.value.trim()) {
+      const replace = window.confirm(
+        "Replace the current subject and message with a new draft?");
+      if (!replace) return;
+    }
+    writeButton.disabled = true;
+    writeButton.textContent = "writing…";
+    status.textContent = "Writing from the song story…";
+    try {
+      const draft = await api.composeEmail({
+        track_id: trackId,
+        style: styleSelect.value,
+        instructions: instructionsInput.value.trim(),
+        recipient: {
+          name: recipient.name || null,
+          role: recipient.role || null,
+          organization: stationName || null,
+          email,
+        },
+        artist: { name: artistName },
+      });
+      subjectInput.value = draft.subject || "";
+      bodyInput.value = draft.message || "";
+      save();
+      const notes = [];
+      if (!draft.used_story) {
+        notes.push("no song story is saved for this release - add one in "
+          + "My music");
+      }
+      if (!draft.link_included) {
+        notes.push("no listening link was included");
+      }
+      status.textContent = `Draft ready${draft.used_ai ? " (AI)" : ""}. `
+        + (notes.length
+          ? "Note: " + notes.join("; ") + "."
+          : "Edit it freely, then hand it off.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        status.textContent =
+          "Sign in to write with AI, then try again. You can still compose "
+          + "and hand off manually without signing in.";
+      } else {
+        status.textContent = `Could not write a draft: ${
+          error && error.message ? error.message : String(error)}`;
+      }
+    } finally {
+      writeButton.disabled = false;
+      writeButton.textContent = "Write email from song story";
+    }
+  }
+
+  const writeButton = el("button", { class: "ai-write-btn", type: "button" },
+    "Write email from song story");
+  writeButton.addEventListener("click", writeFromStory);
 
   /* Appends an append-only ATTEMPT in the ledger; never changes the stored
    * status. Only a provider-confirmed send (or the operator's explicit
@@ -758,6 +864,17 @@ export function openOutreachModal(context) {
           "Left blank it is simply omitted.")),
       linkHint,
       linkPreview,
+      el("div", { class: "ai-writer" },
+        el("label", { class: "field" },
+          el("span", {}, "Writing style"),
+          styleSelect),
+        el("label", { class: "field" },
+          el("span", {}, "Extra instruction (optional)"),
+          instructionsInput),
+        writeButton,
+        el("p", { class: "dim hint" },
+          "Drafts a recipient-specific email from this release's saved song "
+          + "story and listening link. Nothing is sent; edit freely.")),
       el("button", { class: "oc-greeting-btn", onClick: addGreeting },
         "Add personalized greeting"),
       el("label", { class: "field" },

@@ -148,6 +148,12 @@ ROUTE_TABLE = (
     ("POST", re.compile(r"^/api/v1/outreach$"), "/api/v1/outreach", ()),
     ("GET", re.compile(r"^/api/v1/outreach$"), "/api/v1/outreach",
      OUTREACH_PARAMS),
+    # Phase 13: song-story-aware AI email DRAFT. Requires an authenticated
+    # operator (email session — never Google OAuth) and enforces release
+    # ownership; returns a draft only, never creating an outreach record or
+    # sending anything.
+    ("POST", re.compile(r"^/api/v1/outreach/draft-email$"),
+     "/api/v1/outreach/draft-email", ()),
     ("POST", re.compile(r"^/api/v1/outreach/(?P<outreach_id>[^/]+)/event$"),
      "/api/v1/outreach/{outreach_id}/event", ()),
     ("POST", re.compile(r"^/api/v1/outreach/(?P<outreach_id>[^/]+)/send$"),
@@ -644,9 +650,11 @@ def _handle(service, method: str, match: re.Match, params: dict,
     # -- Phase 8: submission assets -------------------------------------------
     if path == "/api/v1/tracks":
         if method == "POST":
+            user = _get_current_user(service, headers)
             row = submission_service.upload_track(
                 service, track_store, body,
-                filename=_first(params, "filename"))
+                filename=_first(params, "filename"),
+                owner_user_id=user["user_id"] if user else None)
             return 201, success_body(track_projection(row))
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
@@ -662,9 +670,18 @@ def _handle(service, method: str, match: re.Match, params: dict,
             service.delete_track(track_id)
             return 200, success_body({"track_id": track_id})
         if method == "PATCH":
+            # Ownership guard on the mutating path: a release that has an
+            # owner (was uploaded by a signed-in user) may only be edited by
+            # that user. Legacy/anonymous uploads keep owner_user_id NULL and
+            # remain editable exactly as before.
+            user = _get_current_user(service, headers)
+            owner = track.get("owner_user_id")
+            if owner and (not user or user["user_id"] != owner):
+                return 403, error_body(
+                    "forbidden", "this release belongs to another user")
             payload = _parse_json_body(body)
-            row = submission_service.update_track_listen_url(
-                service, track_id, payload.get("listen_url"))
+            row = submission_service.update_track_fields(
+                service, track_id, payload)
             return 200, success_body(track_projection(row))
         return 200, success_body(track_projection(track))
 
@@ -682,6 +699,29 @@ def _handle(service, method: str, match: re.Match, params: dict,
         return 200, success_body({"outreach": rows, "total": total,
                                   "limit": limit, "offset": offset,
                                   "dev_fixtures_excluded": dev_excluded})
+
+    if path == "/api/v1/outreach/draft-email" and method == "POST":
+        # An authenticated operator composes a draft from a release they are
+        # authorized for. Draft-only: this never persists or sends.
+        user = _get_current_user(service, headers)
+        if not user:
+            return 401, error_body(
+                "unauthorized", "sign in to write an email with AI")
+        payload = _parse_json_body(body)
+        track_id = payload.get("track_id")
+        if not isinstance(track_id, str) or not track_id.strip():
+            raise ValueError("track_id required")
+        track = service.get_track(track_id)
+        if track is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
+        owner = track.get("owner_user_id")
+        if owner and owner != user["user_id"]:
+            return 403, error_body(
+                "forbidden", "this release belongs to another user")
+        from outreach import ai_writer
+        draft = ai_writer.compose_email(
+            track=track, payload=payload, client=ai_writer.default_client())
+        return 200, success_body(draft)
 
     if path.startswith("/api/v1/outreach/") and path.endswith("/event"):
         outreach_id = match.group("outreach_id")

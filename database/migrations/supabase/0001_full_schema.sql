@@ -211,6 +211,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     reject_reason     TEXT,
     notes             TEXT,
     listen_url        TEXT,
+    song_story        TEXT,
+    owner_user_id     TEXT,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );

@@ -497,8 +497,10 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     @app.post("/api/v1/tracks", status_code=201)
     async def upload_track(request: Request, filename: str | None = None):
         data = await request.body()
+        user = _get_current_user(request)
         row = submission_service.upload_track(
-            storage, track_store, data, filename=filename)
+            storage, track_store, data, filename=filename,
+            owner_user_id=user["user_id"] if user else None)
         return success_body(track_projection(row))
 
     @app.get("/api/v1/tracks")
@@ -525,14 +527,24 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
 
     @app.patch("/api/v1/tracks/{track_id}")
     async def update_track(track_id: str, request: Request):
-        # One editable presentation field: the release's official listening
-        # URL. JSON body {"listen_url": "https://…"}; an empty value clears
-        # it; an invalid value is a 400 (ValueError handler) — never invented.
-        if submission_service.get_track(storage, track_id) is None:
+        # Operator-owned presentation fields: the release's official listening
+        # URL and its song story / creative brief. JSON body may carry
+        # {"listen_url": "https://…"} and/or {"song_story": "…"}; an empty
+        # value clears that field; an invalid link is a 400 (ValueError
+        # handler) — never invented. Ownership guard mirrors dispatch: a
+        # release with an owner may only be edited by that user; legacy NULL-
+        # owner releases keep their historical editable-by-anyone behavior.
+        track = submission_service.get_track(storage, track_id)
+        if track is None:
             raise TrackNotFound(f"unknown track {track_id!r}")
+        user = _get_current_user(request)
+        owner = track.get("owner_user_id")
+        if owner and (not user or user["user_id"] != owner):
+            return _json(403, error_body(
+                "forbidden", "this release belongs to another user"))
         payload = await _json_request(request)
-        row = submission_service.update_track_listen_url(
-            storage, track_id, payload.get("listen_url"))
+        row = submission_service.update_track_fields(
+            storage, track_id, payload)
         return success_body(track_projection(row))
 
     @app.get("/api/v1/stations/{key}/submission")
@@ -602,6 +614,31 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             storage, outreach_id, event=event, meta=payload.get("meta"))
         return success_body(record)
 
+    @app.post("/api/v1/outreach/draft-email")
+    async def draft_email(request: Request):
+        # Song-story-aware AI DRAFT. An authenticated operator (email
+        # session — never Google OAuth) composes from a release they are
+        # authorized for; the response is a draft only and nothing is
+        # persisted or sent.
+        user = _get_current_user(request)
+        if not user:
+            return _json(401, error_body(
+                "unauthorized", "sign in to write an email with AI"))
+        payload = await _json_request(request)
+        track_id = payload.get("track_id")
+        if not isinstance(track_id, str) or not track_id.strip():
+            raise ValueError("track_id required")
+        track = submission_service.get_track(storage, track_id)
+        if track is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
+        owner = track.get("owner_user_id")
+        if owner and owner != user["user_id"]:
+            return _json(403, error_body(
+                "forbidden", "this release belongs to another user"))
+        from outreach import ai_writer
+        draft = ai_writer.compose_email(
+            track=track, payload=payload, client=ai_writer.default_client())
+        return success_body(draft)
 
     @app.post("/api/v1/outreach/{outreach_id}/send")
     async def outreach_send(outreach_id: str, request: Request):

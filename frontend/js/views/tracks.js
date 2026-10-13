@@ -103,6 +103,56 @@ function listenUrlEditor(record) {
     status);
 }
 
+/* The song story / creative brief is the operator's OWN account of the song.
+ * It is saved per release and used as source material when writing outreach;
+ * it is never inferred from the filename, the audio, or anything else. */
+function songStoryEditor(record) {
+  const input = el("textarea", {
+    class: "song-story-input",
+    rows: "6",
+    placeholder: "Inspiration, story, themes, emotions, audience, what "
+      + "makes it different…",
+    autocomplete: "off",
+    spellcheck: "true",
+  });
+  input.value = record.song_story || "";
+  const save = el("button", { class: "primary", type: "button" },
+    "Save story");
+  const status = el("p", { class: "dim", role: "status" });
+
+  save.addEventListener("click", async () => {
+    if (save.disabled) return;
+    save.disabled = true;
+    save.textContent = "saving…";
+    try {
+      const saved = await api.updateTrackSongStory(
+        record.track_id, input.value);
+      const story = saved.song_story || "";
+      input.value = story;
+      status.replaceChildren(story
+        ? "Saved. Outreach can draw on this story for this release."
+        : "Cleared. This release has no song story saved.");
+    } catch (error) {
+      const detail = error instanceof ApiError
+        ? `${error.code}: ${error.message}` : String(error);
+      status.replaceChildren(el("span", { class: "banner-error" }, detail));
+    } finally {
+      save.disabled = false;
+      save.textContent = "Save story";
+    }
+  });
+
+  return el("details", { class: "track-story" },
+    el("summary", {}, "Song story / creative brief"),
+    el("p", { class: "dim" },
+      "Your own account of this song - inspiration, meaning, themes, "
+      + "audience. Used as source material when writing outreach; the "
+      + "writer never invents a song's meaning."),
+    el("label", { class: "field" }, el("span", {}, "Story"), input),
+    save,
+    status);
+}
+
 function uploadCard(onUploaded) {
   const fileInput = el("input", {
     type: "file",
@@ -211,6 +261,7 @@ function trackDetailPanel(data) {
   return el("div", { class: "track-detail" },
     main,
     listenUrlEditor(record),
+    songStoryEditor(record),
     tech);
 }
 

@@ -86,9 +86,14 @@ class IntelligenceRepository(Protocol):
         """Insert or update a track row; returns the stored projection.
 
         ``track_id`` ('sha256:<hex>') is the only asset identifier; no
-        filesystem paths cross this boundary. ``listen_url`` is the one
-        operator-owned presentation field (official listening URL);
-        mutable alongside status/reject_reason/notes.
+        filesystem paths cross this boundary. ``listen_url`` (official
+        listening URL) and ``song_story`` (operator's creative brief) are
+        operator-owned presentation fields, mutable alongside
+        status/reject_reason/notes. A mutable field ABSENT from the input is
+        carried forward from the existing row (an identical-byte re-upload
+        never wipes them); an explicit ``None`` clears it. ``owner_user_id``
+        is set on first upload when authenticated and preserved thereafter;
+        it is internal and never part of the public projection.
         """
         ...
 

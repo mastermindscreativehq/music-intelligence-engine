@@ -258,6 +258,16 @@ export const api = {
         body: JSON.stringify({ listen_url: listenUrl }),
         headers: { "Content-Type": "application/json" },
       }),
+  // Phase 13: edit the release's song story / creative brief — the
+  // operator's own account of the song, used as source material for
+  // outreach. An empty string clears it; it is never inferred.
+  updateTrackSongStory: (trackId, songStory) =>
+    send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ song_story: songStory }),
+        headers: { "Content-Type": "application/json" },
+      }),
   // Phase 9: outreach records/history. These POST JSON objects; send()
   // shares the envelope/typed-error conventions.
   createOutreach: (payload) =>
@@ -278,6 +288,12 @@ export const api = {
   sendOutreach: (id) =>
     send(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}/send`,
       { method: "POST" }),
+  // Phase 13: song-story-aware outreach DRAFT. Requires a signed-in operator
+  // (email session). Draft ONLY — never creates a record and never sends.
+  composeEmail: (payload) =>
+    send(API_BASE_URL + "/api/v1/outreach/draft-email",
+      { method: "POST", body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" } }),
   // Auth
   login: async (email) => {
     const res = await send(API_BASE_URL + "/api/v1/auth/login",

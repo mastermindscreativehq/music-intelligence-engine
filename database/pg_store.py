@@ -927,20 +927,35 @@ class PostgresStorage:
             "reject_reason": row["reject_reason"],
             "notes": row["notes"],
             "listen_url": row["listen_url"],
+            "song_story": row["song_story"],
+            "owner_user_id": row["owner_user_id"],
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
 
     def save_track(self, track: dict) -> dict:
+        """Insert or update one track row (mirrors the SQLite repository).
+
+        A mutable field ABSENT from *track* is carried forward from the
+        existing row, so an identical-byte re-upload never wipes the
+        operator's listening URL or song story; an explicitly-present
+        ``None`` clears it. ``owner_user_id`` is set on first upload and
+        preserved thereafter.
+        """
         now = utc_now_iso()
         with self._lock:
             self._ensure_connection()
             with self._conn:
                 cur = self._conn.cursor()
-                cur.execute(
-                    "SELECT created_at FROM tracks WHERE track_id=%s",
-                    (track["track_id"],))
+                cur.execute("SELECT * FROM tracks WHERE track_id=%s",
+                            (track["track_id"],))
                 existing = cur.fetchone()
+
+                def _keep(key):
+                    if key in track:
+                        return track[key]
+                    return existing[key] if existing else None
+
                 created = existing["created_at"] if existing \
                     else str(track.get("created_at") or now)
                 cur.execute(
@@ -948,8 +963,9 @@ class PostgresStorage:
                     INSERT INTO tracks(track_id, sha256, original_filename,
                                        size_bytes, content_type, status,
                                        reject_reason, notes, listen_url,
-                                       created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                       song_story, owner_user_id, created_at,
+                                       updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(track_id) DO UPDATE SET
                         original_filename=EXCLUDED.original_filename,
                         content_type=EXCLUDED.content_type,
@@ -957,6 +973,8 @@ class PostgresStorage:
                         reject_reason=EXCLUDED.reject_reason,
                         notes=EXCLUDED.notes,
                         listen_url=EXCLUDED.listen_url,
+                        song_story=EXCLUDED.song_story,
+                        owner_user_id=EXCLUDED.owner_user_id,
                         updated_at=EXCLUDED.updated_at
                     """,
                     (track["track_id"], track["sha256"],
@@ -964,7 +982,8 @@ class PostgresStorage:
                      int(track["size_bytes"]),
                      track.get("content_type") or "audio/mpeg",
                      track["status"], track.get("reject_reason"),
-                     track.get("notes"), track.get("listen_url"), created,
+                     track.get("notes"), _keep("listen_url"),
+                     _keep("song_story"), _keep("owner_user_id"), created,
                      str(track.get("updated_at") or now)))
         return self.get_track(track["track_id"])
 

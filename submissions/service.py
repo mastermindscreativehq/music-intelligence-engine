@@ -31,8 +31,9 @@ __all__ = [
     "DEFAULT_MAX_BYTES", "TRACK_STATUSES", "TrackRejected",
     "TrackTooLarge", "default_link_fetcher", "default_track_store",
     "get_track", "link_history", "list_tracks", "normalize_listen_url",
-    "run_link_checks", "station_submission", "track_id_for",
-    "update_track_listen_url", "upload_track",
+    "normalize_song_story", "run_link_checks", "station_submission",
+    "track_id_for", "update_track_fields", "update_track_listen_url",
+    "update_track_song_story", "upload_track",
 ]
 
 
@@ -64,15 +65,21 @@ def default_link_fetcher():
 # -- tracks -------------------------------------------------------------------
 
 def upload_track(repository, store, data, filename=None,
-                 max_bytes=DEFAULT_MAX_BYTES):
+                 max_bytes=DEFAULT_MAX_BYTES, owner_user_id=None):
     """Validate, store (when accepted), persist, and return a track row.
 
     - Accepted payloads are content-addressed into *store* and saved with
-      status ``ready``. Re-uploading identical bytes is idempotent.
+      status ``ready``. Re-uploading identical bytes is idempotent and
+      never wipes an operator's saved listening URL or song story.
     - Oversize raises :class:`TrackTooLarge` (no DB row — the payload was
       refused before it could be characterized).
     - Wrong-content payloads raise :class:`TrackRejected` AFTER an
       auditability row is persisted with status ``quarantined``.
+
+    ``owner_user_id`` stamps first-class ownership when an authenticated
+    user is known; it is omitted (NULL) for anonymous/legacy uploads so the
+    historical single-operator behavior is preserved, and it is never
+    overwritten on a repeat upload by an anonymous caller.
     """
     if not isinstance(data, (bytes, bytearray)) or not data:
         raise TrackRejected("empty upload")
@@ -83,7 +90,7 @@ def upload_track(repository, store, data, filename=None,
     if not verdict["accepted"]:
         if "exceeds" in (verdict["reason"] or ""):
             raise TrackTooLarge(verdict["reason"])
-        repository.save_track({
+        row = {
             "track_id": track_id,
             "sha256": digest,
             "original_filename": sanitize_filename(filename),
@@ -91,19 +98,25 @@ def upload_track(repository, store, data, filename=None,
             "content_type": "application/octet-stream",
             "status": "quarantined",
             "reject_reason": verdict["reason"],
-        })
+        }
+        if owner_user_id:
+            row["owner_user_id"] = owner_user_id
+        repository.save_track(row)
         raise TrackRejected(verdict["reason"])
     key = store.put(data)
     if key != track_id:                                   # defensive
         raise RuntimeError("storage key mismatch")
-    return repository.save_track({
+    row = {
         "track_id": track_id,
         "sha256": digest,
         "original_filename": sanitize_filename(filename),
         "size_bytes": len(data),
         "content_type": "audio/mpeg",
         "status": "ready",
-    })
+    }
+    if owner_user_id:
+        row["owner_user_id"] = owner_user_id
+    return repository.save_track(row)
 
 
 def get_track(repository, track_id):
@@ -142,6 +155,54 @@ def update_track_listen_url(repository, track_id, listen_url):
         return None
     updated = dict(row)
     updated["listen_url"] = normalize_listen_url(listen_url)
+    updated["updated_at"] = utc_now_iso()
+    return repository.save_track(updated)
+
+
+def normalize_song_story(value):
+    """Return the operator's song story / creative brief, or None to clear.
+
+    Free text stored verbatim (whitespace-trimmed). A blank/whitespace value
+    clears the field (honest absence). It is the operator's OWN account of
+    the song — source material for outreach, never invented or inferred.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def update_track_song_story(repository, track_id, song_story):
+    """Set/clear one release's song story; None when the track is unknown."""
+    row = repository.get_track(track_id)
+    if row is None:
+        return None
+    updated = dict(row)
+    updated["song_story"] = normalize_song_story(song_story)
+    updated["updated_at"] = utc_now_iso()
+    return repository.save_track(updated)
+
+
+def update_track_fields(repository, track_id, payload):
+    """PATCH one release's operator-owned fields; None when unknown.
+
+    Only keys present in *payload* are changed (``listen_url`` and/or
+    ``song_story``); at least one editable key is required. Every value is
+    validated before any write, so a bad link refuses the whole update and
+    leaves the row untouched. Reuses ``save_track`` so immutable fields and
+    ``created_at`` survive while ``updated_at`` advances.
+    """
+    row = repository.get_track(track_id)
+    if row is None:
+        return None
+    editable = [key for key in ("listen_url", "song_story") if key in payload]
+    if not editable:
+        raise ValueError("body must contain listen_url or song_story")
+    updated = dict(row)
+    if "listen_url" in payload:
+        updated["listen_url"] = normalize_listen_url(payload["listen_url"])
+    if "song_story" in payload:
+        updated["song_story"] = normalize_song_story(payload["song_story"])
     updated["updated_at"] = utc_now_iso()
     return repository.save_track(updated)
 

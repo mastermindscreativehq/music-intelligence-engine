@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -508,6 +508,20 @@ ALTER TABLE oauth_state ADD COLUMN code_verifier TEXT;
     # time. Additive: no existing column or row is touched.
     (12, """
 ALTER TABLE tracks ADD COLUMN listen_url TEXT;
+"""),
+
+    # Song story / creative brief per release, plus first-class ownership.
+    # ``song_story`` is the operator's own account of the song (inspiration,
+    # meaning, themes, audience) used as source material when composing
+    # recipient-specific outreach; it is free text and defaults to NULL, so
+    # the writer can honestly say no story was provided rather than invent
+    # one. ``owner_user_id`` records which authenticated user uploaded the
+    # release; it is NULL for legacy/anonymous uploads (shared, single-
+    # operator behavior preserved) and is never exposed in the public track
+    # projection. Additive: no existing column or row is touched.
+    (13, """
+ALTER TABLE tracks ADD COLUMN song_story TEXT;
+ALTER TABLE tracks ADD COLUMN owner_user_id TEXT;
 """),
 ]
 
