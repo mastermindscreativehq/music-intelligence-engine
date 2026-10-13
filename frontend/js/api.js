@@ -248,6 +248,16 @@ export const api = {
         headers: { "Content-Type": "audio/mpeg" },
       },
       { filename }),
+  // Edit the release's official listening URL. An empty string clears it;
+  // the backend validates and refuses anything that is not an absolute
+  // http(s) URL, so a bad link surfaces as a typed error, never a silent fix.
+  updateTrackListenUrl: (trackId, listenUrl) =>
+    send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ listen_url: listenUrl }),
+        headers: { "Content-Type": "application/json" },
+      }),
   // Phase 9: outreach records/history. These POST JSON objects; send()
   // shares the envelope/typed-error conventions.
   createOutreach: (payload) =>

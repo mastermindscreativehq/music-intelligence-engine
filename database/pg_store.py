@@ -926,6 +926,7 @@ class PostgresStorage:
             "status": row["status"],
             "reject_reason": row["reject_reason"],
             "notes": row["notes"],
+            "listen_url": row["listen_url"],
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
@@ -946,15 +947,16 @@ class PostgresStorage:
                     """
                     INSERT INTO tracks(track_id, sha256, original_filename,
                                        size_bytes, content_type, status,
-                                       reject_reason, notes,
+                                       reject_reason, notes, listen_url,
                                        created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(track_id) DO UPDATE SET
                         original_filename=EXCLUDED.original_filename,
                         content_type=EXCLUDED.content_type,
                         status=EXCLUDED.status,
                         reject_reason=EXCLUDED.reject_reason,
                         notes=EXCLUDED.notes,
+                        listen_url=EXCLUDED.listen_url,
                         updated_at=EXCLUDED.updated_at
                     """,
                     (track["track_id"], track["sha256"],
@@ -962,7 +964,7 @@ class PostgresStorage:
                      int(track["size_bytes"]),
                      track.get("content_type") or "audio/mpeg",
                      track["status"], track.get("reject_reason"),
-                     track.get("notes"), created,
+                     track.get("notes"), track.get("listen_url"), created,
                      str(track.get("updated_at") or now)))
         return self.get_track(track["track_id"])
 

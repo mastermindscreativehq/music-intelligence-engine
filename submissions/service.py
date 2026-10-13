@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from urllib.parse import urlparse
 
 from discovery.models import utc_now_iso
 
@@ -24,12 +25,14 @@ from submissions.validation import DEFAULT_MAX_BYTES, sanitize_filename, \
     validate_upload
 
 TRACK_STATUSES = ("ready", "quarantined", "archived")
+LISTEN_URL_SCHEMES = ("http", "https")
 
 __all__ = [
     "DEFAULT_MAX_BYTES", "TRACK_STATUSES", "TrackRejected",
     "TrackTooLarge", "default_link_fetcher", "default_track_store",
-    "get_track", "link_history", "list_tracks", "run_link_checks",
-    "station_submission", "track_id_for", "upload_track",
+    "get_track", "link_history", "list_tracks", "normalize_listen_url",
+    "run_link_checks", "station_submission", "track_id_for",
+    "update_track_listen_url", "upload_track",
 ]
 
 
@@ -105,6 +108,42 @@ def upload_track(repository, store, data, filename=None,
 
 def get_track(repository, track_id):
     return repository.get_track(track_id)
+
+
+def normalize_listen_url(value):
+    """Return the canonical listening URL, or None to clear it.
+
+    Only absolute ``http``/``https`` URLs are accepted — a bare host, a
+    scheme-relative path, or a non-web scheme is refused with ValueError so
+    the operator is told to fix the link instead of us inventing one. An
+    empty/whitespace value clears the field (honest absence).
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme not in LISTEN_URL_SCHEMES or not parsed.netloc:
+        raise ValueError(
+            "'listen_url' must be an absolute http(s) URL")
+    return text
+
+
+def update_track_listen_url(repository, track_id, listen_url):
+    """Set/clear one release's official listening URL; None when unknown.
+
+    Reuses the existing track upsert (``save_track``) so the row keeps its
+    immutable fields and ``created_at`` while ``updated_at`` advances. The
+    value is validated first, so a bad link is refused before any write.
+    """
+    row = repository.get_track(track_id)
+    if row is None:
+        return None
+    updated = dict(row)
+    updated["listen_url"] = normalize_listen_url(listen_url)
+    updated["updated_at"] = utc_now_iso()
+    return repository.save_track(updated)
 
 
 def list_tracks(repository, limit=50, offset=0, status=None):

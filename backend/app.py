@@ -16,6 +16,7 @@ Phase 6-8 additions:
     POST /api/v1/tracks                                    (Phase 8)
     GET  /api/v1/tracks[?limit&offset&status]              (Phase 8)
     GET  /api/v1/tracks/{track_id}                         (Phase 8)
+    PATCH /api/v1/tracks/{track_id}                        (Phase 12)
     GET  /api/v1/stations/{identity_key}/submission        (Phase 8)
     POST /api/v1/stations/{identity_key}/submission/checks (Phase 8)
     GET  /api/v1/stations/{identity_key}/submission/checks (Phase 8)
@@ -521,6 +522,18 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             raise TrackNotFound(f"unknown track {track_id!r}")
         storage.delete_track(track_id)
         return success_body({"track_id": track_id})
+
+    @app.patch("/api/v1/tracks/{track_id}")
+    async def update_track(track_id: str, request: Request):
+        # One editable presentation field: the release's official listening
+        # URL. JSON body {"listen_url": "https://…"}; an empty value clears
+        # it; an invalid value is a 400 (ValueError handler) — never invented.
+        if submission_service.get_track(storage, track_id) is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
+        payload = await _json_request(request)
+        row = submission_service.update_track_listen_url(
+            storage, track_id, payload.get("listen_url"))
+        return success_body(track_projection(row))
 
     @app.get("/api/v1/stations/{key}/submission")
     def get_submission(key: str):

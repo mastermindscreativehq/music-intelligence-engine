@@ -86,7 +86,9 @@ class IntelligenceRepository(Protocol):
         """Insert or update a track row; returns the stored projection.
 
         ``track_id`` ('sha256:<hex>') is the only asset identifier; no
-        filesystem paths cross this boundary.
+        filesystem paths cross this boundary. ``listen_url`` is the one
+        operator-owned presentation field (official listening URL);
+        mutable alongside status/reject_reason/notes.
         """
         ...
 

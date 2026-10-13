@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS tracks (
                          ('ready', 'quarantined', 'archived')),
     reject_reason     TEXT,
     notes             TEXT,
+    listen_url        TEXT,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );

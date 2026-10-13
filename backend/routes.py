@@ -138,6 +138,13 @@ ROUTE_TABLE = (
     ("DELETE",
      re.compile(r"^/api/v1/tracks/(?P<track_id>sha256:[0-9a-f]{64})$"),
      "/api/v1/tracks/{track_id}", ()),
+    # Edit the one operator-owned presentation field on a stored release:
+    # its official listening URL. JSON body {"listen_url": "https://…"} sets
+    # it, an empty value clears it, and an invalid value is a 400 — the
+    # backend never fabricates a link.
+    ("PATCH",
+     re.compile(r"^/api/v1/tracks/(?P<track_id>sha256:[0-9a-f]{64})$"),
+     "/api/v1/tracks/{track_id}", ()),
     ("POST", re.compile(r"^/api/v1/outreach$"), "/api/v1/outreach", ()),
     ("GET", re.compile(r"^/api/v1/outreach$"), "/api/v1/outreach",
      OUTREACH_PARAMS),
@@ -654,6 +661,11 @@ def _handle(service, method: str, match: re.Match, params: dict,
         if method == "DELETE":
             service.delete_track(track_id)
             return 200, success_body({"track_id": track_id})
+        if method == "PATCH":
+            payload = _parse_json_body(body)
+            row = submission_service.update_track_listen_url(
+                service, track_id, payload.get("listen_url"))
+            return 200, success_body(track_projection(row))
         return 200, success_body(track_projection(track))
 
     # -- Phase 9: outreach ----------------------------------------------------

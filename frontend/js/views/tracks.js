@@ -32,6 +32,77 @@ function statusChip(status) {
     String(status ?? "unknown"));
 }
 
+/* The saved official listening URL is a link when present and an honest
+ * "not saved" note when absent — this module never invents a link. */
+function listenLink(url) {
+  const value = String(url || "").trim();
+  if (!value) {
+    return el("span", { class: "dim" }, "No listening URL saved yet.");
+  }
+  return el("a", {
+    class: "linkish",
+    href: value,
+    target: "_blank",
+    rel: "noopener noreferrer",
+  }, value);
+}
+
+/* Edit the one operator-owned presentation field on a release. Saving posts
+ * to the real PATCH endpoint; the backend validates and refuses anything
+ * that is not an absolute http(s) URL, so a bad link surfaces as a typed
+ * error rather than a silent correction. */
+function listenUrlEditor(record) {
+  const input = el("input", {
+    type: "url",
+    class: "listen-url-input",
+    placeholder: "Official listening page URL",
+    autocomplete: "off",
+    spellcheck: "false",
+    value: record.listen_url || "",
+  });
+  const save = el("button", { class: "primary", type: "button" }, "Save link");
+  const status = el("p", { class: "dim", role: "status" });
+  const current = el("div", { class: "listen-current" },
+    el("span", { class: "dim" }, "Current: "), listenLink(record.listen_url));
+
+  const showCurrent = (url) =>
+    current.replaceChildren(el("span", { class: "dim" }, "Current: "),
+      listenLink(url));
+
+  save.addEventListener("click", async () => {
+    if (save.disabled) return;
+    save.disabled = true;
+    save.textContent = "saving…";
+    try {
+      const saved = await api.updateTrackListenUrl(
+        record.track_id, input.value.trim());
+      const url = saved.listen_url || "";
+      input.value = url;
+      showCurrent(url);
+      status.replaceChildren(url
+        ? "Saved. Outreach for this release uses this link automatically."
+        : "Cleared. Outreach will ask you to add a link before it includes one.");
+    } catch (error) {
+      const detail = error instanceof ApiError
+        ? `${error.code}: ${error.message}` : String(error);
+      status.replaceChildren(el("span", { class: "banner-error" }, detail));
+    } finally {
+      save.disabled = false;
+      save.textContent = "Save link";
+    }
+  });
+
+  return el("details", { class: "track-listen", open: true },
+    el("summary", {}, "Official listening URL"),
+    el("p", { class: "dim" },
+      "Where this release can be heard. Outreach reuses it automatically and "
+      + "never invents one."),
+    current,
+    el("label", { class: "field" }, el("span", {}, "Listening URL"), input),
+    save,
+    status);
+}
+
 function uploadCard(onUploaded) {
   const fileInput = el("input", {
     type: "file",
@@ -128,6 +199,7 @@ function trackDetailPanel(data) {
     ["status", record.status],
     ["reject reason", record.reject_reason],
     ["notes", record.notes],
+    ["listening url", record.listen_url],
     ["changed", record.updated_at],
     ["asset link", record.links && record.links.self],
   ];
@@ -138,6 +210,7 @@ function trackDetailPanel(data) {
 
   return el("div", { class: "track-detail" },
     main,
+    listenUrlEditor(record),
     tech);
 }
 
@@ -193,7 +266,11 @@ function trackRow(track, detailBox, reload) {
   return el("tr", { class: "station-row" },
     el("td", {},
       el("div", {}, track.original_filename || "(unnamed upload)"),
-      el("div", { class: "track-id" }, track.track_id)),
+      el("div", { class: "track-id" }, track.track_id),
+      el("div", {},
+        String(track.listen_url || "").trim()
+          ? listenLink(track.listen_url)
+          : el("span", { class: "dim" }, "add a listening link"))),
     el("td", {},
       statusChip(track.status),
       track.reject_reason

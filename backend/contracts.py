@@ -797,7 +797,8 @@ def submission_status_and_best_action(
 
 TRACK_FIELDS = (
     "track_id", "sha256", "original_filename", "size_bytes", "content_type",
-    "status", "reject_reason", "notes", "created_at", "updated_at",
+    "status", "reject_reason", "notes", "listen_url", "created_at",
+    "updated_at",
 )
 
 

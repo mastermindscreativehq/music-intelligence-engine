@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -498,6 +498,16 @@ CREATE INDEX IF NOT EXISTS idx_oauth_state_user
     # attempts each keep their own verifier.
     (11, """
 ALTER TABLE oauth_state ADD COLUMN code_verifier TEXT;
+"""),
+
+    # Persistent official listening URL per release (My Music). The blob is
+    # still content-addressed and opaque; this adds the ONE operator-owned
+    # piece of presentation metadata the outreach handoff needs: where the
+    # release can be heard. It is editable after upload and defaults to NULL,
+    # so an unset link is honestly absent rather than invented at compose
+    # time. Additive: no existing column or row is touched.
+    (12, """
+ALTER TABLE tracks ADD COLUMN listen_url TEXT;
 """),
 ]
 

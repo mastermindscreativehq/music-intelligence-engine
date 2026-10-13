@@ -1395,6 +1395,7 @@ class PersistenceService:
             "status": row["status"],
             "reject_reason": row["reject_reason"],
             "notes": row["notes"],
+            "listen_url": row["listen_url"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1402,9 +1403,10 @@ class PersistenceService:
     def save_track(self, track: dict) -> dict:
         """Insert or update one track row; returns the stored projection.
 
-        Mutable fields are status/reject_reason/notes/updated_at;
-        created_at survives updates. Unknown statuses are rejected by the
-        schema CHECK; callers validate before reaching this layer.
+        Mutable fields are status/reject_reason/notes/listen_url/
+        updated_at; created_at survives updates. Unknown statuses are
+        rejected by the schema CHECK; callers validate before reaching
+        this layer.
         """
         now = utc_now_iso()
         with self._lock, self._conn:      # commit-on-exit: durable rows
@@ -1417,22 +1419,23 @@ class PersistenceService:
                 """
                 INSERT INTO tracks(track_id, sha256, original_filename,
                                    size_bytes, content_type, status,
-                                   reject_reason, notes,
+                                   reject_reason, notes, listen_url,
                                    created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(track_id) DO UPDATE SET
                     original_filename=excluded.original_filename,
                     content_type=excluded.content_type,
                     status=excluded.status,
                     reject_reason=excluded.reject_reason,
                     notes=excluded.notes,
+                    listen_url=excluded.listen_url,
                     updated_at=excluded.updated_at
                 """,
                 (track["track_id"], track["sha256"],
                  track.get("original_filename"), int(track["size_bytes"]),
                  track.get("content_type") or "audio/mpeg",
                  track["status"], track.get("reject_reason"),
-                 track.get("notes"), created,
+                 track.get("notes"), track.get("listen_url"), created,
                  str(track.get("updated_at") or now)))
         return self.get_track(track["track_id"])
 

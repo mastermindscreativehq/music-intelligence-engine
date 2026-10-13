@@ -20,6 +20,7 @@ import { chips, el } from "../dom.js";
 import { djsHref, outreachHref } from "../router.js";
 import { stationLocation } from "./stationLocation.js";
 import { djStatusChip } from "./status.js";
+import { openOutreachModal } from "./outreachModal.js";
 
 function errorBanner(error) {
   const detail = error instanceof ApiError
@@ -56,6 +57,30 @@ function djWebform(detail) {
 
 function djOrganization(detail) {
   return detail.station_name || detail.platform || detail.name || "DJ";
+}
+
+/* Build the composer recipient for this DJ from source-backed facts only.
+ * A recipient has an email OR a verified submission URL — never a
+ * constructed address; the composer itself refuses an empty recipient. */
+function djRecipient(detail) {
+  const uid = "dj:" + detail.dj_id;
+  const email = djEmail(detail);
+  const webform = djWebform(detail);
+  const sourceUrl = email ? email.source_url
+    : (webform ? webform.source_url : (detail.source_urls || [])[0] || null);
+  return {
+    contact_uid: uid,
+    identity_key: uid,
+    target_type: "dj",
+    station_name: djOrganization(detail),
+    organization: djOrganization(detail),
+    name: detail.stage_name || detail.name || "DJ",
+    role: detail.role || null,
+    email: email ? email.value : "",
+    source_url: sourceUrl || null,
+    outreach_class: email ? "email" : "webform",
+    submission_url: webform ? webform.value : null,
+  };
 }
 
 /* ---------------------------------------------------------------------------
@@ -265,6 +290,22 @@ function outreachSection(detail, basket, onStagedChange) {
   start.addEventListener("click", () =>
     startOutreach(detail, basket, start, status));
 
+  /* Connect this discovered DJ straight to the single composer — the same
+   * account-free path a station/opportunity uses — without first creating a
+   * record. Offered only when a source-backed route exists. */
+  const hasRoute = Boolean(djEmail(detail)) || Boolean(djWebform(detail));
+  const composeNow = hasRoute ? el("button", {}, "Compose & hand off") : null;
+  if (composeNow) {
+    composeNow.addEventListener("click", () => {
+      const release = document.getElementById("dj-release");
+      openOutreachModal({
+        recipient: djRecipient(detail),
+        stationName: djOrganization(detail),
+        preselectedTrackId: release ? release.value : "",
+      });
+    });
+  }
+
   const remove = el("button", { class: "subtle" }, "Remove DJ");
   remove.addEventListener("click", async () => {
     if (!window.confirm(
@@ -305,6 +346,7 @@ function outreachSection(detail, basket, onStagedChange) {
           messageInput))),
     el("div", { class: "actions-row" },
       add,
+      composeNow,
       start,
       remove,
       el("a", { class: "linkish", href: outreachHref },
