@@ -14,6 +14,7 @@ Phase 6-8 additions:
     POST /api/v1/ingest                                    (Phase 6)
     GET  /api/v1/runs/{run_id}                             (Phase 6)
     POST /api/v1/tracks                                    (Phase 8)
+    POST /api/v1/tracks/releases                           (Phase 14)
     GET  /api/v1/tracks[?limit&offset&status]              (Phase 8)
     GET  /api/v1/tracks/{track_id}                         (Phase 8)
     PATCH /api/v1/tracks/{track_id}                        (Phase 12)
@@ -503,6 +504,18 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             owner_user_id=user["user_id"] if user else None)
         return success_body(track_projection(row))
 
+    @app.post("/api/v1/tracks/releases", status_code=201)
+    async def create_release(request: Request):
+        # Metadata-only release creation (My Music's primary workflow): no
+        # binary upload. Required title/artist_name/music_url; optional
+        # storyline/genre. Reuses the tracks table and projection.
+        payload = await _json_request(request)
+        user = _get_current_user(request)
+        row = submission_service.create_release(
+            storage, payload,
+            owner_user_id=user["user_id"] if user else None)
+        return success_body(track_projection(row))
+
     @app.get("/api/v1/tracks")
     def list_tracks(limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
                     offset: int = Query(0, ge=0),
@@ -527,11 +540,12 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
 
     @app.patch("/api/v1/tracks/{track_id}")
     async def update_track(track_id: str, request: Request):
-        # Operator-owned presentation fields: the release's official listening
-        # URL and its song story / creative brief. JSON body may carry
-        # {"listen_url": "https://…"} and/or {"song_story": "…"}; an empty
-        # value clears that field; an invalid link is a 400 (ValueError
-        # handler) — never invented. Ownership guard mirrors dispatch: a
+        # Operator-owned presentation fields: the release's title,
+        # artist_name, genre, official listening URL and song story /
+        # creative brief. JSON body may carry any subset; an empty value
+        # clears an optional field (title/artist_name must stay non-empty); an
+        # invalid link is a 400 (ValueError handler) — never invented.
+        # Ownership guard mirrors dispatch: a
         # release with an owner may only be edited by that user; legacy NULL-
         # owner releases keep their historical editable-by-anyone behavior.
         track = submission_service.get_track(storage, track_id)

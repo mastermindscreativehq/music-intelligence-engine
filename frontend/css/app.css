@@ -322,12 +322,17 @@ footer.page-foot {
   word-break: break-all;
 }
 
-.upload-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-.upload-form .field { flex: 1 1 220px; }
-.upload-result { margin-top: 10px; font-size: 12.5px; }
+.release-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.release-form .field { flex: 1 1 220px; }
+.release-form .field:last-of-type { flex-basis: 100%; }
+.release-result { margin-top: 10px; font-size: 12.5px; }
 
 .track-detail { margin-top: 12px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .track-detail h3 { margin: 0 0 8px; font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+
+.track-release { margin: 10px 0; }
+.track-release > summary { cursor: pointer; font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.release-title-input, .release-artist-input, .release-genre-input { flex: 1 1 200px; }
 
 .track-listen { margin: 10px 0; }
 .track-listen > summary { cursor: pointer; font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }

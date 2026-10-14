@@ -1395,6 +1395,9 @@ class PersistenceService:
             "status": row["status"],
             "reject_reason": row["reject_reason"],
             "notes": row["notes"],
+            "title": row["title"],
+            "artist_name": row["artist_name"],
+            "genre": row["genre"],
             "listen_url": row["listen_url"],
             "song_story": row["song_story"],
             "owner_user_id": row["owner_user_id"],
@@ -1405,14 +1408,15 @@ class PersistenceService:
     def save_track(self, track: dict) -> dict:
         """Insert or update one track row; returns the stored projection.
 
-        Mutable fields are status/reject_reason/notes/listen_url/
-        song_story/updated_at; created_at survives updates. A mutable field
-        that is ABSENT from *track* is carried forward from the existing row
-        (so an identical-byte re-upload never wipes an operator's listening
-        URL or song story); an explicitly-present ``None`` clears it.
-        ``owner_user_id`` is set on first upload when an authenticated user
-        is known and preserved thereafter. Unknown statuses are rejected by
-        the schema CHECK; callers validate before reaching this layer.
+        Mutable fields are status/reject_reason/notes/title/artist_name/
+        genre/listen_url/song_story/updated_at; created_at survives updates.
+        A mutable field that is ABSENT from *track* is carried forward from
+        the existing row (so an identical-byte re-upload never wipes an
+        operator's saved metadata, listening URL or song story); an
+        explicitly-present ``None`` clears it. ``owner_user_id`` is set on
+        first upload when an authenticated user is known and preserved
+        thereafter. Unknown statuses are rejected by the schema CHECK;
+        callers validate before reaching this layer.
         """
         now = utc_now_iso()
         with self._lock, self._conn:      # commit-on-exit: durable rows
@@ -1431,16 +1435,19 @@ class PersistenceService:
                 """
                 INSERT INTO tracks(track_id, sha256, original_filename,
                                    size_bytes, content_type, status,
-                                   reject_reason, notes, listen_url,
-                                   song_story, owner_user_id, created_at,
-                                   updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   reject_reason, notes, title, artist_name,
+                                   genre, listen_url, song_story,
+                                   owner_user_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(track_id) DO UPDATE SET
                     original_filename=excluded.original_filename,
                     content_type=excluded.content_type,
                     status=excluded.status,
                     reject_reason=excluded.reject_reason,
                     notes=excluded.notes,
+                    title=excluded.title,
+                    artist_name=excluded.artist_name,
+                    genre=excluded.genre,
                     listen_url=excluded.listen_url,
                     song_story=excluded.song_story,
                     owner_user_id=excluded.owner_user_id,
@@ -1450,7 +1457,8 @@ class PersistenceService:
                  track.get("original_filename"), int(track["size_bytes"]),
                  track.get("content_type") or "audio/mpeg",
                  track["status"], track.get("reject_reason"),
-                 track.get("notes"), _keep("listen_url"),
+                 track.get("notes"), _keep("title"), _keep("artist_name"),
+                 _keep("genre"), _keep("listen_url"),
                  _keep("song_story"), _keep("owner_user_id"), created,
                  str(track.get("updated_at") or now)))
         return self.get_track(track["track_id"])

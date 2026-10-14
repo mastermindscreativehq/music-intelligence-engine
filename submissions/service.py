@@ -26,11 +26,19 @@ from submissions.validation import DEFAULT_MAX_BYTES, sanitize_filename, \
 
 TRACK_STATUSES = ("ready", "quarantined", "archived")
 LISTEN_URL_SCHEMES = ("http", "https")
+# Upper bound for operator-authored release text (title / artist / genre).
+# Generous enough for real names while keeping a release row bounded.
+MAX_RELEASE_TEXT = 300
+# Mutable, operator-owned presentation fields. The outreach handoff and My
+# Music both read these; the API PATCH accepts any subset of them.
+EDITABLE_TRACK_FIELDS = ("title", "artist_name", "genre", "listen_url",
+                         "song_story")
 
 __all__ = [
-    "DEFAULT_MAX_BYTES", "TRACK_STATUSES", "TrackRejected",
-    "TrackTooLarge", "default_link_fetcher", "default_track_store",
-    "get_track", "link_history", "list_tracks", "normalize_listen_url",
+    "DEFAULT_MAX_BYTES", "EDITABLE_TRACK_FIELDS", "MAX_RELEASE_TEXT",
+    "TRACK_STATUSES", "TrackRejected", "TrackTooLarge", "create_release",
+    "default_link_fetcher", "default_track_store", "get_track",
+    "link_history", "list_tracks", "normalize_genre", "normalize_listen_url",
     "normalize_song_story", "run_link_checks", "station_submission",
     "track_id_for", "update_track_fields", "update_track_listen_url",
     "update_track_song_story", "upload_track",
@@ -183,26 +191,117 @@ def update_track_song_story(repository, track_id, song_story):
     return repository.save_track(updated)
 
 
+def _normalize_release_text(value, field):
+    """Required operator-authored release text (title / artist_name).
+
+    Trimmed and bounded; a missing or blank value is refused so a release
+    never loses its identity to an accidental empty submit.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        raise ValueError(f"'{field}' is required")
+    if len(text) > MAX_RELEASE_TEXT:
+        raise ValueError(
+            f"'{field}' must be at most {MAX_RELEASE_TEXT} characters")
+    return text
+
+
+def normalize_genre(value):
+    """Optional release genre; trimmed, blank clears it (honest absence)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > MAX_RELEASE_TEXT:
+        raise ValueError(
+            f"'genre' must be at most {MAX_RELEASE_TEXT} characters")
+    return text
+
+
+def create_release(repository, payload, owner_user_id=None):
+    """Create (or re-use) a release from metadata alone — no binary upload.
+
+    My Music's primary workflow: an operator records a release by its
+    ``title``, ``artist_name`` and ``music_url`` (all required), with an
+    optional ``storyline`` and ``genre``. The row is persisted through the
+    SAME ``save_track`` upsert as an uploaded asset, so it is listed,
+    edited, used by outreach and deleted identically. The opaque track id
+    is derived from the release's canonical identity
+    (title + artist + listening URL), so re-submitting an identical release
+    is idempotent rather than a silent duplicate; ``sha256``/``size_bytes``
+    stay NOT NULL by recording the digest and byte-length of that canonical
+    identity (there is no audio blob to hash). All validation happens before
+    any write, so a missing required field raises ValueError and stores
+    nothing.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("body must be a JSON object")
+    title = _normalize_release_text(payload.get("title"), "title")
+    artist_name = _normalize_release_text(
+        payload.get("artist_name"), "artist_name")
+    music_url = normalize_listen_url(payload.get("music_url"))
+    if music_url is None:
+        raise ValueError("'music_url' is required")
+    storyline = normalize_song_story(payload.get("storyline"))
+    genre = normalize_genre(payload.get("genre"))
+
+    canonical = "\n".join((title, artist_name, music_url))
+    encoded = canonical.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    row = {
+        "track_id": track_id_for(digest),
+        "sha256": digest,
+        "original_filename": title,
+        "size_bytes": len(encoded),
+        "content_type": "application/vnd.mie.release+json",
+        "status": "ready",
+        "title": title,
+        "artist_name": artist_name,
+        "listen_url": music_url,
+    }
+    # Optional fields are only written when supplied, so re-submitting an
+    # already-stored release never wipes a storyline/genre the operator saved
+    # (the same carry-forward rule an identical-byte re-upload follows).
+    # Clearing is available through the PATCH edit path.
+    if genre is not None:
+        row["genre"] = genre
+    if storyline is not None:
+        row["song_story"] = storyline
+    if owner_user_id:
+        row["owner_user_id"] = owner_user_id
+    return repository.save_track(row)
+
+
 def update_track_fields(repository, track_id, payload):
     """PATCH one release's operator-owned fields; None when unknown.
 
-    Only keys present in *payload* are changed (``listen_url`` and/or
-    ``song_story``); at least one editable key is required. Every value is
-    validated before any write, so a bad link refuses the whole update and
+    Only keys present in *payload* are changed (an operator may supply any
+    subset of title, artist_name, genre, listen_url, song_story); at least
+    one editable key is required. Every value is validated before any write,
+    so a bad link or a blank required title refuses the whole update and
     leaves the row untouched. Reuses ``save_track`` so immutable fields and
     ``created_at`` survive while ``updated_at`` advances.
     """
     row = repository.get_track(track_id)
     if row is None:
         return None
-    editable = [key for key in ("listen_url", "song_story") if key in payload]
+    editable = [key for key in EDITABLE_TRACK_FIELDS if key in payload]
     if not editable:
-        raise ValueError("body must contain listen_url or song_story")
+        raise ValueError(
+            "body must contain one of: " + ", ".join(EDITABLE_TRACK_FIELDS))
     updated = dict(row)
     if "listen_url" in payload:
         updated["listen_url"] = normalize_listen_url(payload["listen_url"])
     if "song_story" in payload:
         updated["song_story"] = normalize_song_story(payload["song_story"])
+    if "title" in payload:
+        updated["title"] = _normalize_release_text(payload["title"], "title")
+    if "artist_name" in payload:
+        updated["artist_name"] = _normalize_release_text(
+            payload["artist_name"], "artist_name")
+    if "genre" in payload:
+        updated["genre"] = normalize_genre(payload["genre"])
     updated["updated_at"] = utc_now_iso()
     return repository.save_track(updated)
 

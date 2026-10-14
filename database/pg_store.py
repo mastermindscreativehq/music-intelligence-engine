@@ -926,6 +926,9 @@ class PostgresStorage:
             "status": row["status"],
             "reject_reason": row["reject_reason"],
             "notes": row["notes"],
+            "title": row["title"],
+            "artist_name": row["artist_name"],
+            "genre": row["genre"],
             "listen_url": row["listen_url"],
             "song_story": row["song_story"],
             "owner_user_id": row["owner_user_id"],
@@ -962,16 +965,20 @@ class PostgresStorage:
                     """
                     INSERT INTO tracks(track_id, sha256, original_filename,
                                        size_bytes, content_type, status,
-                                       reject_reason, notes, listen_url,
+                                       reject_reason, notes, title,
+                                       artist_name, genre, listen_url,
                                        song_story, owner_user_id, created_at,
                                        updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(track_id) DO UPDATE SET
                         original_filename=EXCLUDED.original_filename,
                         content_type=EXCLUDED.content_type,
                         status=EXCLUDED.status,
                         reject_reason=EXCLUDED.reject_reason,
                         notes=EXCLUDED.notes,
+                        title=EXCLUDED.title,
+                        artist_name=EXCLUDED.artist_name,
+                        genre=EXCLUDED.genre,
                         listen_url=EXCLUDED.listen_url,
                         song_story=EXCLUDED.song_story,
                         owner_user_id=EXCLUDED.owner_user_id,
@@ -982,7 +989,8 @@ class PostgresStorage:
                      int(track["size_bytes"]),
                      track.get("content_type") or "audio/mpeg",
                      track["status"], track.get("reject_reason"),
-                     track.get("notes"), _keep("listen_url"),
+                     track.get("notes"), _keep("title"), _keep("artist_name"),
+                     _keep("genre"), _keep("listen_url"),
                      _keep("song_story"), _keep("owner_user_id"), created,
                      str(track.get("updated_at") or now)))
         return self.get_track(track["track_id"])

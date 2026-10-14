@@ -248,6 +248,26 @@ export const api = {
         headers: { "Content-Type": "audio/mpeg" },
       },
       { filename }),
+  // Phase 14: create a release from metadata alone (no binary upload) — the
+  // primary My Music workflow. The backend validates every field and derives
+  // the opaque track id; nothing is invented here.
+  createRelease: (payload) =>
+    send(API_BASE_URL + "/api/v1/tracks/releases",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      }),
+  // Phase 14: edit a release's operator-owned metadata (title, artist_name,
+  // genre) alongside its listening URL / song story. Any subset is accepted;
+  // the backend validates before writing.
+  updateTrackRelease: (trackId, payload) =>
+    send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      }),
   // Edit the release's official listening URL. An empty string clears it;
   // the backend validates and refuses anything that is not an absolute
   // http(s) URL, so a bad link surfaces as a typed error, never a silent fix.

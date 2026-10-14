@@ -130,6 +130,12 @@ ROUTE_TABLE = (
     ("GET", re.compile(r"^/api/v1/stations/(?P<key>[^/]+)$"),
      "/api/v1/stations/{key}", ()),
     ("POST", re.compile(r"^/api/v1/tracks$"), "/api/v1/tracks", ("filename",)),
+    # Create a release from metadata alone (My Music's primary workflow —
+    # no binary upload). Required: title, artist_name, music_url; optional:
+    # storyline, genre. Reuses the tracks table/upsert and returns the same
+    # opaque projection as an upload.
+    ("POST", re.compile(r"^/api/v1/tracks/releases$"),
+     "/api/v1/tracks/releases", ()),
     ("GET", re.compile(r"^/api/v1/tracks$"), "/api/v1/tracks",
      TRACK_LIST_PARAMS),
     ("GET",
@@ -662,6 +668,18 @@ def _handle(service, method: str, match: re.Match, params: dict,
             service, limit=limit, offset=offset,
             status=_first(params, "status"))
         return 200, success_body(tracks_payload(rows, total, limit, offset))
+
+    if path == "/api/v1/tracks/releases":
+        # Metadata-only release creation. A signed-in operator owns the
+        # release; an anonymous operator may still create one (shared,
+        # single-operator behavior preserved) exactly like an anonymous
+        # upload. Validation failures map to 400 bad_request.
+        user = _get_current_user(service, headers)
+        payload = _parse_json_body(body)
+        row = submission_service.create_release(
+            service, payload,
+            owner_user_id=user["user_id"] if user else None)
+        return 201, success_body(track_projection(row))
 
     if path.startswith("/api/v1/tracks/"):
         track_id = match.group("track_id")

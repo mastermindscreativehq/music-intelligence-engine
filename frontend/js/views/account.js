@@ -35,6 +35,12 @@ export async function refreshAccountArea() {
 async function load() {
   if (!host) return;
   host.replaceChildren(el("span", { class: "account-email" }, "…"));
+  // No stored session means /auth/me would 401 by design. Skip the call and
+  // render the signed-out state directly so the console stays clean.
+  if (!api.isLoggedIn()) {
+    host.replaceChildren(...accountNodes(null));
+    return;
+  }
   let me = null;
   try {
     me = await api.me();

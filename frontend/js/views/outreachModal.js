@@ -254,6 +254,17 @@ function loadReleaseOptions() {
     .catch(() => []);
 }
 
+/* A release is identified by its saved title and artist, falling back to the
+ * legacy filename and finally the opaque id — all values the backend stored,
+ * nothing invented. */
+function releaseLabel(track) {
+  if (!track) return "";
+  const title = String(track.title || track.original_filename
+    || track.track_id || "").trim();
+  const artist = String(track.artist_name || "").trim();
+  return artist ? `${title} — ${artist}` : title;
+}
+
 function releaseSelector(preselectedId, currentId, onChange) {
   const select = el("select", { name: "track" });
   const index = new Map();
@@ -277,7 +288,7 @@ function releaseSelector(preselectedId, currentId, onChange) {
       el("option", {
         value: t.track_id,
         selected: t.track_id === preselectedId || t.track_id === currentId,
-      }, t.original_filename || t.track_id));
+      }, releaseLabel(t)));
     select.append(...rest);
     emit();
   }).catch(() => {});
@@ -311,10 +322,13 @@ export function openOutreachModal(context) {
   // separately gated behind a signed-in session on the backend, so an absent
   // name simply means the draft is written without one.
   let artistName = "";
-  api.me().then((me) => {
-    if (me && me.user && me.user.name) artistName = String(me.user.name);
-  }).catch(() => { /* not signed in: no artist name */ });
+  if (api.isLoggedIn()) {
+    api.me().then((me) => {
+      if (me && me.user && me.user.name) artistName = String(me.user.name);
+    }).catch(() => { /* not signed in: no artist name */ });
+  }
   let draftLink = "";
+  let selectedRelease = null;
   let fromInput;
   let subjectInput;
   let bodyInput;
@@ -342,7 +356,7 @@ export function openOutreachModal(context) {
     musicSelect = recTrack
       ? el("div", { class: "field" },
         el("span", {}, "Release"),
-        el("span", {}, recTrack.original_filename || recTrack.track_id),
+        el("span", {}, releaseLabel(recTrack)),
         el("span", { class: "dim hint" },
           "attached to this record"))
       : el("div", { class: "field" },
@@ -399,7 +413,35 @@ export function openOutreachModal(context) {
     }
   }
 
+  /* A simple, professional starting draft built ONLY from the release's own
+   * saved details — title, artist and (when present) storyline. It fills the
+   * editable subject/message fields only when the operator has written
+   * nothing yet, so outreach is never blocked by a missing storyline and
+   * nothing is ever auto-sent. */
+  function suggestDraft(track) {
+    if (!track) return;
+    if (subjectInput.value.trim() || bodyInput.value.trim()) return;
+    const title = String(track.title || track.original_filename || "").trim();
+    if (!title) return;
+    const artist = String(track.artist_name || "").trim();
+    const story = String(track.song_story || "").trim();
+    subjectInput.value = artist
+      ? `${title} — a new release from ${artist}`
+      : `${title} — a new release`;
+    const who = artist ? `${title} by ${artist}` : title;
+    const lines = [suggestedOpening(recipient), "",
+      `I'd like to share ${who} with you.`];
+    if (story) lines.push(story);
+    lines.push(
+      "I'd be glad to send the full track or any further details that would "
+      + "help.", "", "Thank you for your time and consideration.");
+    bodyInput.value = lines.join("\n");
+    updateLinkPreview();
+  }
+
   function applyReleaseLink(track) {
+    selectedRelease = track || null;
+    suggestDraft(selectedRelease);
     const saved = track ? String(track.listen_url || "").trim() : "";
     const current = musicLinkInput.value.trim();
     if (!track) {
@@ -575,6 +617,7 @@ export function openOutreachModal(context) {
     container.hidden = true;
     container.replaceChildren();
     if (!email) return;
+    if (!api.isLoggedIn()) return;
     let me = null;
     try {
       me = await api.me();
@@ -647,11 +690,21 @@ export function openOutreachModal(context) {
       ? musicSelect.value : "";
     if (!value) return null;
     const t = { track_id: value };
-    const opt = typeof musicSelect === "object"
-      && musicSelect.selectedOptions && musicSelect.selectedOptions[0];
-    if (opt) {
-      const label = opt.textContent.trim();
-      if (label && label !== value) t.original_filename = label;
+    const chosen = selectedRelease && selectedRelease.track_id === value
+      ? selectedRelease : null;
+    if (chosen) {
+      // Carry the release's real identity onto the record so its title/artist
+      // survive with the outreach even if the library entry later changes.
+      if (chosen.title) t.title = chosen.title;
+      if (chosen.artist_name) t.artist_name = chosen.artist_name;
+      if (chosen.original_filename) t.original_filename = chosen.original_filename;
+    } else {
+      const opt = typeof musicSelect === "object"
+        && musicSelect.selectedOptions && musicSelect.selectedOptions[0];
+      if (opt) {
+        const label = opt.textContent.trim();
+        if (label && label !== value) t.original_filename = label;
+      }
     }
     const link = musicLinkInput.value.trim();
     if (link) t.listen_url = link;

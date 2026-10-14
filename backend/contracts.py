@@ -797,8 +797,8 @@ def submission_status_and_best_action(
 
 TRACK_FIELDS = (
     "track_id", "sha256", "original_filename", "size_bytes", "content_type",
-    "status", "reject_reason", "notes", "listen_url", "song_story",
-    "created_at", "updated_at",
+    "status", "reject_reason", "notes", "title", "artist_name", "genre",
+    "listen_url", "song_story", "created_at", "updated_at",
     # NOTE: owner_user_id is deliberately NOT part of the public projection —
     # it is an internal authorization field (see database.*_store save_track).
 )

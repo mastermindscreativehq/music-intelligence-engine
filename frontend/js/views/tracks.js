@@ -1,12 +1,12 @@
-/* Submission assets view (Phase 8): MP3 uploads and stored asset records.
+/* My music view: the operator's release library.
  *
- * Isolated from the station views: this route owns uploads and the asset
- * listing, nothing else. All data comes verbatim from the real submission
- * endpoints through api.js — there are no mocks and no invented metadata.
- * Uploads post raw file bytes with the chosen filename as a query
- * parameter, exactly as the backend contract defines; backend errors
- * (payload_too_large, track_rejected, ...) are surfaced to the operator
- * unchanged. Per-track links are taken from each projection's links.self
+ * A release is recorded by its metadata — title, artist, listening link,
+ * optional storyline and genre — and saved through the real backend
+ * `/api/v1/tracks/releases` endpoint. No MP3 upload is required (the legacy
+ * content-addressed upload path still exists server-side and existing
+ * uploads stay fully usable here). All data comes verbatim from the real
+ * submission endpoints through api.js — there are no mocks and no invented
+ * metadata. Per-track paths are taken from each projection's links.self
  * value supplied by the backend; this module never constructs asset URLs.
  */
 
@@ -16,13 +16,15 @@ import { el } from "../dom.js";
 /* Mirrors submissions.service.TRACK_STATUSES on the backend. */
 const TRACK_STATUSES = ["ready", "quarantined", "archived"];
 const LIMIT_CHOICES = [25, 50, 100, 200];
+const AUDIO_EXTENSIONS = [".mp3", ".wav", ".flac", ".aiff", ".aif", ".m4a",
+  ".ogg"];
 
 function errorBanner(error) {
   const detail = error instanceof ApiError
     ? `${error.code}: ${error.message}`
     : String(error);
   return el("div", { class: "banner-error", role: "alert" },
-    "Upload failed. ", el("strong", {}, detail));
+    "Request failed. ", el("strong", {}, detail));
 }
 
 function statusChip(status) {
@@ -30,6 +32,27 @@ function statusChip(status) {
   return el("span",
     { class: `chip${known ? ` ${status}` : ""}` },
     String(status ?? "unknown"));
+}
+
+/* The release title is the stored title when present; a legacy upload with
+ * no title falls back to its filename (extension stripped). Never invented. */
+function releaseTitle(record) {
+  const title = String(record.title || "").trim();
+  if (title) return title;
+  let name = String(record.original_filename || "").trim();
+  if (!name) return "(untitled release)";
+  const lower = name.toLowerCase();
+  for (const ext of AUDIO_EXTENSIONS) {
+    if (lower.endsWith(ext)) {
+      name = name.slice(0, -ext.length);
+      break;
+    }
+  }
+  return name || "(untitled release)";
+}
+
+function releaseArtist(record) {
+  return String(record.artist_name || "").trim();
 }
 
 /* The saved official listening URL is a link when present and an honest
@@ -45,6 +68,77 @@ function listenLink(url) {
     target: "_blank",
     rel: "noopener noreferrer",
   }, value);
+}
+
+function storylinePreview(record) {
+  const story = String(record.song_story || "").trim();
+  if (!story) return "No storyline saved.";
+  return story.length > 160 ? `${story.slice(0, 157)}…` : story;
+}
+
+/* Edit the release's operator-owned identity metadata (title, artist,
+ * genre). Saving posts to the real PATCH endpoint; the backend validates and
+ * refuses a blank title/artist, so a bad edit surfaces as a typed error
+ * rather than a silent correction. */
+function releaseMetadataEditor(record, onSaved) {
+  const titleInput = el("input", {
+    type: "text",
+    class: "release-title-input",
+    placeholder: "Release title",
+    autocomplete: "off",
+    value: record.title || "",
+  });
+  const artistInput = el("input", {
+    type: "text",
+    class: "release-artist-input",
+    placeholder: "Artist name",
+    autocomplete: "off",
+    value: record.artist_name || "",
+  });
+  const genreInput = el("input", {
+    type: "text",
+    class: "release-genre-input",
+    placeholder: "Genre (optional)",
+    autocomplete: "off",
+    value: record.genre || "",
+  });
+  const save = el("button", { class: "primary", type: "button" },
+    "Save release");
+  const status = el("p", { class: "dim", role: "status" });
+
+  save.addEventListener("click", async () => {
+    if (save.disabled) return;
+    save.disabled = true;
+    save.textContent = "saving…";
+    try {
+      await api.updateTrackRelease(record.track_id, {
+        title: titleInput.value.trim(),
+        artist_name: artistInput.value.trim(),
+        genre: genreInput.value.trim(),
+      });
+      status.replaceChildren("Saved. Outreach for this release uses these "
+        + "details automatically.");
+      if (typeof onSaved === "function") onSaved();
+    } catch (error) {
+      const detail = error instanceof ApiError
+        ? `${error.code}: ${error.message}` : String(error);
+      status.replaceChildren(el("span", { class: "banner-error" }, detail));
+    } finally {
+      save.disabled = false;
+      save.textContent = "Save release";
+    }
+  });
+
+  return el("details", { class: "track-release", open: true },
+    el("summary", {}, "Release details"),
+    el("p", { class: "dim" },
+      "The title and artist identify this release everywhere in the app, "
+      + "including outreach."),
+    el("label", { class: "field" }, el("span", {}, "Title"), titleInput),
+    el("label", { class: "field" }, el("span", {}, "Artist"), artistInput),
+    el("label", { class: "field" }, el("span", {}, "Genre"), genreInput),
+    save,
+    status);
 }
 
 /* Edit the one operator-owned presentation field on a release. Saving posts
@@ -153,75 +247,95 @@ function songStoryEditor(record) {
     status);
 }
 
-function uploadCard(onUploaded) {
-  const fileInput = el("input", {
-    type: "file",
-    accept: ".mp3,audio/mpeg",
+/* Add a release from metadata alone: title, artist, listening link and the
+ * optional storyline/genre. Persists through the real create endpoint; the
+ * backend validates and derives the opaque id. Existing uploaded assets are
+ * untouched and remain listed below. */
+function releaseForm(onCreated) {
+  const titleInput = el("input", {
+    type: "text", class: "release-title-input", placeholder: "Release title",
+    autocomplete: "off", required: true,
+  });
+  const artistInput = el("input", {
+    type: "text", class: "release-artist-input", placeholder: "Artist name",
+    autocomplete: "off", required: true,
+  });
+  const urlInput = el("input", {
+    type: "url", class: "release-url-input",
+    placeholder: "Listening link (Bandcamp, Spotify, YouTube…)",
+    autocomplete: "off", required: true,
+  });
+  const genreInput = el("input", {
+    type: "text", class: "release-genre-input", placeholder: "Genre (optional)",
     autocomplete: "off",
   });
-  const nameInput = el("input", {
-    type: "text",
-    placeholder: "override filename (optional)",
+  const storyInput = el("textarea", {
+    class: "release-story-input", rows: "4",
+    placeholder: "Storyline / creative note (optional)",
     autocomplete: "off",
   });
   const submit = el("button", { class: "primary", type: "submit" },
-    "upload");
-  const resultLine = el("div", { class: "upload-result" });
+    "Add release");
+  const resultLine = el("div", { class: "release-result" });
 
-  const form = el(
-    "form",
-    {
-      class: "upload-form",
-      onSubmit: async (event) => {
-        event.preventDefault();
-        resultLine.replaceChildren();
-        const file = fileInput.files && fileInput.files[0];
-        if (!file) {
-          resultLine.append(el("span", { class: "dim" },
-            "choose an MP3 file first"));
-          return;
-        }
-        submit.disabled = true;
-        submit.textContent = "uploading…";
-        try {
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          const filename = nameInput.value.trim() || file.name;
-          const data = await api.uploadTrack(bytes, filename);
-          resultLine.append(
-            el("strong", {}, `stored ${data.track_id} · status `
-              + `${data.status} `),
-            el("span", { class: "dim" },
-              `${data.original_filename} · ${data.size_bytes} bytes`));
-          fileInput.value = "";
-          nameInput.value = "";
-          onUploaded();
-        } catch (error) {
-          resultLine.append(errorBanner(error));
-        } finally {
-          submit.disabled = false;
-          submit.textContent = "upload";
-        }
-      },
+  const form = el("form", {
+    class: "release-form",
+    onSubmit: async (event) => {
+      event.preventDefault();
+      resultLine.replaceChildren();
+      const title = titleInput.value.trim();
+      const artistName = artistInput.value.trim();
+      const musicUrl = urlInput.value.trim();
+      if (!title || !artistName || !musicUrl) {
+        resultLine.append(el("span", { class: "dim" },
+          "title, artist and listening link are required"));
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = "saving…";
+      try {
+        const data = await api.createRelease({
+          title,
+          artist_name: artistName,
+          music_url: musicUrl,
+          genre: genreInput.value.trim(),
+          storyline: storyInput.value.trim(),
+        });
+        resultLine.append(
+          el("strong", {}, `added ${releaseTitle(data)} `),
+          el("span", { class: "dim" }, releaseArtist(data)));
+        form.reset();
+        if (typeof onCreated === "function") onCreated();
+      } catch (error) {
+        resultLine.append(errorBanner(error));
+      } finally {
+        submit.disabled = false;
+        submit.textContent = "Add release";
+      }
     },
-    el("label", { class: "field" }, el("span", {}, "MP3 file"), fileInput),
-    el("label", { class: "field" }, el("span", {}, "filename"),
-      nameInput),
-    submit,
-  );
+  },
+    el("label", { class: "field" }, el("span", {}, "Title *"), titleInput),
+    el("label", { class: "field" }, el("span", {}, "Artist *"), artistInput),
+    el("label", { class: "field" }, el("span", {}, "Listening link *"),
+      urlInput),
+    el("label", { class: "field" }, el("span", {}, "Genre"), genreInput),
+    el("label", { class: "field" }, el("span", {}, "Storyline"), storyInput),
+    submit);
 
   return el("section", { class: "card" },
-    el("h2", {}, "Submit a track"),
+    el("h2", {}, "Add a music release"),
     el("p", { class: "dim" },
-      "Files are validated and stored by the backend; identical bytes "
-      + "deduplicate to one asset. Rejected content is recorded server-side "
-      + "with its reason."),
+      "Record a release by its details and listening link. It is saved to "
+      + "your library immediately and reused in outreach — no file upload "
+      + "needed."),
     form,
     resultLine);
 }
 
-function trackDetailPanel(data) {
+function trackDetailPanel(data, onSaved) {
   const record = data && typeof data === "object" ? data : {};
-  const title = record.original_filename || "(untitled upload)";
+  const title = releaseTitle(record);
+  const artist = releaseArtist(record);
   const uploadedAt = record.created_at || null;
 
   function kvRows(pairs) {
@@ -237,13 +351,17 @@ function trackDetailPanel(data) {
 
   const main = el("div", { class: "track-overview" },
     el("h3", {}, title),
-    el("p", { class: "dim" }, "Asset status · ",
+    artist ? el("p", {}, artist) : null,
+    el("p", { class: "dim" }, "Release status · ",
       statusChip(record.status),
-      uploadedAt ? el("span", { class: "dim" }, ` · uploaded ${uploadedAt}`) : null));
+      uploadedAt ? el("span", { class: "dim" }, ` · added ${uploadedAt}`) : null));
 
   const techPairs = [
     ["asset id", record.track_id],
     ["sha256", record.sha256],
+    ["title", record.title],
+    ["artist", record.artist_name],
+    ["genre", record.genre],
     ["file size (bytes)", record.size_bytes],
     ["content type", record.content_type],
     ["status", record.status],
@@ -260,6 +378,7 @@ function trackDetailPanel(data) {
 
   return el("div", { class: "track-detail" },
     main,
+    releaseMetadataEditor(record, onSaved),
     listenUrlEditor(record),
     songStoryEditor(record),
     tech);
@@ -267,11 +386,11 @@ function trackDetailPanel(data) {
 
 function trackRow(track, detailBox, reload) {
   let detailsShown = false;
-  const detailsButton = el("button", { class: "linkish" }, "details");
+  const detailsButton = el("button", { class: "linkish" }, "Edit");
   detailsButton.addEventListener("click", async () => {
     if (detailsShown) {
       detailsShown = false;
-      detailsButton.textContent = "details";
+      detailsButton.textContent = "Edit";
       detailBox.replaceChildren();
       return;
     }
@@ -280,8 +399,8 @@ function trackRow(track, detailBox, reload) {
     try {
       const data = await api.trackDetail(track.links.self);
       detailsShown = true;
-      detailsButton.textContent = "hide details";
-      detailBox.replaceChildren(trackDetailPanel(data));
+      detailsButton.textContent = "Close";
+      detailBox.replaceChildren(trackDetailPanel(data, reload));
     } catch (error) {
       detailBox.replaceChildren(error instanceof ApiError
         ? errorBanner(error)
@@ -295,8 +414,8 @@ function trackRow(track, detailBox, reload) {
   remove.addEventListener("click", () => {
     if (remove.disabled) return;
     const userConfirmed = window.confirm(
-      `Remove stored asset ${track.track_id} from the console? Only the `
-      + "stored record is deleted; the uploaded file bytes are untouched.");
+      `Remove release "${releaseTitle(track)}" from your library? Only the `
+      + "stored record is deleted; any uploaded file bytes are untouched.");
     if (!userConfirmed) return;
     remove.disabled = true;
     remove.textContent = "removing…";
@@ -316,18 +435,21 @@ function trackRow(track, detailBox, reload) {
 
   return el("tr", { class: "station-row" },
     el("td", {},
-      el("div", {}, track.original_filename || "(unnamed upload)"),
-      el("div", { class: "track-id" }, track.track_id),
-      el("div", {},
-        String(track.listen_url || "").trim()
-          ? listenLink(track.listen_url)
-          : el("span", { class: "dim" }, "add a listening link"))),
+      el("div", {}, releaseTitle(track)),
+      releaseArtist(track)
+        ? el("div", { class: "dim" }, releaseArtist(track))
+        : null,
+      el("div", { class: "track-id" }, track.track_id)),
+    el("td", {},
+      String(track.listen_url || "").trim()
+        ? listenLink(track.listen_url)
+        : el("span", { class: "dim" }, "add a listening link")),
+    el("td", { class: "dim" }, storylinePreview(track)),
     el("td", {},
       statusChip(track.status),
       track.reject_reason
         ? el("div", { class: "dim" }, track.reject_reason)
         : null),
-    el("td", {}, String(track.size_bytes ?? "—")),
     el("td", { class: "dim" }, String(track.created_at ?? "—")),
     el("td", { class: "actions-cell" }, detailsButton, " ", remove));
 }
@@ -335,7 +457,7 @@ function trackRow(track, detailBox, reload) {
 function summaryLine(total, limit, offset) {
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + limit, total);
-  return `showing ${from}–${to} of ${total} stored assets`;
+  return `showing ${from}–${to} of ${total} releases`;
 }
 
 export function renderTracksView(root) {
@@ -400,34 +522,33 @@ export function renderTracksView(root) {
     try {
       const data = await api.tracks(state);
       resultsCard.replaceChildren(
-        el("h2", {}, "Submission assets"),
+        el("h2", {}, "Your releases"),
         el("p", { class: "dim" },
           summaryLine(data.total, data.limit, data.offset)),
         data.total === 0
           ? el("p", { class: "dim" },
-            "No submission assets match the current filters. Storage is "
-            + "populated by operator uploads; this console never invents "
-            + "rows.")
+            "No releases yet. Add one above by its title, artist and "
+            + "listening link.")
           : el("table", { class: "results" },
             el("thead", {}, el("tr", {},
-              el("th", {}, "file"), el("th", {}, "status"),
-              el("th", {}, "size (bytes)"), el("th", {}, "stored"),
-              el("th", {}, "actions"))),
+              el("th", {}, "release"), el("th", {}, "listening link"),
+              el("th", {}, "storyline"), el("th", {}, "status"),
+              el("th", {}, "added"), el("th", {}, "actions"))),
             el("tbody", {},
               (data.tracks || []).map((track) =>
                 trackRow(track, detailBox, load)))),
         pagination(data));
     } catch (error) {
       resultsCard.replaceChildren(
-        el("h2", {}, "Submission assets"),
+        el("h2", {}, "Your releases"),
         errorBanner(error));
     }
   }
 
   root.append(
-    uploadCard(load),
+    releaseForm(load),
     el("section", { class: "card" },
-      el("h2", {}, "Filter assets"),
+      el("h2", {}, "Filter releases"),
       filterForm),
     resultsCard,
     detailBox);

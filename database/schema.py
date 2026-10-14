@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -522,6 +522,20 @@ ALTER TABLE tracks ADD COLUMN listen_url TEXT;
     (13, """
 ALTER TABLE tracks ADD COLUMN song_story TEXT;
 ALTER TABLE tracks ADD COLUMN owner_user_id TEXT;
+"""),
+
+    # Release metadata (My Music). ``title`` and ``artist_name`` are the
+    # operator-authored identity of a release; ``genre`` is an optional
+    # classification. They let My Music create a release from metadata alone
+    # (no binary upload) while the legacy content-addressed blob columns stay
+    # intact for existing rows. All three default to NULL, so an existing
+    # upload is honestly "untitled" rather than mislabeled, and the read path
+    # falls back to the stored filename when no title was entered. Additive:
+    # no existing column or row is touched.
+    (14, """
+ALTER TABLE tracks ADD COLUMN title TEXT;
+ALTER TABLE tracks ADD COLUMN artist_name TEXT;
+ALTER TABLE tracks ADD COLUMN genre TEXT;
 """),
 ]
 

@@ -64,11 +64,16 @@ def _clean(value) -> str:
 
 
 def _song_title(track: dict) -> str:
-    """Human-readable title derived from the stored filename — never invented.
+    """Human-readable title, from the stored release title when present.
 
-    The filename is the only title the system actually has; the extension is
-    stripped and separators tidied. An absent/opaque filename yields "".
+    A release recorded by its metadata carries an explicit ``title``; a legacy
+    upload falls back to its filename (the extension is stripped and
+    separators tidied) — the only title the system actually has then. An
+    absent/opaque value yields ""; nothing is invented.
     """
+    explicit = _clean(track.get("title"))
+    if explicit:
+        return explicit
     name = _clean(track.get("original_filename"))
     if not name:
         return ""
@@ -165,7 +170,9 @@ def compose_email(*, track: dict, payload: dict | None = None,
     artist_block = artist_block if isinstance(artist_block, dict) else {}
 
     title = _song_title(track)
-    artist = _clean(artist_block.get("name"))
+    # The artist identity comes from the signed-in operator's profile when
+    # present, otherwise from the release's own artist_name — never invented.
+    artist = _clean(artist_block.get("name")) or _clean(track.get("artist_name"))
     recipient = _clean(recipient_block.get("name"))
     role = _clean(recipient_block.get("role"))
     organization = _clean(recipient_block.get("organization"))
