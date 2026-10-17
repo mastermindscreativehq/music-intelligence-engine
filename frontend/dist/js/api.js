@@ -113,11 +113,16 @@ export function adoptAuthFromUrl() {
 }
 
 function mergeHeaders(base, extra) {
-  if (!extra) return base || {};
+  // The bearer is attached for EVERY request, not only when an `extra` map is
+  // supplied. The earlier `if (!extra) return base;` early-return skipped this
+  // block for plain GET reads (e.g. /api/v1/auth/me), so an adopted session
+  // token was stored but never sent and every authenticated read 401'd.
   const h = new Headers(base || {});
-  for (const [k, v] of Object.entries(extra)) {
-    if (v === null || v === undefined) continue;
-    h.set(k, v);
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      if (v === null || v === undefined) continue;
+      h.set(k, v);
+    }
   }
   const token = authToken();
   if (token) {
