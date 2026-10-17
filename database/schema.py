@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -536,6 +536,18 @@ ALTER TABLE tracks ADD COLUMN owner_user_id TEXT;
 ALTER TABLE tracks ADD COLUMN title TEXT;
 ALTER TABLE tracks ADD COLUMN artist_name TEXT;
 ALTER TABLE tracks ADD COLUMN genre TEXT;
+"""),
+
+    # First-class ownership for outreach records, mirroring ``tracks``
+    # (schema v13). ``owner_user_id`` records which authenticated operator
+    # created/sent the outreach; it is NULL for legacy/anonymous records, so
+    # the historical shared single-operator behavior is preserved and those
+    # rows stay visible to everyone. Additive: no existing column or row is
+    # touched, and the value is never exposed in the public projection.
+    (15, """
+ALTER TABLE outreach_messages ADD COLUMN owner_user_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_outreach_owner
+    ON outreach_messages(owner_user_id);
 """),
 ]
 

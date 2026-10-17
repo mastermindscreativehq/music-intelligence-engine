@@ -359,9 +359,14 @@ class TestOAuthDeniedCallback(unittest.TestCase):
         client = TestClient(create_app(self.storage),
                             raise_server_exceptions=False)
         resp = client.get(
-            "/api/v1/auth/google/callback?error=access_denied&state=s")
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"]["code"], "oauth_denied")
+            "/api/v1/auth/google/callback?error=access_denied&state=s",
+            follow_redirects=False)
+        # The callback is a top-level browser hop: a cancelled consent must
+        # return the operator to the console with a clear reason, never strand
+        # them on a JSON error screen.
+        self.assertEqual(resp.status_code, 303)
+        self.assertTrue(resp.headers["location"].endswith(
+            "/?oauth=error&reason=oauth_denied"))
 
 
 if __name__ == "__main__":  # pragma: no cover

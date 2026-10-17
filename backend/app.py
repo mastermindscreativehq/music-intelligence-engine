@@ -364,26 +364,44 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         return success_body({"auth_url": auth_url})
 
     @app.get("/api/v1/auth/google/callback")
-    async def google_callback(code: str | None = None,
-                              state: str | None = None,
-                              error: str | None = None):
-        if error:
-            # Google redirects here with ?error=... when consent is denied
-            # or the request is rejected; surface it instead of a cryptic
-            # "code required".
-            return _json(400, error_body(
-                "oauth_denied",
-                f"Google authorization was not completed: {error}"))
-        if not state:
-            return _json(400, error_body("bad_request", "state required"))
-        if not code:
-            return _json(400, error_body("bad_request", "code required"))
+    async def google_callback(request: Request):
         from backend.routes import (
-            _finish_google_callback, absolute_redirect, redirect_target)
+            _finish_google_callback, absolute_redirect, redirect_target,
+            oauth_error_target, DEFAULT_CONSOLE_ORIGINS)
+        # This app is API-only: it cannot co-serve the browser console, so a
+        # relative redirect would strand the browser on the API host. Fall back
+        # to the known production console origin when MIE_FRONTEND_ORIGIN is
+        # unset, so a missing/typo'd deploy variable cannot silently break the
+        # OAuth return.
+        fallback = DEFAULT_CONSOLE_ORIGINS[0]
+
+        def _console_redirect(target):
+            # The callback is always a top-level browser hop, so EVERY outcome
+            # (success, cancellation, or failure) must return the operator to
+            # the console. A JSON error body here would strand them on the API
+            # host with no way back - the "stuck / signed out" report.
+            return RedirectResponse(
+                url=absolute_redirect(target, fallback_origin=fallback),
+                status_code=303, headers={"Cache-Control": "no-store"})
+
+        error = request.query_params.get("error")
+        if error:
+            # Consent denied or the request was rejected by Google.
+            return _console_redirect("/?oauth=error&reason=oauth_denied")
+        state = request.query_params.get("state")
+        code = request.query_params.get("code")
+        if not state or not code:
+            return _console_redirect("/?oauth=error&reason=bad_request")
         from auth.service import AuthService
         svc = AuthService(storage)
         status, body = _finish_google_callback(svc, storage, code, state)
-        location = absolute_redirect(redirect_target(body))
+        location = absolute_redirect(redirect_target(body),
+                                     fallback_origin=fallback)
+        if location is None:
+            # Failure envelope: still send the browser home with a reason the
+            # SPA can render instead of an infinite loading screen.
+            location = absolute_redirect(oauth_error_target(body),
+                                         fallback_origin=fallback)
         if location is not None:
             return RedirectResponse(url=location, status_code=303,
                                     headers={"Cache-Control": "no-store"})
@@ -404,6 +422,48 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             "gmail_connected": False,
             "gmail_email": None,
             "disconnected": disconnected,
+        })
+
+
+    @app.patch("/api/v1/auth/profile")
+    async def auth_update_profile(request: Request):
+        # Operator-editable profile: the display name only. The email is the
+        # account identity and is never editable here.
+        user = _get_current_user(request)
+        if not user:
+            return _json(401, error_body("unauthorized", "not logged in"))
+        payload = await _json_request(request)
+        name = payload.get("name")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("name must be a string")
+        name = (name or "").strip() or None
+        from auth.service import AuthService
+        updated = AuthService(storage).update_user_name(user["user_id"], name)
+        return success_body({"user": {
+            "user_id": updated["user_id"],
+            "email": updated["email"],
+            "name": updated.get("name"),
+        }})
+
+    @app.get("/api/v1/plan")
+    def plan(request: Request):
+        # Truthful entitlement report. This deployment ships NO billing and
+        # NO paid tiers, so every signed-in operator has full access and
+        # there is no upgrade to purchase. Nothing is invented.
+        user = _get_current_user(request)
+        return success_body({
+            "plan": {
+                "id": "full",
+                "name": "Full access",
+                "billing_configured": False,
+                "upgrade_available": False,
+                "note": (
+                    "This deployment has no billing or paid tiers configured. "
+                    "Every feature is available to signed-in operators; there "
+                    "is no upgrade to purchase."
+                ),
+            },
+            "signed_in": user is not None,
         })
 
 
@@ -657,35 +717,50 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
     @app.post("/api/v1/outreach", status_code=201)
     async def create_outreach(request: Request):
         payload = await _json_request(request)
-        record = outreach_service.create_outreach(storage, payload=payload)
+        user = _get_current_user(request)
+        record = outreach_service.create_outreach(
+            storage, payload=payload,
+            owner_user_id=user["user_id"] if user else None)
         return success_body(record)
 
     @app.get("/api/v1/outreach")
-    def list_outreach(limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    def list_outreach(request: Request,
+                      limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
                       offset: int = Query(0, ge=0),
                       status: str | None = None):
+        user = _get_current_user(request)
         rows, total = outreach_service.list_outreach(
-            storage, limit=limit, offset=offset, status=status)
+            storage, limit=limit, offset=offset, status=status,
+            owner_user_id=user["user_id"] if user else None)
         return success_body({"outreach": rows, "total": total,
                              "limit": limit, "offset": offset})
 
     @app.get("/api/v1/outreach/{outreach_id}")
-    def get_outreach(outreach_id: str):
-        record = outreach_service.get_outreach(storage, outreach_id)
+    def get_outreach(outreach_id: str, request: Request):
+        user = _get_current_user(request)
+        record = outreach_service.get_outreach(
+            storage, outreach_id,
+            owner_user_id=user["user_id"] if user else None)
         if record is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         return success_body(record)
 
     @app.delete("/api/v1/outreach/{outreach_id}")
-    def delete_outreach(outreach_id: str):
-        if outreach_service.get_outreach(storage, outreach_id) is None:
+    def delete_outreach(outreach_id: str, request: Request):
+        user = _get_current_user(request)
+        if outreach_service.get_outreach(
+                storage, outreach_id,
+                owner_user_id=user["user_id"] if user else None) is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         storage.delete_outreach(outreach_id)
         return success_body({"outreach_id": outreach_id})
 
     @app.post("/api/v1/outreach/{outreach_id}/event")
     async def outreach_event(outreach_id: str, request: Request):
-        if outreach_service.get_outreach(storage, outreach_id) is None:
+        user = _get_current_user(request)
+        if outreach_service.get_outreach(
+                storage, outreach_id,
+                owner_user_id=user["user_id"] if user else None) is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         payload = await _json_request(request)
         event = payload.get("event")
@@ -727,7 +802,8 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         user = _get_current_user(request)
         if not user:
             return _json(401, error_body("unauthorized", "not logged in"))
-        record = outreach_service.get_outreach(storage, outreach_id)
+        record = outreach_service.get_outreach(
+            storage, outreach_id, owner_user_id=user["user_id"])
         if record is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         recipient = record.get("recipient") or {}

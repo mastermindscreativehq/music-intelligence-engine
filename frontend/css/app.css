@@ -681,3 +681,41 @@ button.buttonish:hover { border-color: var(--accent); background: var(--panel-2)
 .dj-channel .route-status-line { font-size: 13px; word-break: break-word; }
 .dj-channel .evidence-row { font-size: 12px; }
 .dj-outreach-status { min-height: 16px; margin-top: 8px; font-size: 12.5px; }
+
+/* ------------------------------------------------------------------ */
+/* Legal pages (Privacy Policy / Terms of Service)                      */
+/* ------------------------------------------------------------------ */
+footer.page-foot a {
+  color: var(--text-dim);
+  text-decoration: none;
+}
+footer.page-foot a:hover { color: var(--accent); text-decoration: underline; }
+footer.page-foot .foot-sep { margin: 0 6px; color: var(--border); }
+
+.legal-page {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 6px 18px 8px;
+}
+.legal-page h1 { margin: 10px 0 4px; font-size: 24px; }
+.legal-page h2 {
+  margin: 24px 0 6px;
+  font-size: 15px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.legal-page a { color: var(--accent); }
+.legal-page a:hover { text-decoration: underline; }
+.legal-page p, .legal-page li { line-height: 1.6; }
+.legal-page p { margin: 8px 0; }
+.legal-page ul { margin: 8px 0; padding-left: 22px; }
+.legal-page li { margin: 4px 0; }
+.legal-meta { color: var(--text-dim); font-size: 12.5px; }
+.legal-placeholder {
+  color: var(--warn);
+  background: rgba(245, 165, 36, 0.12);
+  border: 1px dashed var(--warn);
+  border-radius: 4px;
+  padding: 0 4px;
+}

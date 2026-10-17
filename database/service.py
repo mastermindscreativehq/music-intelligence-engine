@@ -1552,19 +1552,28 @@ class PersistenceService(AuthStoreMixin):
             "provider": row["provider"],
             "outreach_class": row["outreach_class"],
             "submission_url": row["submission_url"],
+            "owner_user_id": row["owner_user_id"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
 
     def save_outreach(self, record: dict) -> dict:
-        """Insert or overwrite one outreach message row."""
+        """Insert or overwrite one outreach message row.
+
+        ``owner_user_id`` is set when the creating operator is authenticated
+        and carried forward on an update that does not restate it (an explicit
+        value, including ``None``, wins). Legacy/anonymous records keep it
+        NULL so the historical shared behavior is preserved.
+        """
         now = utc_now_iso()
         with self._lock, self._conn:
             existing = self._conn.execute(
-                "SELECT created_at FROM outreach_messages WHERE outreach_id=?",
+                "SELECT * FROM outreach_messages WHERE outreach_id=?",
                 (record["outreach_id"],)).fetchone()
             created = existing["created_at"] if existing \
                 else str(record.get("created_at") or now)
+            owner = record["owner_user_id"] if "owner_user_id" in record \
+                else (existing["owner_user_id"] if existing else None)
             self._conn.execute(
                 """
                 INSERT INTO outreach_messages(
@@ -1573,9 +1582,10 @@ class PersistenceService(AuthStoreMixin):
                     email, source_url, track_id, track, context,
                     subject, message, from_email, sharing,
                     status, provider, created_at, updated_at,
-                    outreach_class, submission_url, target_type)
+                    outreach_class, submission_url, target_type,
+                    owner_user_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(outreach_id) DO UPDATE SET
                     contact_uid=excluded.contact_uid,
                     identity_key=excluded.identity_key,
@@ -1596,6 +1606,7 @@ class PersistenceService(AuthStoreMixin):
                     outreach_class=excluded.outreach_class,
                     submission_url=excluded.submission_url,
                     target_type=excluded.target_type,
+                    owner_user_id=excluded.owner_user_id,
                     updated_at=excluded.updated_at
                 """,
                 (record["outreach_id"], record.get("contact_uid"),
@@ -1610,25 +1621,37 @@ class PersistenceService(AuthStoreMixin):
                  str(record.get("updated_at") or now),
                  record.get("outreach_class"),
                  record.get("submission_url"),
-                 record.get("target_type") or "station"))
+                 record.get("target_type") or "station", owner))
         return self.get_outreach(record["outreach_id"])
 
-    def get_outreach(self, outreach_id: str) -> dict | None:
+    def get_outreach(self, outreach_id: str,
+                     owner_user_id: str | None = None) -> dict | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM outreach_messages WHERE outreach_id=?",
                 (outreach_id,)).fetchone()
-        return self._outreach_from_row(row) if row else None
+        record = self._outreach_from_row(row) if row else None
+        if record is not None and owner_user_id:
+            owner = record.get("owner_user_id")
+            if owner and owner != owner_user_id:
+                return None
+        return record
 
     def list_outreach(self, limit: int = 50, offset: int = 0,
                       status: str | None = None,
-                      exclude_dev: bool = False
+                      exclude_dev: bool = False,
+                      owner_user_id: str | None = None
                       ) -> tuple[list[dict], int] \
             | tuple[list[dict], int, int]:
         clauses, params = [], []
         if status:
             clauses.append("status = ?")
             params.append(status)
+        if owner_user_id:
+            # Show this operator's records plus legacy/anonymous ones
+            # (owner NULL) so historical shared rows never disappear.
+            clauses.append("(owner_user_id = ? OR owner_user_id IS NULL)")
+            params.append(owner_user_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         if exclude_dev:
             dev_clause = "(" + _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL + ")"

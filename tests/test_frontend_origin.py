@@ -59,6 +59,24 @@ class TestFrontendOriginHelpers(unittest.TestCase):
                 routes.absolute_redirect("/?oauth=connected&auth=t"),
                 "/?oauth=connected&auth=t")
 
+    def test_absolute_redirect_uses_fallback_when_unset(self):
+        # The API-only app passes a fallback console origin so a missing
+        # MIE_FRONTEND_ORIGIN degrades to "wrong console", never "no console".
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MIE_FRONTEND_ORIGIN", None)
+            self.assertEqual(
+                routes.absolute_redirect("/?oauth=connected&auth=t",
+                                         fallback_origin=PROD_ORIGIN),
+                PROD_ORIGIN + "/?oauth=connected&auth=t")
+
+    def test_absolute_redirect_configured_origin_wins_over_fallback(self):
+        with mock.patch.dict(
+                os.environ, {"MIE_FRONTEND_ORIGIN": LOCAL_ORIGIN},
+                clear=False):
+            self.assertEqual(
+                routes.absolute_redirect("/x", fallback_origin=PROD_ORIGIN),
+                LOCAL_ORIGIN + "/x")
+
     def test_absolute_redirect_prefixes_console_origin(self):
         with mock.patch.dict(
                 os.environ, {"MIE_FRONTEND_ORIGIN": PROD_ORIGIN},
@@ -115,7 +133,9 @@ class TestFastApiCallbackRedirect(unittest.TestCase):
         self.assertEqual(resp.headers["location"],
                          PROD_ORIGIN + "/?oauth=connected&auth=tok")
 
-    def test_callback_stays_relative_without_configured_origin(self):
+    def test_callback_falls_back_to_production_console_without_config(self):
+        # backend.app is API-only: with no MIE_FRONTEND_ORIGIN it must still
+        # land the browser on the known console instead of the API host.
         client = self._client()
         body = success_body({"redirect": "/?oauth=connected&auth=tok"})
         with mock.patch.dict(os.environ, {}, clear=False), \
@@ -126,7 +146,8 @@ class TestFastApiCallbackRedirect(unittest.TestCase):
                 "/api/v1/auth/google/callback?code=c&state=s",
                 follow_redirects=False)
         self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/?oauth=connected&auth=tok")
+        self.assertEqual(resp.headers["location"],
+                         PROD_ORIGIN + "/?oauth=connected&auth=tok")
 
 
 # ---------------------------------------------------------------------------

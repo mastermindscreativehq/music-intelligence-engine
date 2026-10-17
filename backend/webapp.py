@@ -55,6 +55,7 @@ from backend.routes import (
     absolute_redirect,
     console_origins,
     dispatch,
+    oauth_error_target,
     redirect_target,
 )
 
@@ -213,6 +214,12 @@ def build_handler(service, static_root: Path, track_store=None,
                     headers=self.headers,
                     discovery_scheduler=discovery_scheduler)
                 location = absolute_redirect(redirect_target(body))
+                if location is None and path == "/api/v1/auth/google/callback":
+                    # A top-level OAuth hop must always land back on the
+                    # console: turn a callback failure envelope into a
+                    # "/?oauth=error&reason=..." redirect instead of a JSON
+                    # screen the operator cannot recover from.
+                    location = absolute_redirect(oauth_error_target(body))
                 if location is not None:
                     self._send_redirect(location)
                 else:

@@ -90,16 +90,18 @@ export function adoptAuthFromUrl() {
   try {
     url = new URL(window.location.href);
   } catch (error) {
-    return { adopted: false, oauth: null };
+    return { adopted: false, oauth: null, reason: null };
   }
   const token = url.searchParams.get("auth") || "";
   const oauth = url.searchParams.get("oauth");
+  const reason = url.searchParams.get("reason");
   if (token) {
     setAuthToken(token);
   }
   if (token || oauth) {
     url.searchParams.delete("auth");
     url.searchParams.delete("oauth");
+    url.searchParams.delete("reason");
     const cleaned = url.pathname + (url.search || "") + url.hash;
     try {
       window.history.replaceState(null, "", cleaned);
@@ -107,7 +109,7 @@ export function adoptAuthFromUrl() {
       /* ignore */
     }
   }
-  return { adopted: Boolean(token), oauth };
+  return { adopted: Boolean(token), oauth, reason };
 }
 
 function mergeHeaders(base, extra) {
@@ -223,12 +225,16 @@ export const api = {
   // never constructed here; they come from each stored projection's
   // links.self value supplied by the backend.
   tracks: (params) => request(API_BASE_URL + "/api/v1/tracks", params),
-  // links.self is a relative path from the backend; resolve it against the
-  // configured base so a separate-origin deployment still reaches Railway.
+  // links.self is a backend-relative path supplied by the API projection.
+  // Resolve it against the configured API base so a separate-origin
+  // deployment (frontend on Vercel, backend on Railway) reaches the API
+  // instead of the static frontend origin. Only a fully-qualified URL is
+  // used verbatim.
   trackDetail: (selfPath) =>
-    request(/^https?:\/\//.test(selfPath) || selfPath.startsWith("/")
+    request(/^https?:\/\//.test(selfPath)
       ? selfPath
-      : API_BASE_URL + "/" + selfPath),
+      : API_BASE_URL
+        + (selfPath.startsWith("/") ? selfPath : "/" + selfPath)),
   deleteTrack: (trackId) =>
     send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
       { method: "DELETE" }),
@@ -248,6 +254,46 @@ export const api = {
         headers: { "Content-Type": "audio/mpeg" },
       },
       { filename }),
+  // Phase 14: create a release from metadata alone (no binary upload) — the
+  // primary My Music workflow. The backend validates every field and derives
+  // the opaque track id; nothing is invented here.
+  createRelease: (payload) =>
+    send(API_BASE_URL + "/api/v1/tracks/releases",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      }),
+  // Phase 14: edit a release's operator-owned metadata (title, artist_name,
+  // genre) alongside its listening URL / song story. Any subset is accepted;
+  // the backend validates before writing.
+  updateTrackRelease: (trackId, payload) =>
+    send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      }),
+  // Edit the release's official listening URL. An empty string clears it;
+  // the backend validates and refuses anything that is not an absolute
+  // http(s) URL, so a bad link surfaces as a typed error, never a silent fix.
+  updateTrackListenUrl: (trackId, listenUrl) =>
+    send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ listen_url: listenUrl }),
+        headers: { "Content-Type": "application/json" },
+      }),
+  // Phase 13: edit the release's song story / creative brief — the
+  // operator's own account of the song, used as source material for
+  // outreach. An empty string clears it; it is never inferred.
+  updateTrackSongStory: (trackId, songStory) =>
+    send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ song_story: songStory }),
+        headers: { "Content-Type": "application/json" },
+      }),
   // Phase 9: outreach records/history. These POST JSON objects; send()
   // shares the envelope/typed-error conventions.
   createOutreach: (payload) =>
@@ -268,6 +314,12 @@ export const api = {
   sendOutreach: (id) =>
     send(API_BASE_URL + `/api/v1/outreach/${encodeURIComponent(id)}/send`,
       { method: "POST" }),
+  // Phase 13: song-story-aware outreach DRAFT. Requires a signed-in operator
+  // (email session). Draft ONLY — never creates a record and never sends.
+  composeEmail: (payload) =>
+    send(API_BASE_URL + "/api/v1/outreach/draft-email",
+      { method: "POST", body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" } }),
   // Auth
   login: async (email) => {
     const res = await send(API_BASE_URL + "/api/v1/auth/login",
@@ -279,6 +331,15 @@ export const api = {
     return res;
   },
   me: () => request(API_BASE_URL + "/api/v1/auth/me"),
+  // Operator-editable display name. The email is the sign-in identity and is
+  // never changed here; an empty string clears the name.
+  updateProfile: (name) =>
+    send(API_BASE_URL + "/api/v1/auth/profile",
+      { method: "PATCH", body: JSON.stringify({ name }),
+        headers: { "Content-Type": "application/json" } }),
+  // Truthful entitlement report for this deployment (no billing is
+  // configured; every signed-in operator has full access).
+  plan: () => request(API_BASE_URL + "/api/v1/plan"),
   logout: async () => {
     // Revoke server-side FIRST (send() attaches the current bearer), then
     // drop the local token — clearing first would strand the session.
@@ -289,7 +350,12 @@ export const api = {
       setAuthToken(null);
     }
   },
+  // Sign-in only (openid / email / profile). Never requests Gmail scopes.
   googleStart: () => request(API_BASE_URL + "/api/v1/auth/google/start"),
+  // Separate, authenticated Gmail-connect flow: requests the Gmail send
+  // scope only, and only for an already signed-in operator.
+  googleConnect: () =>
+    request(API_BASE_URL + "/api/v1/auth/google/connect"),
   disconnectGmail: () =>
     send(API_BASE_URL + "/api/v1/auth/google/disconnect",
       { method: "POST" }),

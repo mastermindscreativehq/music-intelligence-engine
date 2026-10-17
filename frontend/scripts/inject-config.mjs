@@ -30,6 +30,8 @@ const base = configured.replace(/\/+$/, "");
 
 const TEXT_FILES = [
   "index.html",
+  "privacy.html",
+  "terms.html",
   "css/app.css",
   "js/app.js",
   "js/api.js",
@@ -52,6 +54,7 @@ const TEXT_FILES = [
   "js/views/status.js",
   "js/views/outreachModal.js",
   "js/views/account.js",
+  "js/views/profile.js",
 ];
 const BINARY_FILES = [];
 

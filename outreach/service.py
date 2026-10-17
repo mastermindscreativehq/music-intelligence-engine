@@ -85,11 +85,16 @@ def _oom_payload(row: dict, attempts: list[dict] | None = None) -> dict:
 
 
 def create_outreach(repository, *, payload: dict,
-                    provider: EmailProvider = None, now: str = None) -> dict:
+                    provider: EmailProvider = None, now: str = None,
+                    owner_user_id: str | None = None) -> dict:
     """Create a fresh outreach message record (status ``ready``).
 
     ``payload`` is the operator-supplied outreach (recipient, optional
     track/context/sharing, subject, message). Nothing is sent here.
+
+    ``owner_user_id`` stamps first-class ownership when the creating operator
+    is authenticated; it stays NULL for anonymous creation so the historical
+    shared behavior is preserved.
 
     Recipient route — a record targets EITHER a verified email
     (``outreach_class == "email"``) OR a verified submission/contact web-form
@@ -148,6 +153,7 @@ def create_outreach(repository, *, payload: dict,
         "sharing": payload.get("sharing"),
         "status": DeliveryStatus.READY.value,
         "provider": provider.name,
+        "owner_user_id": owner_user_id,
         "created_at": ts,
         "updated_at": ts,
     }
@@ -155,8 +161,9 @@ def create_outreach(repository, *, payload: dict,
     return get_outreach(repository, outreach_id)
 
 
-def get_outreach(repository, outreach_id: str) -> dict | None:
-    row = repository.get_outreach(outreach_id)
+def get_outreach(repository, outreach_id: str,
+                 owner_user_id: str | None = None) -> dict | None:
+    row = repository.get_outreach(outreach_id, owner_user_id=owner_user_id)
     if row is None:
         return None
     attempts = repository.get_outreach_attempts(outreach_id)
@@ -165,18 +172,23 @@ def get_outreach(repository, outreach_id: str) -> dict | None:
 
 def list_outreach(repository, *, limit=50, offset=0,
                   status: str | None = None,
-                  exclude_dev: bool = False) -> tuple[list, int]:
+                  exclude_dev: bool = False,
+                  owner_user_id: str | None = None) -> tuple[list, int]:
     if status is not None and status not in OUTREACH_STATUSES:
         raise ValueError(
             "'status' must be one of: " + ", ".join(OUTREACH_STATUSES))
     rows = repository.list_outreach(limit=limit, offset=offset,
-                                    status=status, exclude_dev=exclude_dev)
+                                    status=status, exclude_dev=exclude_dev,
+                                    owner_user_id=owner_user_id)
     if exclude_dev:
         rows, total, dev_excluded = rows
-        rows = [get_outreach(repository, r["outreach_id"]) for r in rows]
+        rows = [get_outreach(repository, r["outreach_id"],
+                             owner_user_id=owner_user_id) for r in rows]
         return rows, total, dev_excluded
     rows, total = rows
-    return [get_outreach(repository, r["outreach_id"]) for r in rows], total
+    return [get_outreach(repository, r["outreach_id"],
+                         owner_user_id=owner_user_id)
+            for r in rows], total
 
 
 def record_outreach_event(repository, outreach_id: str, *, event: str,

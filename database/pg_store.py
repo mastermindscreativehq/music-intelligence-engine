@@ -1123,6 +1123,7 @@ class PostgresStorage(AuthStoreMixin):
             "sharing": _j(row["sharing"], None),
             "status": row["status"],
             "provider": row["provider"],
+            "owner_user_id": row["owner_user_id"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1135,12 +1136,15 @@ class PostgresStorage(AuthStoreMixin):
             with self._conn:
                 cur = self._conn.cursor()
                 cur.execute(
-                    "SELECT created_at FROM outreach_messages "
+                    "SELECT * FROM outreach_messages "
                     "WHERE outreach_id=%s",
                     (record["outreach_id"],))
                 existing = cur.fetchone()
                 created = existing["created_at"] if existing \
                     else str(record.get("created_at") or now)
+                owner = record["owner_user_id"] \
+                    if "owner_user_id" in record \
+                    else (existing["owner_user_id"] if existing else None)
                 cur.execute(
                     """
                     INSERT INTO outreach_messages(
@@ -1149,10 +1153,11 @@ class PostgresStorage(AuthStoreMixin):
                         email, source_url, outreach_class, submission_url,
                         target_type, track_id, track, context,
                         subject, message, from_email, sharing,
-                        status, provider, created_at, updated_at)
+                        status, provider, created_at, updated_at,
+                        owner_user_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s,
-                            %s::jsonb, %s, %s, %s, %s)
+                            %s::jsonb, %s, %s, %s, %s, %s)
                     ON CONFLICT(outreach_id) DO UPDATE SET
                         contact_uid=EXCLUDED.contact_uid,
                         identity_key=EXCLUDED.identity_key,
@@ -1173,6 +1178,7 @@ class PostgresStorage(AuthStoreMixin):
                         sharing=EXCLUDED.sharing,
                         status=EXCLUDED.status,
                         provider=EXCLUDED.provider,
+                        owner_user_id=EXCLUDED.owner_user_id,
                         updated_at=EXCLUDED.updated_at
                     """,
                     (record["outreach_id"], record.get("contact_uid"),
@@ -1189,10 +1195,11 @@ class PostgresStorage(AuthStoreMixin):
                      record.get("from_email"),
                      _dumps(record.get("sharing")),
                      record["status"], record.get("provider") or "local",
-                     created, str(record.get("updated_at") or now)))
+                     created, str(record.get("updated_at") or now), owner))
         return self.get_outreach(record["outreach_id"])
 
-    def get_outreach(self, outreach_id: str) -> dict | None:
+    def get_outreach(self, outreach_id: str,
+                     owner_user_id: str | None = None) -> dict | None:
         with self._lock:
             self._ensure_connection()
             cur = self._conn.cursor()
@@ -1200,16 +1207,25 @@ class PostgresStorage(AuthStoreMixin):
                 "SELECT * FROM outreach_messages WHERE outreach_id=%s",
                 (outreach_id,))
             row = cur.fetchone()
-        return self._outreach_from_row(row) if row else None
+        record = self._outreach_from_row(row) if row else None
+        if record is not None and owner_user_id:
+            owner = record.get("owner_user_id")
+            if owner and owner != owner_user_id:
+                return None
+        return record
 
     def list_outreach(self, limit: int = 50, offset: int = 0,
                       status: str | None = None,
-                      exclude_dev: bool = False
+                      exclude_dev: bool = False,
+                      owner_user_id: str | None = None
                       ) -> tuple[list[dict], int] | tuple[list[dict], int, int]:
         clauses, params = [], []
         if status:
             clauses.append("status = %s")
             params.append(status)
+        if owner_user_id:
+            clauses.append("(owner_user_id = %s OR owner_user_id IS NULL)")
+            params.append(owner_user_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         if exclude_dev:
             dev_clause = "(" + _DEV_OUTREACH_FIXTURE_EXCLUSION_SQL + ")"

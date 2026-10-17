@@ -80,6 +80,13 @@ class AuthStoreMixin:
         return self._auth_read_one(
             f"SELECT * FROM users WHERE user_id={ph}", (user_id,))
 
+    def auth_update_user_name(self, user_id: str, name, updated_at: str) -> None:
+        """Update only the operator-owned display name (never the email)."""
+        ph = self._AUTH_PLACEHOLDER
+        self._auth_write(
+            f"UPDATE users SET name={ph}, updated_at={ph} WHERE user_id={ph}",
+            (name, updated_at, user_id))
+
     # -- sessions ------------------------------------------------------------
 
     def auth_create_session(self, session: dict) -> None:

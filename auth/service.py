@@ -49,6 +49,14 @@ class AuthService:
     def get_user_by_id(self, user_id: str):
         return self.storage.auth_get_user_by_id(user_id)
 
+    def update_user_name(self, user_id: str, name: str | None):
+        """Set the operator's display name and return the refreshed row.
+
+        Only the name is operator-editable; the email is the identity key
+        and is never changed here."""
+        self.storage.auth_update_user_name(user_id, name, iso_now())
+        return self.get_user_by_id(user_id)
+
     # -- sessions ------------------------------------------------------------
 
     def create_session(self, user_id: str) -> dict:

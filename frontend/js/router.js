@@ -42,6 +42,8 @@ export function startRouter(root, routes) {
       routes.outreach(root);
     } else if (hash === "#/outreach-history") {
       routes.outreachHistory(root);
+    } else if (hash === "#/profile") {
+      routes.profile(root);
     } else {
       routes.dashboard(root);
     }
@@ -49,6 +51,8 @@ export function startRouter(root, routes) {
   window.addEventListener("hashchange", render);
   render();
 }
+
+export const dashboardHref = "#/";
 
 export const stationHref = (identityKey) =>
   `#/station/${encodeURIComponent(identityKey)}`;
@@ -66,6 +70,8 @@ export const outreachHref = "#/outreach";
 export const outreachHistoryHref = () => "#/outreach-history";
 
 export const opportunitiesHref = "#/opportunities";
+
+export const profileHref = "#/profile";
 
 export const opportunitiesTrackHref = (trackId) =>
   `#/opportunities/${encodeURIComponent(trackId)}`;

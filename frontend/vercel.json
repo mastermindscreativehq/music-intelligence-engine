@@ -1,5 +1,6 @@
 {
   "buildCommand": "node scripts/inject-config.mjs",
   "outputDirectory": "dist",
-  "framework": null
+  "framework": null,
+  "cleanUrls": true
 }

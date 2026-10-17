@@ -127,10 +127,20 @@ class IntelligenceRepository(Protocol):
     # -- Phase 9: outreach records + attempt ledger ---------------------------
 
     def save_outreach(self, record: dict) -> dict:
-        """Insert or overwrite one outreach message row."""
+        """Insert or overwrite one outreach message row.
+
+        ``record`` may carry ``owner_user_id`` for the authenticated creator;
+        it is NULL for legacy/anonymous records.
+        """
         ...
 
-    def get_outreach(self, outreach_id: str) -> dict | None: ...
+    def get_outreach(self, outreach_id: str,
+                     owner_user_id: str | None = ...) -> dict | None:
+        """Fetch one record; when ``owner_user_id`` is given, a record owned
+        by a DIFFERENT user is treated as absent (legacy NULL rows remain
+        visible to all).
+        """
+        ...
 
     def delete_outreach(self, outreach_id: str) -> str | None:
         """Delete one outreach record; returns the deleted id or None.
@@ -141,8 +151,16 @@ class IntelligenceRepository(Protocol):
         ...
 
     def list_outreach(self, limit: int = ..., offset: int = ...,
-                      status: str | None = ...) -> tuple[list[dict], int]:
-        """Listing; returns (rows, total), newest first."""
+                      status: str | None = ...,
+                      exclude_dev: bool = ...,
+                      owner_user_id: str | None = ...) \
+            -> tuple[list[dict], int]:
+        """Listing; returns (rows, total), newest first.
+
+        With ``owner_user_id`` the listing shows that operator's records plus
+        legacy/anonymous rows (owner NULL). With ``exclude_dev`` the tuple
+        becomes ``(rows, visible_total, dev_fixtures_excluded)``.
+        """
         ...
 
     def append_outreach_attempt(self, outreach_id: str,

@@ -90,16 +90,18 @@ export function adoptAuthFromUrl() {
   try {
     url = new URL(window.location.href);
   } catch (error) {
-    return { adopted: false, oauth: null };
+    return { adopted: false, oauth: null, reason: null };
   }
   const token = url.searchParams.get("auth") || "";
   const oauth = url.searchParams.get("oauth");
+  const reason = url.searchParams.get("reason");
   if (token) {
     setAuthToken(token);
   }
   if (token || oauth) {
     url.searchParams.delete("auth");
     url.searchParams.delete("oauth");
+    url.searchParams.delete("reason");
     const cleaned = url.pathname + (url.search || "") + url.hash;
     try {
       window.history.replaceState(null, "", cleaned);
@@ -107,7 +109,7 @@ export function adoptAuthFromUrl() {
       /* ignore */
     }
   }
-  return { adopted: Boolean(token), oauth };
+  return { adopted: Boolean(token), oauth, reason };
 }
 
 function mergeHeaders(base, extra) {
@@ -329,6 +331,15 @@ export const api = {
     return res;
   },
   me: () => request(API_BASE_URL + "/api/v1/auth/me"),
+  // Operator-editable display name. The email is the sign-in identity and is
+  // never changed here; an empty string clears the name.
+  updateProfile: (name) =>
+    send(API_BASE_URL + "/api/v1/auth/profile",
+      { method: "PATCH", body: JSON.stringify({ name }),
+        headers: { "Content-Type": "application/json" } }),
+  // Truthful entitlement report for this deployment (no billing is
+  // configured; every signed-in operator has full access).
+  plan: () => request(API_BASE_URL + "/api/v1/plan"),
   logout: async () => {
     // Revoke server-side FIRST (send() attaches the current bearer), then
     // drop the local token — clearing first would strand the session.

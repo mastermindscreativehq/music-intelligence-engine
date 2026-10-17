@@ -26,12 +26,56 @@ function alertLine(text, href, actionLabel) {
     el("a", { class: "linkish", href }, actionLabel || "Go →"));
 }
 
+// Signed-out welcome: a plain introduction plus the two real next steps
+// (sign in, or browse the public station list). No marketing copy and no
+// claims that aren't true of this deployment.
+function landingHero() {
+  const status = el("span", { class: "account-status" });
+  const signIn = el("button", {
+    class: "primary",
+    onClick: async () => {
+      signIn.disabled = true;
+      status.replaceChildren("Opening Google…");
+      try {
+        const res = await api.googleStart();
+        if (res && res.auth_url) {
+          window.location.assign(res.auth_url);
+          return;
+        }
+        throw new Error("no authorization URL returned");
+      } catch (error) {
+        const detail = error instanceof ApiError ? error.message : String(error);
+        status.replaceChildren(
+          el("span", { class: "banner-error", role: "alert" }, detail));
+        signIn.disabled = false;
+      }
+    },
+  }, "Sign in with Google");
+  return el("section", { class: "card" },
+    el("h2", {}, "Welcome to the Music Intelligence Engine"),
+    el("p", {},
+      "Find radio stations and DJs, prepare outreach that references your "
+      + "releases, and send it from your own Gmail — all tracked in one "
+      + "place. Sign in to attach your music and send; browsing is open."),
+    el("div", { class: "actions-row" },
+      signIn,
+      el("a", { class: "buttonish subtle", href: stationsHref },
+        "Browse stations"),
+      el("a", { class: "buttonish subtle", href: tracksHref },
+        "My music"),
+      status));
+}
+
 export function renderDashboardView(root) {
   root.append(
     el("h1", {}, "Dashboard"),
     el("p", { class: "dim" },
       "What's happening across the engine. This is an overview only — ",
       "prepare and track outreach from its own pages."));
+
+  if (!api.isLoggedIn()) {
+    root.append(landingHero());
+  }
 
   const slots = new Map([
     ["reads", el("div", { class: "stat-grid" },

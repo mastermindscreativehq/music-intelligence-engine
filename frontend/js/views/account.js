@@ -23,9 +23,13 @@ import { el } from "../dom.js";
 let host = null;
 let lastError = null;
 
-export function renderAccountArea(target) {
+export function renderAccountArea(target, options = {}) {
   host = target;
-  refreshAccountArea();
+  // An OAuth return may carry a failure reason (see api.adoptAuthFromUrl);
+  // render it as the account-area notice so a cancelled/failed sign-in shows
+  // a clear message instead of an empty ("stuck") header.
+  lastError = options.notice ? String(options.notice) : null;
+  return load();
 }
 
 export async function refreshAccountArea() {

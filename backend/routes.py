@@ -30,6 +30,7 @@ import json
 import os
 import re
 import uuid
+from urllib.parse import quote
 
 from backend.contracts import (
     contacts_payload,
@@ -190,6 +191,9 @@ ROUTE_TABLE = (
      "/api/v1/auth/google/callback", ()),
     ("POST", re.compile(r"^/api/v1/auth/google/disconnect$"),
      "/api/v1/auth/google/disconnect", ()),
+    ("PATCH", re.compile(r"^/api/v1/auth/profile$"),
+     "/api/v1/auth/profile", ()),
+    ("GET", re.compile(r"^/api/v1/plan$"), "/api/v1/plan", ()),
     ("GET", re.compile(r"^/api/v1/djs$"), "/api/v1/djs", DJ_PARAMS),
     ("POST", re.compile(r"^/api/v1/djs$"), "/api/v1/djs", ()),
     ("GET", re.compile(r"^/api/v1/djs/(?P<dj_id>dj_[0-9a-f]+)$"),
@@ -350,16 +354,26 @@ def frontend_origin() -> str:
         .split("?")[0].split("#")[0].rstrip("/")
 
 
-def absolute_redirect(target: str | None) -> str | None:
+def absolute_redirect(target: str | None, *,
+                      fallback_origin: str | None = None) -> str | None:
     """Rewrite a relative server-side redirect target onto the console origin.
 
     ``_finish_google_callback`` emits a same-origin relative target
     ("/?oauth=..."). When MIE_FRONTEND_ORIGIN is configured (split production
     console/API), prefix it so the browser lands on the console and the SPA
     can adopt the session; otherwise the relative target is returned unchanged.
-    Non-relative or empty targets pass through untouched.
+
+    ``fallback_origin`` is an optional last resort used ONLY when
+    MIE_FRONTEND_ORIGIN is unset. The API-only ASGI app (``backend.app``) has
+    no static console of its own, so a relative redirect there would strand the
+    browser on the API host and silently break sign-in; it passes the known
+    production console origin so a missing/typo'd deploy variable degrades to
+    "wrong console" rather than "no console". The stdlib server
+    (``backend.webapp``) MAY co-serve the console in-process, so it leaves this
+    unset and keeps relative redirects. Non-relative or empty targets pass
+    through untouched.
     """
-    origin = frontend_origin()
+    origin = frontend_origin() or (fallback_origin or "")
     if origin and isinstance(target, str) and target.startswith("/") \
             and not target.startswith("//"):
         return origin + target
@@ -385,6 +399,28 @@ def redirect_target(body) -> str | None:
             and not target.startswith("//"):
         return target
     return None
+
+
+def oauth_error_target(body) -> str | None:
+    """Console redirect target for a Google-callback FAILURE envelope.
+
+    A cancelled or rejected OAuth hop reaches the callback as a top-level
+    browser navigation, so answering ``ok:false`` as JSON strands the operator
+    on the API host with no way back to the console ("stuck / signed out").
+    This mirrors :func:`redirect_target` for the failure case: it turns the
+    typed error code into a same-origin ``/?oauth=error&reason=<code>`` target
+    the server layers turn into a redirect. The code is a fixed server-side
+    token (``oauth_denied``/``oauth_state_invalid``/``oauth_exchange_failed``/
+    ``oauth_email_missing``/``oauth_not_configured``/``bad_request``), never
+    free-form provider text, so it is safe to echo in the query string.
+    """
+    if not isinstance(body, dict) or body.get("ok") is not False:
+        return None
+    detail = body.get("error")
+    code = detail.get("code") if isinstance(detail, dict) else None
+    if not isinstance(code, str) or not code:
+        code = "oauth_failed"
+    return f"/?oauth=error&reason={quote(code, safe='')}"
 
 
 def _finish_google_callback(svc, service, code: str, state: str) -> tuple[int, dict]:
@@ -655,7 +691,45 @@ def _handle(service, method: str, match: re.Match, params: dict,
                 "gmail_email": None,
                 "disconnected": disconnected,
             })
+        if path == "/api/v1/auth/profile" and method == "PATCH":
+            # Operator-editable profile: the display name only. The email is
+            # the account identity and is never editable here.
+            user = _get_current_user(service, headers)
+            if not user:
+                return 401, error_body("unauthorized", "not logged in")
+            payload = _parse_json_body(body) if body else {}
+            name = payload.get("name")
+            if name is not None and not isinstance(name, str):
+                raise ValueError("name must be a string")
+            name = (name or "").strip() or None
+            updated = svc.update_user_name(user["user_id"], name)
+            return 200, success_body({"user": {
+                "user_id": updated["user_id"],
+                "email": updated["email"],
+                "name": updated.get("name"),
+            }})
         return 405, error_body("method_not_allowed", "method not allowed on this route")
+
+    if path == "/api/v1/plan" and method == "GET":
+        # Truthful entitlement report. This deployment ships NO billing and
+        # NO paid tiers, so there is nothing to upgrade to: every signed-in
+        # operator has full access. Nothing here invents a price or a
+        # feature gate. ``signed_in`` lets the profile page tailor its copy.
+        user = _get_current_user(service, headers)
+        return 200, success_body({
+            "plan": {
+                "id": "full",
+                "name": "Full access",
+                "billing_configured": False,
+                "upgrade_available": False,
+                "note": (
+                    "This deployment has no billing or paid tiers configured. "
+                    "Every feature is available to signed-in operators; there "
+                    "is no upgrade to purchase."
+                ),
+            },
+            "signed_in": user is not None,
+        })
 
     def require_station(key: str) -> dict:
         row = service.get_station(key)
@@ -771,13 +845,18 @@ def _handle(service, method: str, match: re.Match, params: dict,
     if path == "/api/v1/outreach":
         if method == "POST":
             payload = _parse_json_body(body)
-            record = outreach_service.create_outreach(service, payload=payload)
+            user = _get_current_user(service, headers)
+            record = outreach_service.create_outreach(
+                service, payload=payload,
+                owner_user_id=user["user_id"] if user else None)
             return 201, success_body(record)
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
+        user = _get_current_user(service, headers)
         rows, total, dev_excluded = outreach_service.list_outreach(
             service, limit=limit, offset=offset,
-            status=_first(params, "status"), exclude_dev=True)
+            status=_first(params, "status"), exclude_dev=True,
+            owner_user_id=user["user_id"] if user else None)
         return 200, success_body({"outreach": rows, "total": total,
                                   "limit": limit, "offset": offset,
                                   "dev_fixtures_excluded": dev_excluded})
@@ -807,7 +886,10 @@ def _handle(service, method: str, match: re.Match, params: dict,
 
     if path.startswith("/api/v1/outreach/") and path.endswith("/event"):
         outreach_id = match.group("outreach_id")
-        if outreach_service.get_outreach(service, outreach_id) is None:
+        user = _get_current_user(service, headers)
+        if outreach_service.get_outreach(
+                service, outreach_id,
+                owner_user_id=user["user_id"] if user else None) is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         payload = _parse_json_body(body)
         event = payload.get("event")
@@ -823,7 +905,8 @@ def _handle(service, method: str, match: re.Match, params: dict,
         user = _get_current_user(service, headers)
         if not user:
             return 401, error_body("unauthorized", "not logged in")
-        record = outreach_service.get_outreach(service, outreach_id)
+        record = outreach_service.get_outreach(
+            service, outreach_id, owner_user_id=user["user_id"])
         if record is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         recipient = record.get("recipient") or {}
@@ -876,13 +959,16 @@ def _handle(service, method: str, match: re.Match, params: dict,
 
     if path.startswith("/api/v1/outreach/"):
         outreach_id = match.group("outreach_id")
-        if outreach_service.get_outreach(service, outreach_id) is None:
+        user = _get_current_user(service, headers)
+        record = outreach_service.get_outreach(
+            service, outreach_id,
+            owner_user_id=user["user_id"] if user else None)
+        if record is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         if method == "DELETE":
             service.delete_outreach(outreach_id)
             return 200, success_body({"outreach_id": outreach_id})
-        return 200, success_body(
-            outreach_service.get_outreach(service, outreach_id))
+        return 200, success_body(record)
 
     # -- Phase 3: opportunity intelligence -------------------------------------
     if path == "/api/v1/opportunities":
