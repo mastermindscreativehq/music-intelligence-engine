@@ -5,6 +5,13 @@ from datetime import datetime, timedelta, timezone
 
 from google_auth_oauthlib.flow import Flow
 
+# Sign-in requests incremental authorization (include_granted_scopes), so when
+# the Google account already granted other scopes (e.g. a prior Gmail connect)
+# the token response carries a SUPERSET of the sign-in scopes. oauthlib treats
+# any scope change as a hard error and raises a Warning, which the callback
+# turns into "oauth_exchange_failed". The change is expected and harmless here.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "")
