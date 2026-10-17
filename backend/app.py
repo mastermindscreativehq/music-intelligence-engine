@@ -36,7 +36,8 @@ never import this module, so they never require the dependency.
 Annotations must stay resolvable at module scope (PEP 563 + FastAPI
 dependency resolution). Configuration uses env var NAMES only
 (MIE_DATABASE_PATH / MIE_PG_DSN / MIE_API_HOST / MIE_API_PORT /
-SUBMISSION_STORAGE_ROOT); values are never logged or echoed into
+SUBMISSION_STORAGE_ROOT / MIE_CORS_ORIGINS / MIE_FRONTEND_ORIGIN);
+values are never logged or echoed into
 responses, and asset responses never contain storage locations. No
 crawling logic, no secrets.
 
@@ -50,8 +51,11 @@ construction happens exactly when uvicorn resolves the ``app`` attribute.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
+
+_log = logging.getLogger("mie.backend")
 
 # Load the PROJECT-ROOT .env before any code reads os.environ. python-dotenv
 # only sets variables that are not already present (override=False), so a real
@@ -97,6 +101,12 @@ from djs import service as dj_service
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
 
+# The console is hosted on Vercel, the API on Railway, so browser calls are
+# cross-origin. The allowed origins (production default + MIE_CORS_ORIGINS)
+# are shared with every server layer via ``backend.routes.console_origins`` so
+# the FastAPI app, the reference server and the operator webapp agree.
+from backend.routes import console_origins  # noqa: E402
+
 
 class StationNotFound(Exception):
     """Unknown identity key; converted to a 404 envelope."""
@@ -112,6 +122,46 @@ class OutreachNotFound(Exception):
 
 class DjNotFound(Exception):
     """Unknown DJ id; converted to a 404 envelope (independent DJs)."""
+
+
+class CorsVisibleErrors:
+    """Return the app's JSON 500 envelope for otherwise-unhandled crashes.
+
+    Starlette installs ``ServerErrorMiddleware`` OUTSIDE all user middleware,
+    so a truly unhandled exception would be turned into a bare 500 with no
+    ``Access-Control-Allow-Origin`` header — the browser would then report an
+    opaque CORS/network failure instead of the real server error. This
+    middleware is added BEFORE ``CORSMiddleware`` (so CORS wraps it) and
+    converts any exception escaping the router into the standard envelope, so
+    even a crash keeps the cross-origin headers the console needs to read it.
+    The traceback is logged server-side and never sent to the client.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def _send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception:  # noqa: BLE001 — last-resort envelope, then re-log
+            if started:
+                raise
+            _log.exception("unhandled error serving %s", scope.get("path"))
+            response = JSONResponse(
+                status_code=500,
+                content=error_body("internal_error", "internal server error"))
+            await response(scope, receive, send)
 
 
 def create_app(storage, *, track_store=None, link_fetcher=None,
@@ -131,24 +181,16 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                   version="0.8",
                   docs_url="/api/v1/docs", openapi_url="/api/v1/openapi.json")
 
-    # Cross-origin support for separately-hosted frontends (e.g. a static
-    # Vercel console against this Railway backend). Origins come from the
-    # MIE_CORS_ORIGINS env var (comma-separated absolute origins). Unset or
-    # empty means no cross-origin is allowed, preserving the historical
-    # same-origin behavior. Credentials stay off: the API is unauthenticated
-    # and same-origin cookies are never needed across hosts. ``Authorization``
-    # is allowed only so a future authenticated console can send a bearer
-    # token; it grants nothing by itself and is still checked per request.
-    cors_origins = []
-    for origin in os.environ.get("MIE_CORS_ORIGINS", "").split(","):
-        origin = origin.strip()
-        if not origin:
-            continue
-        # drop a trailing slash (and any query/fragment) so values like
-        # "https://console.example.app/" still match the browser Origin header
-        origin = origin.split("?")[0].split("#")[0].rstrip("/")
-        if origin:
-            cors_origins.append(origin)
+    # Added FIRST so CORSMiddleware (added below) wraps it: an unhandled crash
+    # becomes a JSON 500 envelope that still passes back through CORS.
+    app.add_middleware(CorsVisibleErrors)
+    # Cross-origin support for separately-hosted frontends (the static Vercel
+    # console against this Railway backend). console_origins() yields the exact
+    # production origin by default plus any MIE_CORS_ORIGINS. Credentials stay
+    # off: the console authenticates with a bearer token in the Authorization
+    # header (allowed below), not cross-site cookies. A cookie exchange would
+    # require allow_credentials and could never use a wildcard.
+    cors_origins = console_origins()
     if cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -243,11 +285,7 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         sess = svc.get_session(token)
         if not sess:
             return None
-        with storage._lock:
-            row = storage._conn.execute(
-                "SELECT * FROM users WHERE user_id=?", (sess["user_id"],)
-            ).fetchone()
-        return dict(row) if row else None
+        return svc.get_user_by_id(sess["user_id"])
 
     @app.post("/api/v1/auth/login")
     async def auth_login(request: Request):
@@ -288,9 +326,8 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
 
     @app.get("/api/v1/auth/google/start")
     async def google_start(request: Request):
-        # Reachable signed-in OR anonymous; the callback mints the session
-        # for an anonymous start after Google confirms the account email.
-        user = _get_current_user(request)
+        # Sign-in flow: identity only, no Gmail scopes. The callback mints the
+        # operator's session after Google confirms the account email.
         from auth.google_oauth import GoogleOAuth
         oauth = GoogleOAuth()
         if not oauth.configured:
@@ -299,23 +336,54 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         from auth.service import AuthService
         svc = AuthService(storage)
         verifier = oauth.new_code_verifier()
-        state = svc.create_oauth_state(user["user_id"] if user else None,
-                                       verifier)
-        auth_url, _ = oauth.get_auth_url(state, verifier)
+        state = svc.create_oauth_state(None, verifier)
+        auth_url, _ = oauth.get_auth_url(
+            state, verifier, GoogleOAuth.SIGNIN_SCOPES)
+        return success_body({"auth_url": auth_url})
+
+    @app.get("/api/v1/auth/google/connect")
+    async def google_connect(request: Request):
+        # Gmail-connect flow: an already signed-in operator grants the Gmail
+        # SEND scope. Separate from sign-in so identity and mailbox access are
+        # never bundled into one consent.
+        user = _get_current_user(request)
+        if not user:
+            return _json(401, error_body(
+                "unauthorized", "sign in before connecting Gmail"))
+        from auth.google_oauth import GoogleOAuth
+        oauth = GoogleOAuth()
+        if not oauth.configured:
+            return _json(503, error_body("oauth_not_configured",
+                                         "Google OAuth not configured"))
+        from auth.service import AuthService
+        svc = AuthService(storage)
+        verifier = oauth.new_code_verifier()
+        state = svc.create_oauth_state(user["user_id"], verifier)
+        auth_url, _ = oauth.get_auth_url(
+            state, verifier, GoogleOAuth.GMAIL_SEND_SCOPES)
         return success_body({"auth_url": auth_url})
 
     @app.get("/api/v1/auth/google/callback")
     async def google_callback(code: str | None = None,
-                              state: str | None = None):
+                              state: str | None = None,
+                              error: str | None = None):
+        if error:
+            # Google redirects here with ?error=... when consent is denied
+            # or the request is rejected; surface it instead of a cryptic
+            # "code required".
+            return _json(400, error_body(
+                "oauth_denied",
+                f"Google authorization was not completed: {error}"))
         if not state:
             return _json(400, error_body("bad_request", "state required"))
         if not code:
             return _json(400, error_body("bad_request", "code required"))
-        from backend.routes import _finish_google_callback, redirect_target
+        from backend.routes import (
+            _finish_google_callback, absolute_redirect, redirect_target)
         from auth.service import AuthService
         svc = AuthService(storage)
         status, body = _finish_google_callback(svc, storage, code, state)
-        location = redirect_target(body)
+        location = absolute_redirect(redirect_target(body))
         if location is not None:
             return RedirectResponse(url=location, status_code=303,
                                     headers={"Cache-Control": "no-store"})
@@ -678,13 +746,21 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                 record.get("message") or "",
             )
         except GmailSendError as e:
-            msg = str(e)
-            if "no_connected_gmail" in msg:
+            code = getattr(e, "code", "gmail_send_failed")
+            if code == "no_connected_gmail":
                 return _json(400, error_body("no_connected_gmail", "Connect Gmail first"))
             outreach_service.record_outreach_event(
-                storage, outreach_id, event="failed", meta={"error": msg, "provider": "gmail_user"}
+                storage, outreach_id, event="failed", meta={"error": str(e), "provider": "gmail_user"}
             )
-            return _json(500, error_body("gmail_send_failed", msg))
+            if code == "gmail_reauth_required":
+                return _json(400, error_body(
+                    code, "Your Google authorization expired or was "
+                    "revoked - reconnect Gmail to send."))
+            if code == "gmail_scope_missing":
+                return _json(403, error_body(
+                    code, "Gmail send permission is missing - reconnect "
+                    "Gmail and allow sending."))
+            return _json(500, error_body("gmail_send_failed", str(e)))
         except Exception as e:
             outreach_service.record_outreach_event(
                 storage, outreach_id, event="failed", meta={"error": str(e), "provider": "gmail_user"}

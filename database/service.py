@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 
 from crawler.urls import canonical_domain
 
+from database.auth_store import AuthStoreMixin
 from database.schema import SCHEMA_VERSION, apply_migrations
 
 from discovery.events import (
@@ -469,7 +470,7 @@ def _merge_dict(existing, incoming) -> dict:
     return out
 
 
-class PersistenceService:
+class PersistenceService(AuthStoreMixin):
     """SQLite-backed storage boundary over produced intelligence."""
 
     def __init__(self, db_path: str, logger=None) -> None:

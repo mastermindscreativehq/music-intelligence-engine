@@ -184,6 +184,8 @@ ROUTE_TABLE = (
      "/api/v1/auth/me", ()),
     ("GET", re.compile(r"^/api/v1/auth/google/start$"),
      "/api/v1/auth/google/start", ()),
+    ("GET", re.compile(r"^/api/v1/auth/google/connect$"),
+     "/api/v1/auth/google/connect", ()),
     ("GET", re.compile(r"^/api/v1/auth/google/callback$"),
      "/api/v1/auth/google/callback", ()),
     ("POST", re.compile(r"^/api/v1/auth/google/disconnect$"),
@@ -302,11 +304,66 @@ def _get_current_user(service, headers):
     sess = svc.get_session(token)
     if not sess:
         return None
-    with service._lock:
-        row = service._conn.execute(
-            "SELECT * FROM users WHERE user_id=?", (sess["user_id"],)
-        ).fetchone()
-    return dict(row) if row else None
+    return svc.get_user_by_id(sess["user_id"])
+
+
+# --- browser origins (the console is hosted separately from this API) ------
+# The operator console is a Vercel deployment; this API runs on Railway, so
+# every browser call is cross-origin and the post-OAuth redirect must return
+# the browser to the CONSOLE origin. A relative "/?oauth=..." would otherwise
+# resolve against the API host and strand the freshly minted session token in
+# a place the SPA never reads. The exact production console origin is allowed
+# by default for the same reason it is in ``backend.app``: it is public (not a
+# secret) and a missing/typo'd deploy variable must not silently break every
+# request. MIE_CORS_ORIGINS adds further allowed origins (a dev console, a
+# custom domain); MIE_FRONTEND_ORIGIN overrides the single redirect origin.
+# Never a wildcard: the API answers Authorization-bearing requests, where "*"
+# is both wrong for credentialed use and needlessly permissive.
+DEFAULT_CONSOLE_ORIGINS = (
+    "https://music-intelligence-engine-five.vercel.app",
+)
+
+
+def console_origins() -> list[str]:
+    """Allowed browser origins: production default + MIE_CORS_ORIGINS.
+
+    Trailing slashes and any query/fragment are stripped so a value like
+    "https://console.example.app/" still matches the browser Origin header.
+    """
+    origins: list[str] = []
+    for origin in [*DEFAULT_CONSOLE_ORIGINS,
+                   *os.environ.get("MIE_CORS_ORIGINS", "").split(",")]:
+        origin = origin.strip().split("?")[0].split("#")[0].rstrip("/")
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+def frontend_origin() -> str:
+    """Configured origin of the browser console, for post-OAuth redirects.
+
+    Empty (the default) keeps redirects same-origin/relative, which is correct
+    when the console and API share a process (local ``backend.webapp``). The
+    split production deploy sets MIE_FRONTEND_ORIGIN to the Vercel console.
+    """
+    return os.environ.get("MIE_FRONTEND_ORIGIN", "").strip() \
+        .split("?")[0].split("#")[0].rstrip("/")
+
+
+def absolute_redirect(target: str | None) -> str | None:
+    """Rewrite a relative server-side redirect target onto the console origin.
+
+    ``_finish_google_callback`` emits a same-origin relative target
+    ("/?oauth=..."). When MIE_FRONTEND_ORIGIN is configured (split production
+    console/API), prefix it so the browser lands on the console and the SPA
+    can adopt the session; otherwise the relative target is returned unchanged.
+    Non-relative or empty targets pass through untouched.
+    """
+    origin = frontend_origin()
+    if origin and isinstance(target, str) and target.startswith("/") \
+            and not target.startswith("//"):
+        return origin + target
+    return target
 
 
 def redirect_target(body) -> str | None:
@@ -332,15 +389,22 @@ def redirect_target(body) -> str | None:
 
 def _finish_google_callback(svc, service, code: str, state: str) -> tuple[int, dict]:
     """Finish a Google OAuth hop: validate+consume state, exchange the code,
-    resolve the operator user, upsert their connected Gmail account.
+    and complete the flow the state was minted for.
 
-    The state row is single-use, ten-minute-lifetime CSRF protection minted by
-    ``/auth/google/start`` and bound to whoever started the flow. Anonymous
-    starts (``user_id`` NULL) create the operator's user row from the Google
-    identity and mint a fresh session; logged-in starts keep the existing
-    session the SPA already holds. Success answers a redirect target the
-    server layers turn into a Location header — the SPA must NEVER see raw
-    tokens, and the browser must never render a JSON screen.
+    Two SEPARATE flows share this callback, told apart by the state's binding:
+
+    - Sign-in (``user_id`` NULL, minted by ``/auth/google/start``): the Google
+      identity IS the operator. The callback resolves/creates their user row
+      and mints a fresh session. It stores NO Gmail credentials — signing in
+      is identity only.
+    - Connect Gmail (``user_id`` set, minted by ``/auth/google/connect`` for a
+      signed-in operator): the callback attaches the Gmail SEND credentials to
+      that already-authenticated account and returns no new session.
+
+    Either way the state row is single-use, ten-minute CSRF protection.
+    Success answers a redirect target the server layers turn into a Location
+    header — the SPA must NEVER see raw tokens, and the browser must never
+    render a JSON screen.
     """
     bound = svc.consume_oauth_state(state)
     if bound is None:
@@ -351,10 +415,15 @@ def _finish_google_callback(svc, service, code: str, state: str) -> tuple[int, d
     if not oauth.configured:
         return 503, error_body(
             "oauth_not_configured", "Google OAuth not configured")
+
+    connect_gmail = bool(bound.get("user_id"))
+    scopes = (GoogleOAuth.GMAIL_SEND_SCOPES if connect_gmail
+              else GoogleOAuth.SIGNIN_SCOPES)
     try:
-        tokens = oauth.exchange_code(code, bound.get("code_verifier"))
+        tokens = oauth.exchange_code(code, bound.get("code_verifier"), scopes)
     except Exception as exc:  # noqa: BLE001 — surface the provider reason
         return 400, error_body("oauth_exchange_failed", str(exc))
+
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     creds = Credentials(
@@ -373,63 +442,36 @@ def _finish_google_callback(svc, service, code: str, state: str) -> tuple[int, d
 
     from auth.service import iso_now
     now = iso_now()
-    user = None
-    if bound.get("user_id"):
-        with service._lock:
-            row = service._conn.execute(
-                "SELECT * FROM users WHERE user_id=?", (bound["user_id"],)
-            ).fetchone()
-        user = dict(row) if row else None
-    if user is None:
-        # Anonymous start: the Google identity IS the operator.
-        user = svc.get_user_by_email(email) or svc.create_user(
-            email, info.get("name"))
 
-    google_id = info.get("id")
-    picture = info.get("picture")
-    access_token = tokens.get("access_token")
-    refresh_token = tokens.get("refresh_token")
-    expiry = tokens.get("token_expiry")
-    scopes = ",".join(GoogleOAuth.SCOPES)
-    with service._lock:
-        row = service._conn.execute(
-            "SELECT * FROM user_google_accounts "
-            "WHERE (google_id=? AND ? IS NOT NULL) OR (user_id=? AND email=?) "
-            "ORDER BY id DESC LIMIT 1",
-            (google_id, google_id, user["user_id"], email),
-        ).fetchone()
-    if row is None:
-        with service._lock, service._conn:
-            service._conn.execute(
-                "INSERT INTO user_google_accounts "
-                "(user_id, google_id, email, picture, access_token, "
-                " refresh_token, token_expiry, scopes, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (user["user_id"], google_id, email, picture, access_token,
-                 refresh_token, expiry, scopes, now, now),
-            )
-    else:
-        with service._lock, service._conn:
-            service._conn.execute(
-                "UPDATE user_google_accounts "
-                "SET access_token=?, "
-                "    refresh_token=COALESCE(?, refresh_token), "
-                "    token_expiry=?, scopes=?, "
-                "    picture=COALESCE(?, picture), "
-                "    google_id=COALESCE(?, google_id), updated_at=? "
-                "WHERE id=?",
-                (access_token, refresh_token, expiry, scopes, picture,
-                 google_id, now, row["id"]),
-            )
+    if connect_gmail:
+        # Attach the send credentials to the operator who started the flow;
+        # never to whichever Google identity happens to answer.
+        user = svc.get_user_by_id(bound["user_id"])
+        if user is None:
+            return 400, error_body(
+                "oauth_state_invalid",
+                "the account that started this flow no longer exists")
+        service.auth_save_google_account({
+            "user_id": user["user_id"],
+            "google_id": info.get("id"),
+            "email": email,
+            "picture": info.get("picture"),
+            "access_token": tokens.get("access_token"),
+            "refresh_token": tokens.get("refresh_token"),
+            "token_expiry": tokens.get("token_expiry"),
+            "scopes": ",".join(tokens.get("scopes") or scopes),
+            "created_at": now,
+            "updated_at": now,
+        })
+        return 200, success_body({"redirect": "/?oauth=connected"})
 
-    redirect_url = "/?oauth=connected"
-    if not bound.get("user_id"):
-        # Anonymous connect: hand the fresh session to the SPA. Tokens never
-        # appear in the URL; the session token is a short-lived opaque bearer
-        # the SPA strips from the address bar on boot.
-        session = svc.create_session(user["user_id"])
-        redirect_url = f"/?oauth=connected&auth={session['session_token']}"
-    return 200, success_body({"redirect": redirect_url})
+    # Sign-in: resolve/create the operator from the Google identity and hand
+    # the SPA a fresh session. No Gmail credentials are stored here.
+    user = svc.get_user_by_email(email) or svc.create_user(
+        email, info.get("name"))
+    session = svc.create_session(user["user_id"])
+    return 200, success_body({
+        "redirect": f"/?oauth=connected&auth={session['session_token']}"})
 
 
 def _operator_token_ok(headers) -> bool:
@@ -553,22 +595,44 @@ def _handle(service, method: str, match: re.Match, params: dict,
                 if account else None,
             })
         if path == "/api/v1/auth/google/start" and method == "GET":
-            # The connect flow is reachable from the outreach composer for BOTH
-            # a signed-in operator and an anonymous one (the callback mints
-            # their session after Google confirms the email).
-            user = _get_current_user(service, headers)
+            # Sign-in flow: identity only. Requests no Gmail scopes and mints
+            # the operator's session at the callback. Anonymous by design.
             from auth.google_oauth import GoogleOAuth
             oauth = GoogleOAuth()
             if not oauth.configured:
                 return 503, error_body(
                     "oauth_not_configured", "Google OAuth not configured")
             verifier = oauth.new_code_verifier()
-            state = svc.create_oauth_state(
-                user["user_id"] if user else None, verifier)
-            auth_url, _ = oauth.get_auth_url(state, verifier)
+            state = svc.create_oauth_state(None, verifier)
+            auth_url, _ = oauth.get_auth_url(
+                state, verifier, GoogleOAuth.SIGNIN_SCOPES)
+            return 200, success_body({"auth_url": auth_url})
+        if path == "/api/v1/auth/google/connect" and method == "GET":
+            # Gmail-connect flow: an ALREADY signed-in operator grants the
+            # Gmail SEND scope. Kept separate from sign-in so identity and
+            # mailbox access are never bundled.
+            user = _get_current_user(service, headers)
+            if not user:
+                return 401, error_body(
+                    "unauthorized", "sign in before connecting Gmail")
+            from auth.google_oauth import GoogleOAuth
+            oauth = GoogleOAuth()
+            if not oauth.configured:
+                return 503, error_body(
+                    "oauth_not_configured", "Google OAuth not configured")
+            verifier = oauth.new_code_verifier()
+            state = svc.create_oauth_state(user["user_id"], verifier)
+            auth_url, _ = oauth.get_auth_url(
+                state, verifier, GoogleOAuth.GMAIL_SEND_SCOPES)
             return 200, success_body({"auth_url": auth_url})
         if path == "/api/v1/auth/google/callback" and method == "GET":
             raw_state = (params.get("state") or [None])[0]
+            error = (params.get("error") or [None])[0]
+            if error:
+                # Consent denied or the request was rejected by Google.
+                return 400, error_body(
+                    "oauth_denied",
+                    f"Google authorization was not completed: {error}")
             if not raw_state:
                 return 400, error_body(
                     "bad_request", "state required")
@@ -778,14 +842,22 @@ def _handle(service, method: str, match: re.Match, params: dict,
                 record.get("message") or "",
             )
         except GmailSendError as e:
-            msg = str(e)
-            if "no_connected_gmail" in msg:
+            code = getattr(e, "code", "gmail_send_failed")
+            if code == "no_connected_gmail":
                 return 400, error_body(
                     "no_connected_gmail", "Connect Gmail first")
             outreach_service.record_outreach_event(
                 service, outreach_id, event="failed",
-                meta={"error": msg, "provider": "gmail_user"})
-            return 500, error_body("gmail_send_failed", msg)
+                meta={"error": str(e), "provider": "gmail_user"})
+            if code == "gmail_reauth_required":
+                return 400, error_body(
+                    code, "Your Google authorization expired or was "
+                    "revoked - reconnect Gmail to send.")
+            if code == "gmail_scope_missing":
+                return 403, error_body(
+                    code, "Gmail send permission is missing - reconnect "
+                    "Gmail and allow sending.")
+            return 500, error_body("gmail_send_failed", str(e))
         except Exception as e:  # noqa: BLE001
             outreach_service.record_outreach_event(
                 service, outreach_id, event="failed",

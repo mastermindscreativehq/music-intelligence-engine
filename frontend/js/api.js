@@ -223,12 +223,16 @@ export const api = {
   // never constructed here; they come from each stored projection's
   // links.self value supplied by the backend.
   tracks: (params) => request(API_BASE_URL + "/api/v1/tracks", params),
-  // links.self is a relative path from the backend; resolve it against the
-  // configured base so a separate-origin deployment still reaches Railway.
+  // links.self is a backend-relative path supplied by the API projection.
+  // Resolve it against the configured API base so a separate-origin
+  // deployment (frontend on Vercel, backend on Railway) reaches the API
+  // instead of the static frontend origin. Only a fully-qualified URL is
+  // used verbatim.
   trackDetail: (selfPath) =>
-    request(/^https?:\/\//.test(selfPath) || selfPath.startsWith("/")
+    request(/^https?:\/\//.test(selfPath)
       ? selfPath
-      : API_BASE_URL + "/" + selfPath),
+      : API_BASE_URL
+        + (selfPath.startsWith("/") ? selfPath : "/" + selfPath)),
   deleteTrack: (trackId) =>
     send(API_BASE_URL + `/api/v1/tracks/${encodeURIComponent(trackId)}`,
       { method: "DELETE" }),
@@ -335,7 +339,12 @@ export const api = {
       setAuthToken(null);
     }
   },
+  // Sign-in only (openid / email / profile). Never requests Gmail scopes.
   googleStart: () => request(API_BASE_URL + "/api/v1/auth/google/start"),
+  // Separate, authenticated Gmail-connect flow: requests the Gmail send
+  // scope only, and only for an already signed-in operator.
+  googleConnect: () =>
+    request(API_BASE_URL + "/api/v1/auth/google/connect"),
   disconnectGmail: () =>
     send(API_BASE_URL + "/api/v1/auth/google/disconnect",
       { method: "POST" }),

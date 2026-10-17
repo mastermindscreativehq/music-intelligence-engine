@@ -1,17 +1,18 @@
 /* Account area in the header: sign in with Google, show the connected
  * Google account, and disconnect Gmail.
  *
- * There is exactly ONE identity system — the backend OAuth/session the
- * outreach composer already uses. This module never stores credentials
- * itself: it reads /api/v1/auth/me (the bearer token lives in localStorage,
- * attached by api.js) and renders one of three honest states:
+ * There are TWO separate Google hops, deliberately never bundled:
+ *   1. Sign in  - identity only (openid/email/profile). Mints the session.
+ *   2. Connect Gmail - a signed-in operator grants the Gmail SEND scope.
+ * This module never stores credentials itself: it reads /api/v1/auth/me
+ * (the bearer token lives in localStorage, attached by api.js) and renders
+ * one of three honest states:
  *   signed out        -> "Sign in with Google"
  *   signed in, no Gmail-> account email + "Connect Gmail" + "Sign out"
  *   Gmail connected    -> account email + "Disconnect Gmail" + "Sign out"
  *
- * Signing in and connecting Gmail are the same Google hop; the callback
- * mints the session (anonymous start) and upserts the account. Disconnecting
- * removes only the stored Google credentials — the operator stays signed in.
+ * Disconnecting removes only the stored Google credentials — the operator
+ * stays signed in.
  *
  * Every node is built with el(); dynamic values become text, never markup
  * (CSP-friendly, no inline handlers, no innerHTML). */
@@ -62,7 +63,7 @@ function accountNodes(me) {
     nodes.push(el("span", { class: "account-status" }, lastError));
   }
   if (!me || !me.user) {
-    nodes.push(el("button", { class: "primary", onClick: connectGmail },
+    nodes.push(el("button", { class: "primary", onClick: signIn },
       "Sign in with Google"));
     return nodes;
   }
@@ -91,9 +92,9 @@ function actionButton(label, onClick, extraClass) {
   }, label);
 }
 
-async function connectGmail() {
+async function startGoogleFlow(fetcher) {
   try {
-    const res = await api.googleStart();
+    const res = await fetcher();
     if (res && res.auth_url) {
       window.location.assign(res.auth_url);
       return;
@@ -102,6 +103,14 @@ async function connectGmail() {
   } catch (error) {
     showError(error);
   }
+}
+
+async function signIn() {
+  return startGoogleFlow(() => api.googleStart());
+}
+
+async function connectGmail() {
+  return startGoogleFlow(() => api.googleConnect());
 }
 
 async function disconnectGmail() {

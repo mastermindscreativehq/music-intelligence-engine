@@ -11,6 +11,11 @@ The contract: intelligence goes IN as ``RadioIntelligenceRecord`` dicts
 (through the same validation gate), comes OUT as plain decoded dicts with
 FACT provenance verbatim and INFERENCE labels intact. Neither backend is
 allowed to reinterpret, promote, or drop evidence.
+
+Operator auth (users, sessions, OAuth CSRF state, connected Google/Gmail
+accounts) is a separate cross-backend surface: both storage classes also mix
+in :class:`database.auth_store.AuthStoreMixin`, whose ``auth_*`` methods speak
+one dialect-neutral SQL for SQLite and PostgreSQL alike.
 """
 
 from __future__ import annotations

@@ -38,6 +38,7 @@ _SQL_IDENT_FULLMATCH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 from discovery.events import get_logger, log_event
 from discovery.models import utc_now_iso
 
+from database.auth_store import AuthStoreMixin
 from database.schema_migrations import apply_pg_migrations
 from database.service import (
     EVENT_INGESTION_COMPLETED,
@@ -223,8 +224,12 @@ def _dj_channel_from_row(row: dict) -> dict:
     }
 
 
-class PostgresStorage:
+class PostgresStorage(AuthStoreMixin):
     """PostgreSQL backend for the shared intelligence repository surface."""
+
+    # psycopg uses ``%s`` placeholders (sqlite3 uses ``?``); the shared auth
+    # SQL in database.auth_store is otherwise identical across both backends.
+    _AUTH_PLACEHOLDER = "%s"
 
     # Statement/network guard: production connections are created with a
     # finite statement_timeout so a single slow or client-aborted query can
@@ -365,6 +370,31 @@ class PostgresStorage:
         except Exception:
             self._recover_connection()
             raise
+
+    # -- auth persistence hooks (see database.auth_store.AuthStoreMixin) ------
+    # PostgreSQL routes every auth statement through _guard so a failed query
+    # recovers the shared connection instead of poisoning it for later calls.
+
+    def _auth_read_one(self, sql, params=()):
+        with self._guard() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return dict(row) if row is not None else None
+
+    def _auth_read_all(self, sql, params=()):
+        with self._guard() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def _auth_write(self, sql, params=()) -> int:
+        with self._guard() as conn:
+            with conn:
+                return conn.execute(sql, params).rowcount
+
+    def _auth_write_returning(self, sql, params=()):
+        with self._guard() as conn:
+            with conn:
+                row = conn.execute(sql, params).fetchone()
+                return dict(row) if row is not None else None
 
     # -- ingestion -------------------------------------------------------------
 

@@ -1,8 +1,9 @@
 """Single-origin operator server: static frontend + JSON API (Phase 7).
 
 Serves the zero-dependency SPA in ``frontend/`` and the Phase 4-9 API
-under one origin so the operator UI needs no build step, no CDN, and no
-cross-origin configuration:
+under one origin so the operator UI needs no build step and no CDN. The
+same process also answers CORS for a separately hosted console (the Vercel
+build against a Railway API): see MIE_CORS_ORIGINS / MIE_FRONTEND_ORIGIN.
 
     python -m backend.webapp --dsn postgresql://... [--static frontend]
     python -m backend.webapp --db path/to/db.sqlite [--static frontend]
@@ -18,12 +19,17 @@ Security posture:
 - Only a small extension allow-list is served; dotfiles are never served.
 - Every response carries ``X-Content-Type-Options: nosniff``; API routes
   additionally send ``Cache-Control: no-store``.
+- Cross-origin requests from an allowed console origin (production default
+  plus ``MIE_CORS_ORIGINS``) carry the exact matched
+  ``Access-Control-Allow-Origin`` (never a wildcard) and OPTIONS preflight is
+  answered; the same-origin/local case sends no CORS header.
 - ``/api/v1/*`` dispatch is delegated to ``backend.routes`` (shared with
   the reference server), so behavior is identical across servers.
 
 Configuration uses CLI flags or environment variable NAMES only
-(MIE_PG_DSN / MIE_DATABASE_PATH / MIE_WEB_HOST / MIE_WEB_PORT). Values
-are never logged or echoed into responses.
+(MIE_PG_DSN / MIE_DATABASE_PATH / MIE_WEB_HOST / MIE_WEB_PORT /
+MIE_CORS_ORIGINS / MIE_FRONTEND_ORIGIN). Values are never logged or echoed
+into responses.
 """
 
 from __future__ import annotations
@@ -45,7 +51,12 @@ load_dotenv(
     verbose=False,
 )
 
-from backend.routes import dispatch, redirect_target
+from backend.routes import (
+    absolute_redirect,
+    console_origins,
+    dispatch,
+    redirect_target,
+)
 
 from database.service import PersistenceService
 from submissions import service as submission_service
@@ -86,17 +97,49 @@ def build_handler(service, static_root: Path, track_store=None,
         protocol_version = "HTTP/1.1"
 
         # -- plumbing ------------------------------------------------------
+        def _cors_origin(self) -> str | None:
+            """The request Origin, but only when it is an allowed console.
+
+            The console may be hosted on a different origin (Vercel) from this
+            API (Railway); returning the exact matched origin (never "*")
+            lets the browser read the response. A same-origin request sends no
+            Origin header, so nothing is added.
+            """
+            origin = (self.headers.get("Origin") or "").strip()
+            return origin if origin in console_origins() else None
+
         def _send(self, status: int, content_type: str, payload: bytes,
                   extra_headers: dict | None = None) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("X-Content-Type-Options", "nosniff")
+            cors = self._cors_origin()
+            if cors:
+                self.send_header("Access-Control-Allow-Origin", cors)
+                self.send_header("Vary", "Origin")
             if extra_headers:
                 for name, value in extra_headers.items():
                     self.send_header(name, value)
             self.end_headers()
             self.wfile.write(payload)
+
+        def do_OPTIONS(self):   # noqa: N802 (http.server API)
+            # CORS preflight for cross-origin console calls. Mirrors the
+            # FastAPI CORSMiddleware: only the Authorization/Content-Type/
+            # Accept headers the SPA actually sends, and the real methods.
+            self.send_response(204)
+            cors = self._cors_origin()
+            if cors:
+                self.send_header("Access-Control-Allow-Origin", cors)
+                self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods",
+                             "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers",
+                             "Content-Type, Accept, Authorization")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _send_json(self, status: int, body: dict) -> None:
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -169,7 +212,7 @@ def build_handler(service, static_root: Path, track_store=None,
                     discover_fetcher=discover_fetcher,
                     headers=self.headers,
                     discovery_scheduler=discovery_scheduler)
-                location = redirect_target(body)
+                location = absolute_redirect(redirect_target(body))
                 if location is not None:
                     self._send_redirect(location)
                 else:
