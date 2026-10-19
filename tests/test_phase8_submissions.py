@@ -29,6 +29,7 @@ import unittest
 import urllib.error
 import urllib.request
 
+from auth.service import AuthService
 from backend.contracts import TRACK_FIELDS
 from backend.routes import ROUTE_TABLE, dispatch
 from backend.webapp import DEFAULT_STATIC_ROOT, create_server
@@ -481,14 +482,23 @@ class TestDispatcherContract(unittest.TestCase):
         record = kzow()
         cls.svc.ingest_intelligence([record], source="tests")
         cls.kzow_key = _identity_key(record)
+        # The library routes are personal: every call carries a real bearer
+        # session (as the console does), and the anonymous case is pinned
+        # separately in test_tracks_require_a_signed_in_operator.
+        cls.auth = AuthService(cls.svc)
+        cls.user = cls.auth.create_user("phase8@example.com")
+        cls.token = cls.auth.create_session(cls.user["user_id"])[
+            "session_token"]
+        cls.headers = {"authorization": f"Bearer {cls.token}"}
 
     def dispatch(self, method, path, params=None, body=None,
-                 fetcher=None, allow_private=True):
+                 fetcher=None, allow_private=True, headers=None):
         return dispatch(
             self.svc, method, path, params or {}, body,
             track_store=self.store,
             link_fetcher=fetcher or FakeFetcher(),
-            allow_private=allow_private)
+            allow_private=allow_private,
+            headers=headers if headers is not None else self.headers)
 
     def upload(self, payload, filename=None):
         params = {"filename": [filename]} if filename else {}
@@ -589,6 +599,34 @@ class TestDispatcherContract(unittest.TestCase):
         status, body = self.dispatch("GET", "/api/v1/tracks/nope")
         self.assertEqual((status, body["error"]["code"]),
                          (404, "route_not_found"))
+
+    def test_tracks_require_a_signed_in_operator(self):
+        # Personal-data enforcement: without a valid session token the
+        # library answers 401 before touching storage — no anonymous
+        # uploads, listings or detail reads. A garbage token fails the
+        # same way (fail-closed).
+        _rows, before = self.svc.list_tracks()
+        for headers in ({}, {"authorization": "Bearer not-a-real-token"}):
+            with self.subTest(headers=headers):
+                status, body = self.dispatch(
+                    "POST", "/api/v1/tracks", {}, mp3_bytes(),
+                    headers=headers)
+                self.assertEqual((status, body["error"]["code"]),
+                                 (401, "unauthorized"))
+                status, body = self.dispatch(
+                    "GET", "/api/v1/tracks", {}, None, headers=headers)
+                self.assertEqual((status, body["error"]["code"]),
+                                 (401, "unauthorized"))
+                status, body = self.dispatch(
+                    "POST", "/api/v1/tracks/releases", {},
+                    json.dumps({"title": "T", "artist_name": "A",
+                                "music_url": "https://example.com/m"}).encode(),
+                    headers=headers)
+                self.assertEqual((status, body["error"]["code"]),
+                                 (401, "unauthorized"))
+        # Nothing was written by the refused attempts.
+        _rows, after = self.svc.list_tracks()
+        self.assertEqual(after, before)
 
     # -- submission path + accessibility -------------------------------------
 
@@ -765,13 +803,26 @@ class TestLiveWebappSubmissions(unittest.TestCase):
         cls.key_a = _identity_key(station_a)
         cls.key_b = _identity_key(station_b)
 
+        # The library routes are personal: these end-to-end calls carry a
+        # real bearer session, exactly as the console does. The anonymous
+        # case is pinned in test_anonymous_upload_is_unauthorized_over_http.
+        auth = AuthService(svc)
+        owner = auth.create_user("live-phase8@example.com")
+        cls.auth_headers = {
+            "Authorization": "Bearer " + auth.create_session(
+                owner["user_id"])["session_token"],
+        }
+
     # -- helpers -------------------------------------------------------------
 
     @classmethod
-    def request(cls, method, path, data=None, headers=None):
+    def request(cls, method, path, data=None, headers=None, auth=True):
+        merged = dict(headers or {})
+        if auth:
+            merged.update(cls.auth_headers)
         req = urllib.request.Request(cls.base_url + path, data=data,
                                      method=method,
-                                     headers=headers or {})
+                                     headers=merged)
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status, resp.read().decode("utf-8")
@@ -779,8 +830,8 @@ class TestLiveWebappSubmissions(unittest.TestCase):
             return exc.code, exc.read().decode("utf-8")
 
     @classmethod
-    def get_json(cls, path):
-        status, text = cls.request("GET", path)
+    def get_json(cls, path, auth=True):
+        status, text = cls.request("GET", path, auth=auth)
         return status, json.loads(text)
 
     def assertNoLeak(self, text):
@@ -832,6 +883,18 @@ class TestLiveWebappSubmissions(unittest.TestCase):
             "/api/v1/tracks?status=quarantined")
         self.assertEqual(list_status, 200)
         self.assertGreaterEqual(list_body["data"]["total"], 1)
+
+    def test_anonymous_upload_is_unauthorized_over_http(self):
+        # Real HTTP, no session: the library must refuse with the 401
+        # envelope before validation (a quarantined row must NOT be
+        # written for an anonymous caller).
+        status, text = self.request(
+            "POST", "/api/v1/tracks", data=mp3_bytes(), auth=False)
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(text)["error"]["code"], "unauthorized")
+        status, text = self.request("GET", "/api/v1/tracks",
+                                    auth=False)
+        self.assertEqual(status, 401)
 
     def test_static_handler_never_serves_stored_blobs(self):
         digest = sha256_of(mp3_bytes(pad=64))

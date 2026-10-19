@@ -54,6 +54,7 @@ const TEXT_FILES = [
   "js/views/status.js",
   "js/views/outreachModal.js",
   "js/views/account.js",
+  "js/views/gate.js",
   "js/views/profile.js",
 ];
 const BINARY_FILES = [];

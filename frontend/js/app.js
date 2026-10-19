@@ -15,12 +15,27 @@ import { renderOpportunitiesView } from "./views/opportunities.js";
 import { renderOutreachView } from "./views/outreach.js";
 import { renderOutreachHistoryView } from "./views/outreachHistory.js";
 import { renderProfileView } from "./views/profile.js";
+import { requiresAuth } from "./views/gate.js";
 import { renderStationView, teardownStationView } from "./views/station.js";
 import { renderTracksView } from "./views/tracks.js";
 
 const viewRoot = document.getElementById("view");
 const basketCount = document.getElementById("basket-count");
 const accountArea = document.getElementById("account-area");
+
+// Personal-workspace chrome (My music / Opportunities / Outreach / Profile and
+// the selected-recipient badge) is hidden for signed-out visitors and revealed
+// once a session exists. The class is applied in index.html so anonymous
+// visitors never see a flash of personal links before JS runs. This is
+// presentation only — the backend authorises every personal request.
+const authOnlyNodes = Array.from(document.querySelectorAll("[data-auth]"));
+
+function syncChrome() {
+  const authed = api.isLoggedIn();
+  for (const node of authOnlyNodes) {
+    node.classList.toggle("nav-hidden", !authed);
+  }
+}
 
 const basket = new Basket(window.sessionStorage);
 
@@ -47,6 +62,16 @@ const oauthNotice = oauthResult.oauth === "error"
 // The header account area is always live: it reflects the session just
 // adopted from an OAuth return (or the absence of one) via /auth/me.
 renderAccountArea(accountArea, { notice: oauthNotice });
+
+// Keep the personal-workspace chrome in step with the session. Account actions
+// (sign out, disconnect) announce "mie:auth-changed"; a hashchange also
+// re-syncs in case the token was cleared elsewhere.
+syncChrome();
+window.addEventListener("hashchange", syncChrome);
+window.addEventListener("mie:auth-changed", () => {
+  syncChrome();
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+});
 
 function oauthErrorMessage(reason) {
   switch (reason) {
@@ -86,18 +111,22 @@ startRouter(viewRoot, {
   },
   tracks(root) {
     teardownStationView();
+    if (requiresAuth(root, "My music")) return;
     renderTracksView(root);
   },
   opportunities(root, trackId) {
     teardownStationView();
+    if (requiresAuth(root, "Opportunities")) return;
     renderOpportunitiesView(root, trackId);
   },
   outreach(root) {
     teardownStationView();
+    if (requiresAuth(root, "Outreach")) return;
     renderOutreachView(root);
   },
   outreachHistory(root) {
     teardownStationView();
+    if (requiresAuth(root, "Outreach activity")) return;
     renderOutreachHistoryView(root);
   },
   profile(root) {

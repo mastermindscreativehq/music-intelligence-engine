@@ -24,6 +24,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
+from auth.service import AuthService
 from database.service import PersistenceService
 
 MUSIC_URL = "https://artist.bandcamp.com/track/example"
@@ -35,10 +36,28 @@ class TestReleaseEditing(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         cls.storage = PersistenceService(
             os.path.join(cls._tmp.name, "db.sqlite"))
-        cls.client = TestClient(create_app(cls.storage),
-                                raise_server_exceptions=False)
+        # Creating/editing a release is personal: this suite (like the
+        # console) is signed in. The anonymous case is pinned by
+        # test_anonymous_create_is_unauthorized.
+        auth = AuthService(cls.storage)
+        operator = auth.create_user("release-editor@example.com")
+        cls.client = TestClient(
+            create_app(cls.storage), raise_server_exceptions=False,
+            headers={"Authorization": "Bearer " + auth.create_session(
+                operator["user_id"])["session_token"]})
         cls.addClassCleanup(cls._tmp.cleanup)
         cls.addClassCleanup(cls.storage.close)
+
+    def test_anonymous_create_is_unauthorized(self):
+        # A separate, token-less client: release creation fails closed.
+        anon = TestClient(self.client.app, raise_server_exceptions=False)
+        response = anon.post(
+            "/api/v1/tracks/releases",
+            json={"title": "Nope", "artist_name": "N",
+                  "music_url": MUSIC_URL})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "unauthorized")
+        self.assertEqual(anon.get("/api/v1/tracks").status_code, 401)
 
     def _create(self, **overrides):
         payload = {

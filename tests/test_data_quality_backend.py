@@ -26,6 +26,7 @@ from pathlib import Path
 from crawler.http import FetchResult
 from crawler.urls import normalize_url
 
+from auth.service import AuthService
 from backend.routes import dispatch
 from database.service import PersistenceService
 from discovery.djs.pipeline import DjsDiscoveryEngine
@@ -121,6 +122,14 @@ class TestDjAndOutreachQuarantine(unittest.TestCase):
                  "source_url": "https://djamara.fm/"},
             ],
         })
+        # Outreach is personal: the list route needs a real session token
+        # (DJ listings stay public).
+        auth = AuthService(self.service)
+        self.headers = {
+            "authorization": "Bearer " + auth.create_session(
+                auth.create_user("dq@example.com")["user_id"])[
+                    "session_token"],
+        }
 
     def tearDown(self):
         self.service.close()
@@ -163,7 +172,8 @@ class TestDjAndOutreachQuarantine(unittest.TestCase):
             "subject": "E2E test outreach from prod verify",
             "message": "test message",
         })
-        _code, body = dispatch(self.service, "GET", "/api/v1/outreach", {})
+        _code, body = dispatch(self.service, "GET", "/api/v1/outreach", {},
+                               headers=self.headers)
         self.assertEqual(body["data"]["total"], 0)
         self.assertEqual(body["data"]["dev_fixtures_excluded"], 1)
 
@@ -176,7 +186,8 @@ class TestDjAndOutreachQuarantine(unittest.TestCase):
             "subject": "New music for WFMU",
             "message": "Hi Jessica, please consider our track.",
         })
-        _code, body = dispatch(self.service, "GET", "/api/v1/outreach", {})
+        _code, body = dispatch(self.service, "GET", "/api/v1/outreach", {},
+                               headers=self.headers)
         self.assertEqual(body["data"]["total"], 1)
         self.assertEqual(body["data"]["dev_fixtures_excluded"], 0)
         self.assertEqual(body["data"]["outreach"][0]["subject"],

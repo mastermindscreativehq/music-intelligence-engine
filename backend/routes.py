@@ -53,6 +53,7 @@ from submissions.service import TrackRejected, TrackTooLarge
 from djs import service as dj_service
 
 from outreach import service as outreach_service
+from outreach.providers import provider_descriptors
 
 from opportunity import service as opportunity_service
 
@@ -194,6 +195,13 @@ ROUTE_TABLE = (
     ("PATCH", re.compile(r"^/api/v1/auth/profile$"),
      "/api/v1/auth/profile", ()),
     ("GET", re.compile(r"^/api/v1/plan$"), "/api/v1/plan", ()),
+    # Console "Connected services": one entry per email delivery provider
+    # the backend can really send through, with its true capability flags
+    # and the connect/disconnect paths the UI should open. Personal (the
+    # mailbox row belongs to the caller), so it fails closed without a
+    # session token. See outreach.providers.provider_descriptors.
+    ("GET", re.compile(r"^/api/v1/email-providers$"),
+     "/api/v1/email-providers", ()),
     ("GET", re.compile(r"^/api/v1/djs$"), "/api/v1/djs", DJ_PARAMS),
     ("POST", re.compile(r"^/api/v1/djs$"), "/api/v1/djs", ()),
     ("GET", re.compile(r"^/api/v1/djs/(?P<dj_id>dj_[0-9a-f]+)$"),
@@ -309,6 +317,24 @@ def _get_current_user(service, headers):
     if not sess:
         return None
     return svc.get_user_by_id(sess["user_id"])
+
+
+class Unauthorized(Exception):
+    """No valid session token on a personal-data route; a 401 envelope."""
+
+
+def _require_session(service, headers):
+    """Signed-in operator for a personal-data route, else 401.
+
+    Fail-closed: a missing, malformed or revoked bearer token raises
+    :class:`Unauthorized`, which ``dispatch`` maps to ``401 unauthorized``.
+    Personal routes (releases, outreach, opportunities) are never readable
+    anonymously — the public surface is stations/DJs only.
+    """
+    user = _get_current_user(service, headers)
+    if not user:
+        raise Unauthorized("not logged in")
+    return user
 
 
 # --- browser origins (the console is hosted separately from this API) ------
@@ -565,6 +591,9 @@ def dispatch(service, method: str, path: str, params: dict,
                            discover_fetcher=discover_fetcher,
                            headers=headers,
                            discovery_scheduler=discovery_scheduler)
+        except Unauthorized as exc:
+            # Personal-data routes fail closed without a valid session token.
+            return 401, error_body("unauthorized", str(exc))
         except StationNotFound as exc:
             return 404, error_body("station_not_found", str(exc))
         except RunNotFound as exc:
@@ -710,6 +739,16 @@ def _handle(service, method: str, match: re.Match, params: dict,
             }})
         return 405, error_body("method_not_allowed", "method not allowed on this route")
 
+    if path == "/api/v1/email-providers" and method == "GET":
+        # Console "Connected services": the delivery providers this backend
+        # can actually send through, with the capability flags each one
+        # really supports (see outreach.providers). The mailbox state is
+        # the caller's, so the route is personal and fails closed.
+        user = _require_session(service, headers)
+        account = service.auth_get_google_account(user["user_id"])
+        return 200, success_body(
+            {"providers": provider_descriptors(account)})
+
     if path == "/api/v1/plan" and method == "GET":
         # Truthful entitlement report. This deployment ships NO billing and
         # NO paid tiers, so there is nothing to upgrade to: every signed-in
@@ -792,49 +831,58 @@ def _handle(service, method: str, match: re.Match, params: dict,
         return 200, success_body(run)
 
     # -- Phase 8: submission assets -------------------------------------------
+    #
+    # The track library is PERSONAL data: an authenticated operator only ever
+    # sees their own releases plus legacy/anonymous rows (owner NULL) that
+    # predate per-user ownership. Nothing here is public, so every route
+    # below fails closed with 401 when no valid session token is presented,
+    # and reads are scoped to the caller instead of the whole table.
     if path == "/api/v1/tracks":
+        user = _require_session(service, headers)
         if method == "POST":
-            user = _get_current_user(service, headers)
             row = submission_service.upload_track(
                 service, track_store, body,
                 filename=_first(params, "filename"),
-                owner_user_id=user["user_id"] if user else None)
+                owner_user_id=user["user_id"])
             return 201, success_body(track_projection(row))
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
         rows, total = submission_service.list_tracks(
             service, limit=limit, offset=offset,
-            status=_first(params, "status"))
+            status=_first(params, "status"),
+            owner_user_id=user["user_id"])
         return 200, success_body(tracks_payload(rows, total, limit, offset))
 
     if path == "/api/v1/tracks/releases":
-        # Metadata-only release creation. A signed-in operator owns the
-        # release; an anonymous operator may still create one (shared,
-        # single-operator behavior preserved) exactly like an anonymous
-        # upload. Validation failures map to 400 bad_request.
-        user = _get_current_user(service, headers)
+        # Metadata-only release creation (My Music's primary workflow).
+        # Signed-in only: the release is stamped with the caller as owner so
+        # another operator can never edit, delete or enumerate it. Validation
+        # failures still map to 400 bad_request.
+        user = _require_session(service, headers)
         payload = _parse_json_body(body)
         row = submission_service.create_release(
-            service, payload,
-            owner_user_id=user["user_id"] if user else None)
+            service, payload, owner_user_id=user["user_id"])
         return 201, success_body(track_projection(row))
 
     if path.startswith("/api/v1/tracks/"):
+        user = _require_session(service, headers)
         track_id = match.group("track_id")
-        track = require_track(track_id)
+        track = submission_service.get_track(service, track_id)
+        if track is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
+        owner = track.get("owner_user_id")
+        if owner and owner != user["user_id"]:
+            # A foreign release: the mutating path answers 403 (the id is
+            # real but not yours); reads/deletes answer 404 so another
+            # operator's library is never confirmed to exist.
+            if method == "PATCH":
+                return 403, error_body(
+                    "forbidden", "this release belongs to another user")
+            raise TrackNotFound(f"unknown track {track_id!r}")
         if method == "DELETE":
             service.delete_track(track_id)
             return 200, success_body({"track_id": track_id})
         if method == "PATCH":
-            # Ownership guard on the mutating path: a release that has an
-            # owner (was uploaded by a signed-in user) may only be edited by
-            # that user. Legacy/anonymous uploads keep owner_user_id NULL and
-            # remain editable exactly as before.
-            user = _get_current_user(service, headers)
-            owner = track.get("owner_user_id")
-            if owner and (not user or user["user_id"] != owner):
-                return 403, error_body(
-                    "forbidden", "this release belongs to another user")
             payload = _parse_json_body(body)
             row = submission_service.update_track_fields(
                 service, track_id, payload)
@@ -842,21 +890,25 @@ def _handle(service, method: str, match: re.Match, params: dict,
         return 200, success_body(track_projection(track))
 
     # -- Phase 9: outreach ----------------------------------------------------
+    #
+    # Outreach records carry a recipient, a message and a send history: they
+    # are personal data. Every route below requires a session token and is
+    # scoped to the caller (legacy NULL-owner rows stay shared, preserving
+    # the historical single-operator behavior); another operator's record is
+    # indistinguishable from one that does not exist.
     if path == "/api/v1/outreach":
+        user = _require_session(service, headers)
         if method == "POST":
             payload = _parse_json_body(body)
-            user = _get_current_user(service, headers)
             record = outreach_service.create_outreach(
-                service, payload=payload,
-                owner_user_id=user["user_id"] if user else None)
+                service, payload=payload, owner_user_id=user["user_id"])
             return 201, success_body(record)
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
-        user = _get_current_user(service, headers)
         rows, total, dev_excluded = outreach_service.list_outreach(
             service, limit=limit, offset=offset,
             status=_first(params, "status"), exclude_dev=True,
-            owner_user_id=user["user_id"] if user else None)
+            owner_user_id=user["user_id"])
         return 200, success_body({"outreach": rows, "total": total,
                                   "limit": limit, "offset": offset,
                                   "dev_fixtures_excluded": dev_excluded})
@@ -864,10 +916,7 @@ def _handle(service, method: str, match: re.Match, params: dict,
     if path == "/api/v1/outreach/draft-email" and method == "POST":
         # An authenticated operator composes a draft from a release they are
         # authorized for. Draft-only: this never persists or sends.
-        user = _get_current_user(service, headers)
-        if not user:
-            return 401, error_body(
-                "unauthorized", "sign in to write an email with AI")
+        user = _require_session(service, headers)
         payload = _parse_json_body(body)
         track_id = payload.get("track_id")
         if not isinstance(track_id, str) or not track_id.strip():
@@ -886,10 +935,10 @@ def _handle(service, method: str, match: re.Match, params: dict,
 
     if path.startswith("/api/v1/outreach/") and path.endswith("/event"):
         outreach_id = match.group("outreach_id")
-        user = _get_current_user(service, headers)
+        user = _require_session(service, headers)
         if outreach_service.get_outreach(
                 service, outreach_id,
-                owner_user_id=user["user_id"] if user else None) is None:
+                owner_user_id=user["user_id"]) is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         payload = _parse_json_body(body)
         event = payload.get("event")
@@ -902,9 +951,7 @@ def _handle(service, method: str, match: re.Match, params: dict,
 
     if path.startswith("/api/v1/outreach/") and path.endswith("/send"):
         outreach_id = match.group("outreach_id")
-        user = _get_current_user(service, headers)
-        if not user:
-            return 401, error_body("unauthorized", "not logged in")
+        user = _require_session(service, headers)
         record = outreach_service.get_outreach(
             service, outreach_id, owner_user_id=user["user_id"])
         if record is None:
@@ -959,10 +1006,9 @@ def _handle(service, method: str, match: re.Match, params: dict,
 
     if path.startswith("/api/v1/outreach/"):
         outreach_id = match.group("outreach_id")
-        user = _get_current_user(service, headers)
+        user = _require_session(service, headers)
         record = outreach_service.get_outreach(
-            service, outreach_id,
-            owner_user_id=user["user_id"] if user else None)
+            service, outreach_id, owner_user_id=user["user_id"])
         if record is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         if method == "DELETE":
@@ -972,10 +1018,17 @@ def _handle(service, method: str, match: re.Match, params: dict,
 
     # -- Phase 3: opportunity intelligence -------------------------------------
     if path == "/api/v1/opportunities":
+        # Opportunities are computed from the caller's own release, so the
+        # route is personal: signed-in only, and a release owned by someone
+        # else is answered as unknown (never confirmed to exist).
+        user = _require_session(service, headers)
         track_id = _first(params, "track_id")
         if not track_id:
             raise ValueError("No release selected.")
-        track = require_track(track_id)
+        track = submission_service.get_track(
+            service, track_id, owner_user_id=user["user_id"])
+        if track is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
         limit = _int_param(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         offset = _int_param(params, "offset", 0, 0, None)
         raw_tiers = _first(params, "tier") or ""

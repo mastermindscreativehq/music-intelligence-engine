@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from auth.service import AuthService
 from backend.routes import dispatch
 from backend.webapp import DEFAULT_STATIC_ROOT
 from database.service import PersistenceService
@@ -69,6 +70,14 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
         self.service = PersistenceService(os.path.join(self._tmp, "test.db"))
+        # Outreach is personal: creating one requires a real session token
+        # (the DJ routes themselves stay public).
+        self.auth = AuthService(self.service)
+        self.headers = {
+            "authorization": "Bearer " + self.auth.create_session(
+                self.auth.create_user("phase4a@example.com")[
+                    "user_id"])["session_token"],
+        }
 
     def tearDown(self):
         self.service.close()
@@ -178,24 +187,30 @@ class TestNoStationContactAutoConversion(_Base):
         self.assertEqual(self._outreach_total(), 0)
         # Creating outreach for this DJ targets the dj identity, never the
         # station, and requires no station involvement.
+        payload = json.dumps({
+            "recipient": {
+                "contact_uid": "dj:" + dj_id,
+                "identity_key": "dj:" + dj_id,
+                "target_type": "dj",
+                "name": "DJ Ashanti",
+                "role": "open-format DJ",
+                "email": "booking@djashanti.example",
+                "organization": "DJ Ashanti",
+                "outreach_class": "email",
+                "source_url": "https://djashanti.example/contact",
+            },
+            "track": None,
+            "subject": "New release",
+            "message": "Hi",
+        }).encode("utf-8")
+        # Personal-data gate: outreach cannot be created anonymously.
+        anon_status, anon_env = dispatch(
+            self.service, "POST", "/api/v1/outreach", {}, payload)
+        self.assertEqual((anon_status, anon_env["error"]["code"]),
+                         (401, "unauthorized"))
+        self.assertEqual(self._outreach_total(), 0)
         status, env = dispatch(self.service, "POST", "/api/v1/outreach", {},
-                               json.dumps({
-                                   "recipient": {
-                                       "contact_uid": "dj:" + dj_id,
-                                       "identity_key": "dj:" + dj_id,
-                                       "target_type": "dj",
-                                       "name": "DJ Ashanti",
-                                       "role": "open-format DJ",
-                                       "email": "booking@djashanti.example",
-                                       "organization": "DJ Ashanti",
-                                       "outreach_class": "email",
-                                       "source_url":
-                                           "https://djashanti.example/contact",
-                                   },
-                                   "track": None,
-                                   "subject": "New release",
-                                   "message": "Hi",
-                               }).encode("utf-8"))
+                               payload, headers=self.headers)
         self.assertEqual(status, 201)
         self.assertEqual(self._outreach_total(), 1)
         # The station pipeline stays untouched by the DJ record.

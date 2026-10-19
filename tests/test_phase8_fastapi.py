@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.contracts import TRACK_FIELDS
+from auth.service import AuthService
 from crawler.http import FetchResult
 from database.schema import SCHEMA_VERSION
 from database.service import PersistenceService
@@ -53,14 +54,49 @@ class TestFastAPIPhaseParity(unittest.TestCase):
             PUBLIC_404: FetchResult(url=PUBLIC_404,
                                     error_kind="http_status", status=404),
         })
+        # The library routes are personal: every parity call carries a
+        # real bearer session, exactly as the console does. The
+        # anonymous case is pinned in
+        # test_personal_routes_answer_401_without_a_session.
+        auth = AuthService(cls.storage)
+        operator = auth.create_user("phase8-parity@example.com")
+        token = auth.create_session(operator["user_id"])["session_token"]
         cls.client = TestClient(
             create_app(cls.storage,
                        track_store=LocalTrackStore(cls.store_root),
                        link_fetcher=cls.fetcher),
-            raise_server_exceptions=False)
+            raise_server_exceptions=False,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        cls.anon = TestClient(
+            cls.client.app, raise_server_exceptions=False)
         # LIFO: the DB connection closes before the temp dir is removed.
         cls.addClassCleanup(tmp.cleanup)
         cls.addClassCleanup(cls.storage.close)
+
+    # -- personal-data gate -----------------------------------------------------
+
+    def test_personal_routes_answer_401_without_a_session(self):
+        # Anonymous access to the library must fail closed with the 401
+        # envelope — no upload, no listing, no detail read — while the
+        # public surface (stations, health) stays open.
+        for method, call in (
+                ("POST", lambda: self.anon.post(
+                    "/api/v1/tracks", content=mp3_bytes())),
+                ("GET", lambda: self.anon.get("/api/v1/tracks")),
+                ("GET", lambda: self.anon.get(
+                    "/api/v1/tracks/" + track_id_for("c" * 64))),
+        ):
+            with self.subTest(method=method):
+                response = call()
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.json()["error"]["code"],
+                                 "unauthorized")
+        self.assertEqual(self.anon.get("/api/v1/health").status_code, 200)
+        self.assertEqual(
+            self.anon.get(
+                f"/api/v1/stations/{self.kzow_key}/submission"
+            ).status_code, 200)
 
     # -- uploads -------------------------------------------------------------
 

@@ -95,6 +95,7 @@ from submissions import service as submission_service
 from submissions.service import TrackRejected, TrackTooLarge
 
 from outreach import service as outreach_service
+from outreach.providers import provider_descriptors
 
 from djs import service as dj_service
 
@@ -122,6 +123,14 @@ class OutreachNotFound(Exception):
 
 class DjNotFound(Exception):
     """Unknown DJ id; converted to a 404 envelope (independent DJs)."""
+
+
+class Unauthorized(Exception):
+    """No valid session token on a personal-data route; a 401 envelope.
+
+    Raised by ``_require_session`` so missing/revoked tokens fail closed
+    with the same ``401 unauthorized`` body the stdlib dispatcher emits.
+    """
 
 
 class CorsVisibleErrors:
@@ -231,8 +240,14 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         return _json(404, error_body("track_not_found", str(exc)))
 
     @app.exception_handler(OutreachNotFound)
-    async def _outreach_not_found(request: Request, exc: OutreachNotFound):
+    async def _outreach_not_found(request: Request,
+                                  exc: OutreachNotFound):
         return _json(404, error_body("outreach_not_found", str(exc)))
+
+    @app.exception_handler(Unauthorized)
+    async def _unauthorized(request: Request, exc: Unauthorized):
+        return _json(401, error_body("unauthorized", str(exc)))
+
 
     @app.exception_handler(DjNotFound)
     async def _dj_not_found(request: Request, exc: DjNotFound):
@@ -286,6 +301,21 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         if not sess:
             return None
         return svc.get_user_by_id(sess["user_id"])
+
+    def _require_session(request: Request) -> dict:
+        """Signed-in operator for a personal-data route, else 401.
+
+        Fail-closed: a missing, malformed or revoked bearer token raises
+        Unauthorized, which maps to ``401 unauthorized`` below. Personal
+        routes (releases, outreach, opportunities) are never readable
+        anonymously — the public surface is stations/DJs only. Mirrors
+        routes._require_session so the stdlib dispatcher and this FastAPI
+        app stay contract-identical.
+        """
+        user = _get_current_user(request)
+        if not user:
+            raise Unauthorized("not logged in")
+        return user
 
     @app.post("/api/v1/auth/login")
     async def auth_login(request: Request):
@@ -466,6 +496,17 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
             "signed_in": user is not None,
         })
 
+    @app.get("/api/v1/email-providers")
+    def email_providers(request: Request):
+        # Console "Connected services": the delivery providers this backend
+        # can actually send through, with the capability flags each one
+        # really supports (see outreach.providers.provider_descriptors).
+        # The mailbox state belongs to the caller, so the route fails closed
+        # without a session token — mirrors dispatch exactly.
+        user = _require_session(request)
+        account = storage.auth_get_google_account(user["user_id"])
+        return success_body({"providers": provider_descriptors(account)})
+
 
     @app.get("/api/v1/health")
     def health():
@@ -625,11 +666,13 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
 
     @app.post("/api/v1/tracks", status_code=201)
     async def upload_track(request: Request, filename: str | None = None):
+        # Personal-data route: only a signed-in operator may add to (or
+        # read from) the library. Fail-closed 401 before any storage work.
+        user = _require_session(request)
         data = await request.body()
-        user = _get_current_user(request)
         row = submission_service.upload_track(
             storage, track_store, data, filename=filename,
-            owner_user_id=user["user_id"] if user else None)
+            owner_user_id=user["user_id"])
         return success_body(track_projection(row))
 
     @app.post("/api/v1/tracks/releases", status_code=201)
@@ -637,31 +680,37 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         # Metadata-only release creation (My Music's primary workflow): no
         # binary upload. Required title/artist_name/music_url; optional
         # storyline/genre. Reuses the tracks table and projection.
+        user = _require_session(request)
         payload = await _json_request(request)
-        user = _get_current_user(request)
         row = submission_service.create_release(
-            storage, payload,
-            owner_user_id=user["user_id"] if user else None)
+            storage, payload, owner_user_id=user["user_id"])
         return success_body(track_projection(row))
 
     @app.get("/api/v1/tracks")
-    def list_tracks(limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    def list_tracks(request: Request,
+                    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
                     offset: int = Query(0, ge=0),
                     status: str | None = None):
+        user = _require_session(request)
         rows, total = submission_service.list_tracks(
-            storage, limit=limit, offset=offset, status=status)
+            storage, limit=limit, offset=offset, status=status,
+            owner_user_id=user["user_id"])
         return success_body(tracks_payload(rows, total, limit, offset))
 
     @app.get("/api/v1/tracks/{track_id}")
-    def get_track(track_id: str):
-        row = submission_service.get_track(storage, track_id)
+    def get_track(request: Request, track_id: str):
+        user = _require_session(request)
+        row = submission_service.get_track(
+            storage, track_id, owner_user_id=user["user_id"])
         if row is None:
             raise TrackNotFound(f"unknown track {track_id!r}")
         return success_body(track_projection(row))
 
     @app.delete("/api/v1/tracks/{track_id}")
-    def delete_track(track_id: str):
-        if submission_service.get_track(storage, track_id) is None:
+    def delete_track(request: Request, track_id: str):
+        user = _require_session(request)
+        if submission_service.get_track(
+                storage, track_id, owner_user_id=user["user_id"]) is None:
             raise TrackNotFound(f"unknown track {track_id!r}")
         storage.delete_track(track_id)
         return success_body({"track_id": track_id})
@@ -674,20 +723,80 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         # clears an optional field (title/artist_name must stay non-empty); an
         # invalid link is a 400 (ValueError handler) — never invented.
         # Ownership guard mirrors dispatch: a
-        # release with an owner may only be edited by that user; legacy NULL-
-        # owner releases keep their historical editable-by-anyone behavior.
-        track = submission_service.get_track(storage, track_id)
+        # release with an owner may only be edited by that user (403 — the
+        # id is real but not yours); another user's release and unknown ids
+        # both read as 404 on the lookup paths. Legacy NULL-owner releases
+        # keep their historical editable-by-authorized-operator behavior.
+        user = _require_session(request)
+        track = submission_service.get_track(
+            storage, track_id, owner_user_id=user["user_id"])
         if track is None:
+            # Distinguish "not yours" from "does not exist" only for PATCH:
+            # the mutating path answers 403 when the id is genuinely taken.
+            row = submission_service.get_track(storage, track_id)
+            if row is not None and row.get("owner_user_id"):
+                return _json(403, error_body(
+                    "forbidden", "this release belongs to another user"))
             raise TrackNotFound(f"unknown track {track_id!r}")
-        user = _get_current_user(request)
-        owner = track.get("owner_user_id")
-        if owner and (not user or user["user_id"] != owner):
-            return _json(403, error_body(
-                "forbidden", "this release belongs to another user"))
         payload = await _json_request(request)
         row = submission_service.update_track_fields(
             storage, track_id, payload)
         return success_body(track_projection(row))
+
+    # -- Phase 3: opportunity intelligence -------------------------------------
+    #
+    # Opportunities are computed from the caller's own release, so the route
+    # is personal: signed-in only, and a release owned by someone else is
+    # answered as unknown (never confirmed to exist). Mirrors the dispatch
+    # handler so the stdlib reference server and this FastAPI app agree on
+    # the envelope.
+
+    @app.get("/api/v1/opportunities")
+    def list_opportunities(
+            request: Request,
+            track_id: str | None = None,
+            limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+            offset: int = Query(0, ge=0),
+            tier: str | None = None,
+            genre: str | None = None,
+            country: str | None = None,
+            station_type: str | None = None,
+            has_contact: bool | None = None,
+            has_route: bool | None = None,
+            outreach_status: str | None = None,
+            sort: str | None = None,
+            order: str | None = None):
+        from opportunity import service as opportunity_service
+        user = _require_session(request)
+        if not track_id:
+            raise ValueError("No release selected.")
+        track = submission_service.get_track(
+            storage, track_id, owner_user_id=user["user_id"])
+        if track is None:
+            raise TrackNotFound(f"unknown track {track_id!r}")
+        raw_tiers = tier or ""
+        tiers = [t.strip().upper() for t in raw_tiers.split(",") if t.strip()]
+        for t in tiers:
+            if t not in ("HIGH", "MEDIUM", "LOW"):
+                raise ValueError("'tier' must be HIGH, MEDIUM or LOW")
+        if outreach_status and outreach_status not in ("new", "contacted"):
+            raise ValueError("'outreach_status' must be new or contacted")
+        sort_by = sort or "score"
+        order_by = order or "desc"
+        if sort_by not in ("score", "name", "relevance"):
+            raise ValueError("'sort' must be score, name or relevance")
+        if order_by not in ("asc", "desc"):
+            raise ValueError("'order' must be asc or desc")
+        payload = opportunity_service.compute_opportunities(
+            storage, track, limit=limit, offset=offset,
+            tier=tiers or None, genre=genre,
+            country=country,
+            station_type=station_type,
+            has_contact=has_contact,
+            has_route=has_route,
+            outreach_status=outreach_status, sort=sort_by,
+            order=order_by)
+        return success_body(payload)
 
     @app.get("/api/v1/stations/{key}/submission")
     def get_submission(key: str):
@@ -713,14 +822,19 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         return success_body(history)
 
     # -- Phase 9: outreach ----------------------------------------------------
+    #
+    # Outreach records carry a recipient, a message and a send history:
+    # personal data. Every route below requires a session token and is
+    # scoped to the caller (legacy NULL-owner rows stay shared, preserving
+    # the historical single-operator behavior); another operator's record
+    # is indistinguishable from one that does not exist.
 
     @app.post("/api/v1/outreach", status_code=201)
     async def create_outreach(request: Request):
+        user = _require_session(request)
         payload = await _json_request(request)
-        user = _get_current_user(request)
         record = outreach_service.create_outreach(
-            storage, payload=payload,
-            owner_user_id=user["user_id"] if user else None)
+            storage, payload=payload, owner_user_id=user["user_id"])
         return success_body(record)
 
     @app.get("/api/v1/outreach")
@@ -728,39 +842,38 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                       limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
                       offset: int = Query(0, ge=0),
                       status: str | None = None):
-        user = _get_current_user(request)
+        user = _require_session(request)
         rows, total = outreach_service.list_outreach(
             storage, limit=limit, offset=offset, status=status,
-            owner_user_id=user["user_id"] if user else None)
+            owner_user_id=user["user_id"])
         return success_body({"outreach": rows, "total": total,
                              "limit": limit, "offset": offset})
 
     @app.get("/api/v1/outreach/{outreach_id}")
     def get_outreach(outreach_id: str, request: Request):
-        user = _get_current_user(request)
+        user = _require_session(request)
         record = outreach_service.get_outreach(
-            storage, outreach_id,
-            owner_user_id=user["user_id"] if user else None)
+            storage, outreach_id, owner_user_id=user["user_id"])
         if record is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         return success_body(record)
 
     @app.delete("/api/v1/outreach/{outreach_id}")
     def delete_outreach(outreach_id: str, request: Request):
-        user = _get_current_user(request)
+        user = _require_session(request)
         if outreach_service.get_outreach(
                 storage, outreach_id,
-                owner_user_id=user["user_id"] if user else None) is None:
+                owner_user_id=user["user_id"]) is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         storage.delete_outreach(outreach_id)
         return success_body({"outreach_id": outreach_id})
 
     @app.post("/api/v1/outreach/{outreach_id}/event")
     async def outreach_event(outreach_id: str, request: Request):
-        user = _get_current_user(request)
+        user = _require_session(request)
         if outreach_service.get_outreach(
                 storage, outreach_id,
-                owner_user_id=user["user_id"] if user else None) is None:
+                owner_user_id=user["user_id"]) is None:
             raise OutreachNotFound(f"unknown outreach {outreach_id!r}")
         payload = await _json_request(request)
         event = payload.get("event")
@@ -777,10 +890,7 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
         # session — never Google OAuth) composes from a release they are
         # authorized for; the response is a draft only and nothing is
         # persisted or sent.
-        user = _get_current_user(request)
-        if not user:
-            return _json(401, error_body(
-                "unauthorized", "sign in to write an email with AI"))
+        user = _require_session(request)
         payload = await _json_request(request)
         track_id = payload.get("track_id")
         if not isinstance(track_id, str) or not track_id.strip():
@@ -799,9 +909,7 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
 
     @app.post("/api/v1/outreach/{outreach_id}/send")
     async def outreach_send(outreach_id: str, request: Request):
-        user = _get_current_user(request)
-        if not user:
-            return _json(401, error_body("unauthorized", "not logged in"))
+        user = _require_session(request)
         record = outreach_service.get_outreach(
             storage, outreach_id, owner_user_id=user["user_id"])
         if record is None:

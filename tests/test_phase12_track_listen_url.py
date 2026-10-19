@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from backend.contracts import TRACK_FIELDS, track_projection
+from auth.service import AuthService
 from backend.routes import ROUTE_TABLE, dispatch
 from database.schema import SCHEMA_VERSION, apply_migrations
 from database.schema_migrations import load_pg_migrations
@@ -178,16 +179,26 @@ class TestDispatcherListenUrl(unittest.TestCase):
         self.service = PersistenceService(
             os.path.join(self._tmp.name, "db.sqlite"))
         self.service.save_track(_track())
+        # Editing a release is personal: every PATCH/GET carries a real
+        # bearer session (pinned by test_anonymous_edit_is_unauthorized).
+        self.auth = AuthService(self.service)
+        self.user = self.auth.create_user("phase12@example.com")
+        self.headers = {
+            "authorization": "Bearer " + self.auth.create_session(
+                self.user["user_id"])["session_token"],
+        }
 
     def tearDown(self):
         self.service.close()
         self._tmp.cleanup()
 
-    def _patch(self, track_id, payload):
+    def _patch(self, track_id, payload, headers=None):
         import json
         return dispatch(self.service, "PATCH",
                         f"/api/v1/tracks/{track_id}", {},
-                        json.dumps(payload).encode())
+                        json.dumps(payload).encode(),
+                        headers=headers if headers is not None
+                        else self.headers)
 
     def test_route_table_declares_patch(self):
         hits = [row for row in ROUTE_TABLE if row[0] == "PATCH"
@@ -201,7 +212,8 @@ class TestDispatcherListenUrl(unittest.TestCase):
         self.assertEqual(body["data"]["listen_url"], "https://youtu.be/abc")
         self.assertEqual(set(body["data"]) - {"links"}, set(TRACK_FIELDS))
         status, body = dispatch(
-            self.service, "GET", f"/api/v1/tracks/{TRACK_ID}", {})
+            self.service, "GET", f"/api/v1/tracks/{TRACK_ID}", {},
+            headers=self.headers)
         self.assertEqual(body["data"]["listen_url"], "https://youtu.be/abc")
 
     def test_patch_empty_clears_the_link(self):
@@ -223,11 +235,26 @@ class TestDispatcherListenUrl(unittest.TestCase):
 
     def test_listing_projection_includes_listen_url(self):
         self._patch(TRACK_ID, {"listen_url": "https://youtu.be/abc"})
-        status, body = dispatch(self.service, "GET", "/api/v1/tracks", {})
+        status, body = dispatch(self.service, "GET", "/api/v1/tracks", {},
+                                headers=self.headers)
         self.assertEqual(status, 200)
         track = body["data"]["tracks"][0]
         self.assertEqual(set(track) - {"links"}, set(TRACK_FIELDS))
         self.assertEqual(track["listen_url"], "https://youtu.be/abc")
+
+    def test_anonymous_edit_is_unauthorized(self):
+        # Fail-closed: no session token means no edit and no read.
+        status, body = self._patch(
+            TRACK_ID, {"listen_url": "https://youtu.be/abc"}, headers={})
+        self.assertEqual((status, body["error"]["code"]),
+                         (401, "unauthorized"))
+        status, body = dispatch(self.service, "GET", "/api/v1/tracks", {},
+                                headers={})
+        self.assertEqual((status, body["error"]["code"]),
+                         (401, "unauthorized"))
+        # The stored value is untouched.
+        row = self.service.get_track(TRACK_ID)
+        self.assertIsNone(row["listen_url"])
 
     def test_projection_shape_matches_contract(self):
         projection = track_projection(_track(listen_url="https://x.example"))

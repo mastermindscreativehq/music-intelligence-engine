@@ -545,6 +545,22 @@ ALTER TABLE tracks ADD COLUMN genre TEXT;
     # rows stay visible to everyone. Additive: no existing column or row is
     # touched, and the value is never exposed in the public projection.
     (15, """
+-- ensure outreach_messages exists (defensive)
+CREATE TABLE IF NOT EXISTS outreach_messages (
+    outreach_id TEXT PRIMARY KEY,
+    track_id TEXT,
+    dj_id TEXT,
+    station_key TEXT,
+    recipient TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    message TEXT NOT NULL,
+    from_email TEXT,
+    sharing TEXT,
+    status TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'local',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 ALTER TABLE outreach_messages ADD COLUMN owner_user_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_outreach_owner
     ON outreach_messages(owner_user_id);

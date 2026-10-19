@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 from backend import outreach_intel as oi
+from auth.service import AuthService
 from backend.routes import dispatch
 from database.service import PersistenceService
 from discovery.radio.contract import derive_location_status
@@ -339,6 +340,13 @@ class _BaseDBTest(unittest.TestCase):
         self.kx = "domain:genre-match.org"
         self.km = "domain:mismatch-radio.org"
         self.kr = "domain:noret-radio.org"
+        # A real bearer session, as the console sends for personal routes.
+        self.auth = AuthService(self.service)
+        self.operator = self.auth.create_user("operator@example.com")
+        self.auth_headers = {
+            "authorization": "Bearer " + self.auth.create_session(
+                self.operator["user_id"])["session_token"],
+        }
 
     def tearDown(self):
         self.service.close()
@@ -532,9 +540,16 @@ class TestServiceExistingStationsUnchanged(_BaseDBTest):
 # ---------------------------------------------------------------------------
 
 class TestDispatchOpportunities(_BaseDBTest):
+    def _headers(self):
+        # Opportunities are computed from the caller's own release, so the
+        # route requires a real session (pinned by
+        # test_anonymous_access_returns_401).
+        return self.auth_headers
+
     def test_missing_track_id_returns_400(self):
         status, body = dispatch(self.service, "GET",
-                                "/api/v1/opportunities", {})
+                                "/api/v1/opportunities", {},
+                                headers=self._headers())
         self.assertEqual(status, 400)
         self.assertEqual(body["ok"], False)
         self.assertEqual(body["error"]["code"], "bad_request")
@@ -542,7 +557,8 @@ class TestDispatchOpportunities(_BaseDBTest):
     def test_unknown_track_returns_404(self):
         status, body = dispatch(
             self.service, "GET",
-            "/api/v1/opportunities", {"track_id": ["sha256:" + "0"*64]})
+            "/api/v1/opportunities", {"track_id": ["sha256:" + "0"*64]},
+            headers=self._headers())
         self.assertEqual(status, 404)
         self.assertEqual(body["error"]["code"], "track_not_found")
 
@@ -550,7 +566,7 @@ class TestDispatchOpportunities(_BaseDBTest):
         status, body = dispatch(
             self.service, "GET",
             "/api/v1/opportunities",
-            {"track_id": [track_id]})
+            {"track_id": [track_id]}, headers=self._headers())
         self.assertEqual(status, 200)
         self.assertEqual(body["ok"], True)
         self.assertIn("opportunities", body["data"])
@@ -560,7 +576,8 @@ class TestDispatchOpportunities(_BaseDBTest):
         status, body = dispatch(
             self.service, "GET",
             "/api/v1/opportunities",
-            {"track_id": [track_id], "genre": ["rock"], "has_contact": ["true"]})
+            {"track_id": [track_id], "genre": ["rock"], "has_contact": ["true"]},
+            headers=self._headers())
         self.assertEqual(status, 200)
         for opp in body["data"]["opportunities"]:
             self.assertIn("rock", [g.strip() for g in (opp["station"].get("genres") or [])])
@@ -570,7 +587,8 @@ class TestDispatchOpportunities(_BaseDBTest):
         status, body = dispatch(
             self.service, "GET",
             "/api/v1/opportunities",
-            {"track_id": [track_id], "tier": ["INVALID"]})
+            {"track_id": [track_id], "tier": ["INVALID"]},
+            headers=self._headers())
         self.assertEqual(status, 400)
         self.assertIn("tier", body["error"]["message"])
 
@@ -578,7 +596,8 @@ class TestDispatchOpportunities(_BaseDBTest):
         status, body = dispatch(
             self.service, "GET",
             "/api/v1/opportunities",
-            {"track_id": [track_id], "outreach_status": ["maybe"]})
+            {"track_id": [track_id], "outreach_status": ["maybe"]},
+            headers=self._headers())
         self.assertEqual(status, 400)
         self.assertIn("outreach_status", body["error"]["message"])
 
@@ -586,13 +605,57 @@ class TestDispatchOpportunities(_BaseDBTest):
         status, body = dispatch(
             self.service, "GET",
             "/api/v1/opportunities",
-            {"track_id": [track_id], "sort": ["price"]})
+            {"track_id": [track_id], "sort": ["price"]},
+            headers=self._headers())
         self.assertEqual(status, 400)
 
     def test_post_not_allowed(self):
         status, body = dispatch(
-            self.service, "POST", "/api/v1/opportunities", {})
+            self.service, "POST", "/api/v1/opportunities", {},
+            headers=self._headers())
         self.assertEqual(status, 405)
+
+    def test_anonymous_access_returns_401(self):
+        # Personal-data gate: no session token, no opportunity math —
+        # and a release owned by another operator reads as unknown.
+        status, body = dispatch(self.service, "GET",
+                                "/api/v1/opportunities", {})
+        self.assertEqual((status, body["error"]["code"]),
+                         (401, "unauthorized"))
+        status, body = dispatch(
+            self.service, "GET",
+            "/api/v1/opportunities", {"track_id": [track_id]})
+        self.assertEqual((status, body["error"]["code"]),
+                         (401, "unauthorized"))
+
+    def test_foreign_release_reads_as_unknown(self):
+        # Another operator's release must never be confirmed to exist: the
+        # 404 is identical to a typo'd id.
+        auth = AuthService(self.service)
+        owner = auth.create_user("owner@example.com")
+        viewer = auth.create_user("viewer@example.com")
+        foreign = self.service.save_track({
+            **TRACK,
+            "track_id": "sha256:" + "e" * 64,
+            "sha256": "e" * 64,
+            "owner_user_id": owner["user_id"],
+        })
+        headers = {"authorization": "Bearer " + auth.create_session(
+            viewer["user_id"])["session_token"]}
+        status, body = dispatch(
+            self.service, "GET",
+            "/api/v1/opportunities", {"track_id": [foreign["track_id"]]},
+            headers=headers)
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "track_not_found")
+        # The owner still gets an answer for the same id.
+        owner_headers = {"authorization": "Bearer " + auth.create_session(
+            owner["user_id"])["session_token"]}
+        status, _body = dispatch(
+            self.service, "GET",
+            "/api/v1/opportunities", {"track_id": [foreign["track_id"]]},
+            headers=owner_headers)
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":

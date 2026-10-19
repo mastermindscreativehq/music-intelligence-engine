@@ -1025,20 +1025,32 @@ class PostgresStorage(AuthStoreMixin):
                      str(track.get("updated_at") or now)))
         return self.get_track(track["track_id"])
 
-    def get_track(self, track_id: str) -> dict | None:
+    def get_track(self, track_id: str,
+                  owner_user_id: str | None = None) -> dict | None:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("SELECT * FROM tracks WHERE track_id=%s",
                         (track_id,))
             row = cur.fetchone()
-        return self._track_from_row(row) if row else None
+        record = self._track_from_row(row) if row else None
+        if record is not None and owner_user_id:
+            owner = record.get("owner_user_id")
+            if owner and owner != owner_user_id:
+                return None
+        return record
 
     def list_tracks(self, limit: int = 50, offset: int = 0,
-                    status: str | None = None) -> tuple[list[dict], int]:
+                    status: str | None = None,
+                    owner_user_id: str | None = None
+                    ) -> tuple[list[dict], int]:
         clauses, params = [], []
         if status:
             clauses.append("status = %s")
             params.append(status)
+        if owner_user_id:
+            # This operator's records plus legacy/anonymous (owner NULL) rows.
+            clauses.append("(owner_user_id = %s OR owner_user_id IS NULL)")
+            params.append(owner_user_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             self._ensure_connection()

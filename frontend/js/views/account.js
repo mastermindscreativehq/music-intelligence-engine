@@ -134,6 +134,9 @@ async function signOut() {
     /* the local token is cleared even when the revoke call fails */
   }
   await refreshAccountArea();
+  // Let the shell re-sync personal-workspace chrome (nav links, badge) and
+  // re-render the current route, which now falls behind the sign-in gate.
+  window.dispatchEvent(new Event("mie:auth-changed"));
 }
 
 function showError(error) {

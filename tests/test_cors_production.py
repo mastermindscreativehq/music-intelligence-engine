@@ -23,6 +23,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
+from auth.service import AuthService
 from database.service import PersistenceService
 
 PROD_ORIGIN = "https://music-intelligence-engine-five.vercel.app"
@@ -36,6 +37,15 @@ class CorsCase(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         cls.storage = PersistenceService(
             os.path.join(cls._tmp.name, "db.sqlite"))
+        # The library routes are personal, so these clients are signed in
+        # exactly like the console (the error envelope they assert on
+        # therefore comes from the handler, not the 401 gate).
+        auth = AuthService(cls.storage)
+        operator = auth.create_user("cors-probe@example.com")
+        cls.session_headers = {
+            "Authorization": "Bearer " + auth.create_session(
+                operator["user_id"])["session_token"],
+        }
         cls.addClassCleanup(cls._tmp.cleanup)
         cls.addClassCleanup(cls.storage.close)
 
@@ -48,7 +58,8 @@ class CorsCase(unittest.TestCase):
             if extra_origins is None:
                 os.environ.pop("MIE_CORS_ORIGINS", None)
             app = create_app(self.storage)
-        return TestClient(app, raise_server_exceptions=False)
+        return TestClient(app, raise_server_exceptions=False,
+                          headers=dict(self.session_headers))
 
 
 class TestDefaultProductionOrigin(CorsCase):
@@ -120,6 +131,17 @@ class TestDefaultProductionOrigin(CorsCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.headers.get(ACAO), PROD_ORIGIN)
         self.assertEqual(response.json()["error"]["code"], "track_not_found")
+
+    def test_unauthorized_envelope_carries_cors_headers(self):
+        # The personal-data 401 must be readable by the console too, so the
+        # browser shows "please sign in" instead of an opaque CORS failure.
+        app = self.client().app
+        anon = TestClient(app, raise_server_exceptions=False)
+        response = anon.get("/api/v1/tracks",
+                            headers={"Origin": PROD_ORIGIN})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers.get(ACAO), PROD_ORIGIN)
+        self.assertEqual(response.json()["error"]["code"], "unauthorized")
 
     def test_unknown_origin_is_not_allowed(self):
         client = self.client()

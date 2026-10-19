@@ -294,14 +294,16 @@ class TestDispatcherSongStory(unittest.TestCase):
         self.assertEqual(len(hits), 1)
 
     def test_patch_sets_story_and_keeps_link_contract(self):
-        status, body = self._patch(TRACK_ID, {"song_story": "a per-release story"})
+        status, body = self._patch(TRACK_ID, {"song_story": "a per-release story"},
+                                   self.auth_headers)
         self.assertEqual(status, 200)
         self.assertEqual(body["data"]["song_story"], "a per-release story")
         self.assertEqual(set(body["data"]) - {"links"}, set(TRACK_FIELDS))
         self.assertNotIn("owner_user_id", body["data"])
 
     def test_patch_bad_link_is_still_bad_request(self):
-        status, body = self._patch(TRACK_ID, {"listen_url": "not a url"})
+        status, body = self._patch(TRACK_ID, {"listen_url": "not a url"},
+                                   self.auth_headers)
         self.assertEqual((status, body["error"]["code"]), (400, "bad_request"))
 
     def test_patch_owned_track_rejects_other_user_and_anonymous(self):
@@ -312,9 +314,10 @@ class TestDispatcherSongStory(unittest.TestCase):
         status, body = self._patch(OTHER_ID, {"song_story": "mine"},
                                    self.auth_headers)
         self.assertEqual((status, body["error"]["code"]), (403, "forbidden"))
-        # Anonymous callers cannot edit someone else's release either.
+        # Anonymous callers fail closed before ownership is even consulted:
+        # a signed-in stranger gets the 403 above, an anonymous one a 401.
         status, body = self._patch(OTHER_ID, {"song_story": "mine"}, {})
-        self.assertEqual((status, body["error"]["code"]), (403, "forbidden"))
+        self.assertEqual((status, body["error"]["code"]), (401, "unauthorized"))
         # Nothing was written by the rejected callers.
         self.assertIsNone(self.service.get_track(OTHER_ID)["song_story"])
 
@@ -327,9 +330,14 @@ class TestDispatcherSongStory(unittest.TestCase):
         self.assertEqual(body["data"]["song_story"], "the owner's story")
 
     def test_patch_legacy_null_owner_release_keeps_its_historical_flow(self):
-        # setUp stores a NULL-owner legacy release: patchable by anyone,
-        # signed in or not — unchanged single-operator behavior.
-        status, body = self._patch(TRACK_ID, {"song_story": "legacy story"})
+        # setUp stores a NULL-owner legacy release: editable by ANY
+        # signed-in operator (unchanged single-operator behavior) — but an
+        # anonymous caller must now authenticate first.
+        status, body = self._patch(TRACK_ID, {"song_story": "legacy story"}, {})
+        self.assertEqual((status, body["error"]["code"]), (401, "unauthorized"))
+        self.assertIsNone(self.service.get_track(TRACK_ID)["song_story"])
+        status, body = self._patch(TRACK_ID, {"song_story": "legacy story"},
+                                   self.auth_headers)
         self.assertEqual(status, 200)
         status, body = self._patch(TRACK_ID, {"song_story": "also fine"},
                                    self.auth_headers)

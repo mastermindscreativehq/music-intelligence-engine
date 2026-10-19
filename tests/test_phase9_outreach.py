@@ -19,6 +19,7 @@ import json
 import tempfile
 import unittest
 
+from auth.service import AuthService
 from backend.routes import ROUTE_TABLE, dispatch
 from database.service import PersistenceService
 from outreach import providers, service as osvc
@@ -181,6 +182,15 @@ class OutreachDispatchTests(unittest.TestCase):
                                                 delete=False)
         self._tmp.close()
         self.svc = PersistenceService(self._tmp.name)
+        # Outreach is personal data: the dispatch adapter requires a real
+        # session token for every outreach route (pinned by
+        # test_anonymous_access_is_unauthorized).
+        self.auth = AuthService(self.svc)
+        user = self.auth.create_user("phase9@example.com")
+        self.headers = {
+            "authorization": "Bearer " + self.auth.create_session(
+                user["user_id"])["session_token"],
+        }
 
     def tearDown(self):
         self.svc.close()
@@ -190,41 +200,68 @@ class OutreachDispatchTests(unittest.TestCase):
     def test_post_get_event_roundtrip(self):
         body = json.dumps(_payload()).encode("utf-8")
         status, env = dispatch(self.svc, "POST", "/api/v1/outreach", {},
-                               body)
+                               body, headers=self.headers)
         self.assertEqual(status, 201)
         self.assertTrue(env["ok"])
         oid = env["data"]["outreach_id"]
 
         status2, env2 = dispatch(self.svc, "GET",
-                                 f"/api/v1/outreach/{oid}", {})
+                                 f"/api/v1/outreach/{oid}", {},
+                                 headers=self.headers)
         self.assertEqual(status2, 200)
         self.assertEqual(env2["data"]["status"], "ready")
 
         status3, env3 = dispatch(
             self.svc, "POST", f"/api/v1/outreach/{oid}/event", {},
             json.dumps({"event": "opened_in_email",
-                        "meta": {"channel": "mailto"}}).encode("utf-8"))
+                        "meta": {"channel": "mailto"}}).encode("utf-8"),
+            headers=self.headers)
         self.assertEqual(status3, 200)
         self.assertEqual(env3["data"]["status"], "ready")
         self.assertEqual(env3["data"]["attempts"][0]["event"],
                          "opened_in_email")
 
-        status4, env4 = dispatch(self.svc, "GET", "/api/v1/outreach", {})
+        status4, env4 = dispatch(self.svc, "GET", "/api/v1/outreach", {},
+                                 headers=self.headers)
         self.assertEqual(status4, 200)
         self.assertEqual(env4["data"]["total"], 1)
 
     def test_missing_email_is_400(self):
         status, env = dispatch(
             self.svc, "POST", "/api/v1/outreach", {},
-            json.dumps({"recipient": {"name": "x"}}).encode("utf-8"))
+            json.dumps({"recipient": {"name": "x"}}).encode("utf-8"),
+            headers=self.headers)
         self.assertEqual(status, 400)
         self.assertFalse(env["ok"])
 
     def test_unknown_outreach_is_404(self):
         status, env = dispatch(self.svc, "GET",
-                               "/api/v1/outreach/om_deadbeef", {})
+                               "/api/v1/outreach/om_deadbeef", {},
+                               headers=self.headers)
         self.assertEqual(status, 404)
         self.assertEqual(env["error"]["code"], "outreach_not_found")
+
+    def test_anonymous_access_is_unauthorized(self):
+        # Fail-closed: no (or garbage) bearer token means no outreach at
+        # all — no create, no list, no detail — and nothing is written.
+        for headers in ({}, {"authorization": "Bearer nope"}):
+            with self.subTest(headers=headers):
+                status, env = dispatch(
+                    self.svc, "POST", "/api/v1/outreach", {},
+                    json.dumps(_payload()).encode("utf-8"), headers=headers)
+                self.assertEqual((status, env["error"]["code"]),
+                                 (401, "unauthorized"))
+                status, env = dispatch(self.svc, "GET", "/api/v1/outreach",
+                                       {}, headers=headers)
+                self.assertEqual((status, env["error"]["code"]),
+                                 (401, "unauthorized"))
+                status, env = dispatch(
+                    self.svc, "GET", "/api/v1/outreach/om_deadbeef", {},
+                    headers=headers)
+                self.assertEqual((status, env["error"]["code"]),
+                                 (401, "unauthorized"))
+        _rows, total = osvc.list_outreach(self.svc)
+        self.assertEqual(total, 0)
 
     def test_route_table_defines_outreach(self):
         verbs = {(m, template) for m, _p, template, _q in ROUTE_TABLE}

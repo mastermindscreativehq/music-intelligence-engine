@@ -54,12 +54,19 @@ export function renderProfileView(root) {
 
   api.me().then((me) => {
     renderAccountSection(account, me);
-    renderServicesSection(services, me, reload);
   }).catch((error) => {
     account.replaceChildren(
       el("h2", {}, "Account"),
       el("p", { class: "banner-error", role: "alert" },
         `Could not load your account: ${errorText(error)}`));
+  });
+
+  // The provider list is whatever the server says it can really send
+  // through — never a hardcoded roster, so an unsupported provider is
+  // simply not rendered (and can never be shown as connected).
+  api.emailProviders().then((data) => {
+    renderServicesSection(services, (data && data.providers) || [], reload);
+  }).catch((error) => {
     services.replaceChildren(
       el("h2", {}, "Connected services"),
       el("p", { class: "banner-error", role: "alert" },
@@ -123,62 +130,112 @@ function renderAccountSection(host, me) {
     el("p", {}, status));
 }
 
-function renderServicesSection(host, me, reload) {
-  const gmailConnected = Boolean(me && me.gmail_connected);
-  const gmailEmail = (me && me.gmail_email) || (me && me.user && me.user.email);
-  const status = el("span", { class: "dim" });
+function capabilityText(provider) {
+  // Plain-language summary of the provider's TRUE capability flags as
+  // reported by the backend — nothing is inferred or promised here.
+  const caps = provider.capabilities || {};
+  const bits = [];
+  if (caps.send) {
+    bits.push(provider.id === "mailto"
+      ? "opens your own mail app"
+      : "can send outreach from this service");
+  }
+  if (caps.attach) bits.push("supports attachments");
+  if (caps.status) bits.push("reports delivery status");
+  if (caps.errors) bits.push("reports send failures");
+  if (!bits.length) bits.push("no send capability");
+  return bits.join("; ") + ".";
+}
 
-  const button = el("button", {
-    class: gmailConnected ? "subtle" : "primary",
-    onClick: async () => {
-      if (gmailConnected) {
+function providerRow(provider, reload) {
+  const row = el("div", { class: "card" });
+  const status = el("span", { class: "dim" });
+  const connected = Boolean(provider.connected);
+  const email = provider.email || "";
+
+  const badge = connected
+    ? el("span", { class: "badge badge-accent" }, "Connected")
+    : (provider.connected === null
+      ? el("span", { class: "badge badge-muted" }, "Always available")
+      : el("span", { class: "badge badge-muted" }, "Not connected"));
+
+  const actions = el("div", { class: "actions-row" });
+  if (provider.connect_path || provider.disconnect_path) {
+    const button = el("button", {
+      class: connected ? "subtle" : "primary",
+      onClick: async () => {
         button.disabled = true;
-        status.replaceChildren("Disconnecting…");
-        try {
-          await api.disconnectGmail();
-          refreshAccountArea();
-          reload();
-        } catch (error) {
-          status.replaceChildren(el("span", { class: "banner-error", role: "alert" },
-            `Could not disconnect: ${errorText(error)}`));
-          button.disabled = false;
-        }
-        return;
-      }
-      button.disabled = true;
-      try {
-        const res = await api.googleConnect();
-        if (res && res.auth_url) {
-          window.location.assign(res.auth_url);
+        if (connected) {
+          status.replaceChildren("Disconnecting…");
+          try {
+            await api.providerDisconnect(provider.disconnect_path);
+            refreshAccountArea();
+            reload();
+          } catch (error) {
+            status.replaceChildren(el("span", {
+              class: "banner-error", role: "alert",
+            }, `Could not disconnect: ${errorText(error)}`));
+            button.disabled = false;
+          }
           return;
         }
-        throw new Error("no authorization URL returned");
-      } catch (error) {
-        status.replaceChildren(el("span", { class: "banner-error", role: "alert" },
-          `Could not start Gmail connect: ${errorText(error)}`));
-        button.disabled = false;
-      }
-    },
-  }, gmailConnected ? "Disconnect Gmail" : "Connect Gmail");
+        status.replaceChildren("Connecting…");
+        try {
+          const res = await api.providerConnect(provider.connect_path);
+          if (res && res.auth_url) {
+            window.location.assign(res.auth_url);
+            return;
+          }
+          throw new Error("no authorization URL returned");
+        } catch (error) {
+          status.replaceChildren(el("span", {
+            class: "banner-error", role: "alert",
+          }, `Could not start connect: ${errorText(error)}`));
+          button.disabled = false;
+        }
+      },
+    }, connected ? `Disconnect ${provider.label}` : `Connect ${provider.label}`);
+    actions.append(button);
+  } else if (provider.auth_required === false) {
+    actions.append(el("span", { class: "dim" },
+      "No connection step: use this option from the outreach composer."));
+  }
+  actions.append(status);
 
+  row.append(
+    el("div", { class: "kv" },
+      el("dt", {}, provider.label),
+      el("dd", {},
+        connected
+          ? el("span", {},
+            badge, " ", el("span", {}, email))
+          : badge)),
+    el("p", { class: "dim" }, capabilityText(provider)),
+    provider.id === "gmail"
+      ? el("p", { class: "dim" },
+        connected
+          ? "Outreach can be sent from this mailbox."
+          : "Connecting grants the Gmail send scope only — never your "
+            + "sign-in.")
+      : null,
+    actions);
+  return row;
+}
+
+function renderServicesSection(host, providers, reload) {
+  // Driven entirely by GET /email-providers: a provider the server does
+  // not offer is never rendered, so nothing unsupported can appear as
+  // connected or available.
   host.replaceChildren(
     el("h2", {}, "Connected services"),
-    el("div", { class: "kv" },
-      el("dt", {}, "Gmail"),
-      el("dd", {},
-        gmailConnected
-          ? el("span", {},
-            el("span", { class: "badge badge-accent" }, "Connected"),
-            " ",
-            gmailEmail || "")
-          : el("span", { class: "badge badge-muted" }, "Not connected"))),
     el("p", { class: "dim" },
-      gmailConnected
-        ? "Outreach can be sent from this mailbox."
-        : "Connect Gmail to send outreach from your own mailbox. Connecting "
-          + "grants the Gmail send scope only — never your sign-in."
-    ),
-    el("div", { class: "actions-row" }, button, status));
+      "Outreach can be sent through the services listed here. Each one "
+      + "shows only the capabilities it really supports."),
+    providers.length
+      ? el("div", {},
+        ...providers.map((provider) => providerRow(provider, reload)))
+      : el("p", { class: "banner-error", role: "alert" },
+        "No email providers are configured for this deployment."));
 }
 
 function renderPlanSection(host, data) {

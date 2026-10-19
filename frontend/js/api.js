@@ -345,6 +345,18 @@ export const api = {
   // Truthful entitlement report for this deployment (no billing is
   // configured; every signed-in operator has full access).
   plan: () => request(API_BASE_URL + "/api/v1/plan"),
+  // Email delivery providers this backend can actually send through, each
+  // with its true capability flags and its connect/disconnect paths. The
+  // Connected-services section renders from this list, so a provider the
+  // server does not offer is simply never shown.
+  emailProviders: () => request(API_BASE_URL + "/api/v1/email-providers"),
+  // Connect/disconnect a provider by the path the server reported on
+  // GET /email-providers. Keeping the hop path-driven means a new provider
+  // needs no frontend change: the button only exists when the server
+  // offered a connect path for it.
+  providerConnect: (path) => request(API_BASE_URL + path),
+  providerDisconnect: (path) =>
+    send(API_BASE_URL + path, { method: "POST" }),
   logout: async () => {
     // Revoke server-side FIRST (send() attaches the current bearer), then
     // drop the local token — clearing first would strand the session.

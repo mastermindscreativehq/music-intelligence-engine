@@ -173,3 +173,62 @@ def provider_for(name: str | None) -> EmailProvider:
     if name == "mailto":
         return MailtoProvider()
     return default_provider()
+
+
+# ---------------------------------------------------------------------------
+# Console capability reporting (provider-independent "Connected services")
+# ---------------------------------------------------------------------------
+
+#: Capability keys, in the order the console lists them.
+CAPABILITY_ORDER = (CAN_SEND, CAN_ATTACH, CAN_STATUS, CAN_ERRORS)
+
+#: What the Gmail send path (``gmail_provider.GmailProvider.send_email``)
+#: really supports today: it sends from the operator's connected mailbox
+#: and reports typed errors. It neither attaches files nor polls delivery
+#: status, so those flags stay False rather than being promised.
+GMAIL_CAPABILITIES = frozenset((CAN_SEND, CAN_ERRORS))
+
+
+def capability_flags(capabilities) -> dict:
+    """Booleans for every capability key, so a UI never has to guess."""
+    caps = set(capabilities)
+    return {key: key in caps for key in CAPABILITY_ORDER}
+
+
+def provider_descriptors(gmail_account: dict | None = None) -> list[dict]:
+    """One console-ready entry per email provider the backend can serve.
+
+    Each entry mirrors what the code behind that provider really does:
+    the capability flags come from the provider implementations (never a
+    hardcoded marketing list), and the connect/disconnect paths are the
+    real auth routes the UI should open — the frontend does not need to
+    know the word "Gmail" to render the section. ``gmail_account`` is the
+    caller's connected mailbox row (or None when nothing is connected).
+    """
+    account = gmail_account or {}
+    scopes = [s.strip() for s in (account.get("scopes") or "").split(",")
+              if s.strip()]
+    return [
+        {
+            "id": "gmail",
+            "label": "Gmail",
+            "auth_required": True,
+            "connected": bool(gmail_account),
+            "email": account.get("email"),
+            "scopes": scopes,
+            "capabilities": capability_flags(GMAIL_CAPABILITIES),
+            "connect_path": "/api/v1/auth/google/connect",
+            "disconnect_path": "/api/v1/auth/google/disconnect",
+        },
+        {
+            "id": "mailto",
+            "label": "Your email app",
+            "auth_required": False,
+            "connected": None,
+            "email": None,
+            "scopes": [],
+            "capabilities": capability_flags(MailtoProvider().capabilities()),
+            "connect_path": None,
+            "disconnect_path": None,
+        },
+    ]

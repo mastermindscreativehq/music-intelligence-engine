@@ -1,14 +1,22 @@
 /* Dashboard (#/) — lightweight overview, never operational.
  *
- * Read-only summary of the whole workspace: overall counts, outreach status
- * summary, recent outreach records, and a few honest alerts. Every number
- * comes from the real backend endpoints; nothing here stages or changes
- * anything. Operations happen on their dedicated pages (Stations / My music
- * / Outreach). */
+ * Two audiences, one route:
+ *   signed-out  -> the public landing page (what the app does + sign in)
+ *   signed-in   -> a read-only overview of the operator's own workspace
+ *
+ * Every signed-in number comes from the real backend endpoints; nothing here
+ * stages or changes anything. Operations happen on their dedicated pages
+ * (Stations / My music / Outreach). */
 
 import { api, ApiError } from "../api.js";
 import { el } from "../dom.js";
-import { outreachHistoryHref, stationHref, stationsHref, tracksHref } from "../router.js";
+import {
+  djsHref,
+  outreachHistoryHref,
+  stationHref,
+  stationsHref,
+  tracksHref,
+} from "../router.js";
 import { statusChip } from "./outreachRecords.js";
 
 function statTile(label, value, href) {
@@ -26,10 +34,10 @@ function alertLine(text, href, actionLabel) {
     el("a", { class: "linkish", href }, actionLabel || "Go →"));
 }
 
-// Signed-out welcome: a plain introduction plus the two real next steps
-// (sign in, or browse the public station list). No marketing copy and no
-// claims that aren't true of this deployment.
-function landingHero() {
+// Public landing page (signed out). Plain, honest description of what this
+// deployment does, the two open directories, and the single real next step
+// (sign in with Google). No marketing claims that aren't true of the product.
+function signInButton(label) {
   const status = el("span", { class: "account-status" });
   const signIn = el("button", {
     class: "primary",
@@ -50,32 +58,71 @@ function landingHero() {
         signIn.disabled = false;
       }
     },
-  }, "Sign in with Google");
-  return el("section", { class: "card" },
-    el("h2", {}, "Welcome to the Music Intelligence Engine"),
-    el("p", {},
-      "Find radio stations and DJs, prepare outreach that references your "
-      + "releases, and send it from your own Gmail — all tracked in one "
-      + "place. Sign in to attach your music and send; browsing is open."),
-    el("div", { class: "actions-row" },
-      signIn,
-      el("a", { class: "buttonish subtle", href: stationsHref },
-        "Browse stations"),
-      el("a", { class: "buttonish subtle", href: tracksHref },
-        "My music"),
-      status));
+  }, label);
+  return { signIn, status };
+}
+
+function featureCard(title, body) {
+  return el("article", { class: "feature-card" },
+    el("h3", {}, title),
+    el("p", {}, body));
+}
+
+function landingPage() {
+  const { signIn, status } = signInButton("Sign in with Google");
+  return el("div", { class: "landing" },
+    el("section", { class: "landing-hero" },
+      el("p", { class: "landing-kicker" }, "Music promotion workspace"),
+      el("h1", { class: "landing-title" },
+        "Find the right radio stations and DJs for your music."),
+      el("p", { class: "landing-lead" },
+        "Music Intelligence Engine discovers radio stations and independent "
+        + "DJs from the public web, shows the contact and submission routes it "
+        + "can verify, and helps you prepare and track outreach that references "
+        + "your own releases."),
+      el("div", { class: "landing-cta" },
+        signIn,
+        el("a", { class: "buttonish", href: stationsHref }, "Browse stations"),
+        el("a", { class: "buttonish", href: djsHref }, "Browse DJs")),
+      status,
+      el("p", { class: "landing-fine" },
+        "Browsing stations and DJs is open to everyone. Signing in with "
+        + "Google unlocks your releases, your outreach records, and sending "
+        + "from your own connected mailbox.")),
+    el("section", { class: "landing-features" },
+      featureCard("Discover",
+        "Search radio stations and independent DJs, with the contact and "
+        + "submission routes each one actually publishes."),
+      featureCard("Prepare",
+        "Write outreach that references your release, its listening link and "
+        + "its story. Nothing about your music is invented."),
+      featureCard("Send & track", 
+        "Send from your own connected mailbox and keep a record of every "
+        + "attempt, response and follow-up.")),
+    el("section", { class: "card landing-start" },
+      el("h2", {}, "How it works"),
+      el("ol", { class: "landing-steps" },
+        el("li", {}, "Browse the public directories to find a fit."),
+        el("li", {}, "Sign in and add your releases in My music."),
+        el("li", {}, "Prepare outreach, then connect your mailbox to send.")),
+      el("div", { class: "actions-row" },
+        el("a", { class: "buttonish subtle", href: stationsHref },
+          "Browse stations"),
+        el("a", { class: "buttonish subtle", href: djsHref },
+          "Browse DJs"))));
 }
 
 export function renderDashboardView(root) {
+  if (!api.isLoggedIn()) {
+    root.append(landingPage());
+    return;
+  }
+
   root.append(
     el("h1", {}, "Dashboard"),
     el("p", { class: "dim" },
       "What's happening across the engine. This is an overview only — ",
       "prepare and track outreach from its own pages."));
-
-  if (!api.isLoggedIn()) {
-    root.append(landingHero());
-  }
 
   const slots = new Map([
     ["reads", el("div", { class: "stat-grid" },

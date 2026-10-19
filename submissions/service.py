@@ -127,8 +127,8 @@ def upload_track(repository, store, data, filename=None,
     return repository.save_track(row)
 
 
-def get_track(repository, track_id):
-    return repository.get_track(track_id)
+def get_track(repository, track_id, owner_user_id=None):
+    return repository.get_track(track_id, owner_user_id=owner_user_id)
 
 
 def normalize_listen_url(value):
@@ -306,12 +306,14 @@ def update_track_fields(repository, track_id, payload):
     return repository.save_track(updated)
 
 
-def list_tracks(repository, limit=50, offset=0, status=None):
+def list_tracks(repository, limit=50, offset=0, status=None,
+                 owner_user_id=None):
     if status is not None and status not in TRACK_STATUSES:
         raise ValueError(
             "'status' must be one of: " + ", ".join(TRACK_STATUSES))
     rows, total = repository.list_tracks(limit=limit, offset=offset,
-                                         status=status)
+                                         status=status,
+                                         owner_user_id=owner_user_id)
     return rows, total
 
 
