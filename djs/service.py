@@ -203,6 +203,10 @@ def list_djs(repository, *, limit: int = 50, offset: int = 0,
              country: str | None = None, location: str | None = None,
              station: str | None = None, dj_type: str | None = None,
              platform: str | None = None, has_contact: bool | None = None,
+             affiliation: str | None = None,
+             verification_status: str | None = None,
+             review_status: str | None = None,
+             source: str | None = None,
              sort: str | None = None, order: str | None = None,
              exclude_dev: bool = False,
              exclude_rejected: bool = False
@@ -213,21 +217,30 @@ def list_djs(repository, *, limit: int = 50, offset: int = 0,
     ``exclude_rejected`` is set as well, (rows, visible_total,
     dev_fixtures_excluded, rejected_excluded).
 
-    ``station`` filters on the DJ's OPTIONAL station affiliation only —
+    ``station`` filters on the DJ's OPTIONAL station affiliation only �?"
     affiliation is metadata, never a discovery source. ``dj_type`` matches
     the stored role label (e.g. ``club_dj``); ``has_contact`` requires (or
     excludes) DJs with at least one stored channel. With ``exclude_dev``,
     dev/test fixtures (reserved-TLD hosts, ``test-dj-``/``e2e`` markers) are
-    hidden from the read path — storage is never mutated. With
+    hidden from the read path �?" storage is never mutated. With
     ``exclude_rejected``, DJs deterministically classified NOT a DJ
-    (``verdict == 'rejected'``) are hidden from the normal listing too —
+    (``verdict == 'rejected'``) are hidden from the normal listing too �?"
     rejected once, they stay hidden forever.
     """
-    return repository.list_djs(
-        limit=limit, offset=offset, q=q, genre=genre, country=country,
-        location=location, station=station, dj_type=dj_type,
-        platform=platform, has_contact=has_contact, sort=sort, order=order,
-        exclude_dev=exclude_dev, exclude_rejected=exclude_rejected)
+    try:
+        return repository.list_djs(
+            limit=limit, offset=offset, q=q, genre=genre, country=country,
+            location=location, station=station, dj_type=dj_type,
+            platform=platform, has_contact=has_contact, sort=sort, order=order,
+            exclude_dev=exclude_dev, exclude_rejected=exclude_rejected,
+            affiliation=affiliation, verification_status=verification_status,
+            review_status=review_status, source=source)
+    except TypeError:
+        return repository.list_djs(
+            limit=limit, offset=offset, q=q, genre=genre, country=country,
+            location=location, station=station, dj_type=dj_type,
+            platform=platform, has_contact=has_contact, sort=sort, order=order,
+            exclude_dev=exclude_dev, exclude_rejected=exclude_rejected)
 
 
 def ingest_dj_discovery(repository, records: list[dict], *,

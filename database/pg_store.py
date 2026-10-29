@@ -1343,7 +1343,11 @@ class PostgresStorage(AuthStoreMixin):
                  sort: str | None = None,
                  order: str | None = None,
                  exclude_dev: bool = False,
-                 exclude_rejected: bool = False
+                 exclude_rejected: bool = False,
+                 affiliation: str | None = None,
+                 verification_status: str | None = None,
+                 review_status: str | None = None,
+                 source: str | None = None
                  ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
                    | tuple[list[dict], int, int, int]:
         clauses, params = [], []
@@ -1381,6 +1385,28 @@ class PostgresStorage(AuthStoreMixin):
         if platform:
             clauses.append("lower(coalesce(platform,'')) ILIKE lower(%s)")
             params.append(f"%{platform}%")
+        if affiliation:
+            aff = str(affiliation).strip().lower()
+            if aff in ("radio_affiliated", "radio-affiliated", "affiliated", "radio"):
+                clauses.append("(coalesce(station_key,'') <> '' OR coalesce(station_name,'') <> '')")
+            elif aff in ("independent", "indep", "solo"):
+                clauses.append("(coalesce(station_key,'') = '' AND coalesce(station_name,'') = '')")
+            elif aff in ("multiple", "multi"):
+                clauses.append("(coalesce(station_key,'') <> '' OR coalesce(station_name,'') <> '')")  # basic heuristic
+            elif aff in ("unknown", "affiliation_unknown"):
+                clauses.append("(coalesce(station_key,'') = '' AND coalesce(station_name,'') = '')")
+            elif aff in ("needs_review", "needs review"):
+                clauses.append("COALESCE(verification::jsonb->>'review_status','') ILIKE %s")
+                params.append("%needs_review%")
+        if verification_status:
+            clauses.append("COALESCE(verification::jsonb->>'status','') ILIKE %s")
+            params.append(f"%{verification_status}%")
+        if review_status:
+            clauses.append("COALESCE(verification::jsonb->>'review_status','') ILIKE %s")
+            params.append(f"%{review_status}%")
+        if source:
+            clauses.append("COALESCE(verification::jsonb->>'discovered_from','') ILIKE %s")
+            params.append(f"%{source}%")
         has_contact_sql = (
             "EXISTS (SELECT 1 FROM dj_channels c WHERE c.dj_id = djs.dj_id)")
         if has_contact is True:

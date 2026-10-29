@@ -986,12 +986,18 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                  dj_type: str | None = None,
                  platform: str | None = None,
                  has_contact: bool | None = None,
+                 affiliation: str | None = None,
+                 verification_status: str | None = None,
+                 review_status: str | None = None,
+                 source: str | None = None,
                  sort: str | None = Query(None, pattern="^(name|station|discovered)$"),
                  order: str | None = Query(None, pattern="^(asc|desc)$")):
         rows, total, dev_excluded, rejected_excluded = dj_service.list_djs(
             storage, limit=limit, offset=offset, q=q, genre=genre,
             country=country, location=location, station=station,
             dj_type=dj_type, platform=platform, has_contact=has_contact,
+            affiliation=affiliation, verification_status=verification_status,
+            review_status=review_status, source=source,
             sort=sort, order=order, exclude_dev=True,
             exclude_rejected=True)
         return success_body({"djs": [dj_summary(r) for r in rows],
