@@ -37,6 +37,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 from typing import Any, Sequence
 from urllib.parse import urlencode, urlsplit
 
@@ -55,6 +57,12 @@ SERPAPI_API_KEY_ENV = "SERPAPI_API_KEY"
 DEFAULT_BASE_URL = "https://serpapi.com/search"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_USER_AGENT = "MusicIntelligenceEngine/0.5 (+independent DJ discovery)"
+
+RETRYABLE_ERROR_KINDS = {"http_status", "connection_error", "timeout", "dns_error", "ssl_error", "transport_exception", "provider_error"}
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BASE_DELAY = 0.5
+DEFAULT_RETRY_MAX_DELAY = 30.0
 
 
 def _clean(value: Any) -> str | None:
@@ -173,8 +181,41 @@ class SerpApiSearchDjsProvider:
             city=_clean_geo(entry.get("city")),
         )
 
+    def _is_retryable(self, result) -> tuple[bool, int | None]:
+        error_kind = getattr(result, "error_kind", None)
+        status = getattr(result, "status", None)
+        if error_kind == "http_status" and status in RETRYABLE_STATUS_CODES:
+            return True, status
+        if error_kind in {"connection_error", "timeout", "dns_error", "ssl_error"}:
+            return True, status
+        return False, status
+
+    def _get_retry_after(self, result) -> float | None:
+        # Try to extract Retry-After from response headers if present
+        headers = getattr(result, "headers", None)
+        if not headers:
+            return None
+        try:
+            if isinstance(headers, dict):
+                ra = headers.get("Retry-After") or headers.get("retry-after")
+            else:
+                ra = headers.get("Retry-After") or headers.get("retry-after") if hasattr(headers, "get") else None
+            if ra:
+                # Try seconds first
+                try:
+                    return float(str(ra).strip())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None
+
     def search(
         self, request: DiscoveryRequest, queries: Sequence[str],
+        *,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY,
+        retry_max_delay: float = DEFAULT_RETRY_MAX_DELAY,
     ) -> list[Candidate]:
         if not self.configured:
             raise DiscoveryProviderNotConfigured(self._not_configured_message())
@@ -182,33 +223,62 @@ class SerpApiSearchDjsProvider:
         out: list[Candidate] = []
         seen_urls: set[str] = set()
         self.failures = []
+        seen_queries: set[str] = set()
         for query in queries:
             if len(out) >= request.limit:
                 break
+            norm_q = str(query).strip().lower()
+            if norm_q in seen_queries:
+                continue  # deduplicate identical queries
+            seen_queries.add(norm_q)
             params = {"engine": "google", "q": query,
                       "api_key": self._api_key}
             sep = "&" if "?" in self.base_url else "?"
             url = f"{self.base_url}{sep}{urlencode(params)}"
-            try:
-                result = self._fetcher.fetch(url, timeout=self.timeout)
-            except Exception as exc:
-                failure = self._query_failure(
-                    query, "provider_error",
-                    f"{type(exc).__name__}: {exc}")
-                logger.warning(
-                    "serpapi_google transport failure: %s; "
-                    "continuing with remaining queries.", failure.message)
-                self.failures.append(failure)
-                continue
-            if not getattr(result, "ok", False):
+            attempt = 0
+            result = None
+            while attempt <= max_retries:
+                try:
+                    result = self._fetcher.fetch(url, timeout=self.timeout)
+                except Exception as exc:
+                    if attempt < max_retries:
+                        delay = min(retry_max_delay, retry_base_delay * (2 ** attempt) + random.uniform(0, 0.1))
+                        time.sleep(delay)
+                        attempt += 1
+                        continue
+                    failure = self._query_failure(
+                        query, "provider_error",
+                        f"{type(exc).__name__}: {exc}")
+                    logger.warning(
+                        "serpapi_google transport failure: %s; "
+                        "continuing with remaining queries.", failure.message)
+                    self.failures.append(failure)
+                    break
+                if getattr(result, "ok", False):
+                    break  # success
+                retryable, status = self._is_retryable(result)
+                if retryable and attempt < max_retries:
+                    retry_after = self._get_retry_after(result)
+                    if retry_after and retry_after > 0:
+                        delay = min(retry_max_delay, max(retry_after, retry_base_delay * (2 ** attempt)))
+                    else:
+                        delay = min(retry_max_delay, retry_base_delay * (2 ** attempt) + random.uniform(0, 0.1))
+                    logger.debug("serpapi_google retrying query=%s attempt=%s status=%s delay=%.2f", query, attempt + 1, status, delay)
+                    time.sleep(delay)
+                    attempt += 1
+                    continue
+                # Not retryable or out of retries
                 failure = self._query_failure(
                     query,
                     getattr(result, "error_kind", None) or "provider_error",
-                    getattr(result, "error_message", None) or "")
+                    getattr(result, "error_message", None) or f"HTTP {status}" if status else "")
                 logger.warning(
                     "serpapi_google transport failure: %s; "
                     "continuing with remaining queries.", failure.message)
                 self.failures.append(failure)
+                result = None
+                break
+            if result is None or not getattr(result, "ok", False):
                 continue
             if not getattr(result, "body", None):
                 continue
@@ -219,10 +289,7 @@ class SerpApiSearchDjsProvider:
             if not isinstance(payload, dict):
                 continue
             # SerpAPI reports provider errors as a JSON body, e.g.
-            # ``{"error": "..."}`` (often HTTP 200 with an error payload) —
-            # record an honest Failure with the provider's own message and
-            # continue with the remaining queries (partial-failure behavior),
-            # never fabricate a result for a failed query.
+            # ``{"error": "..."}`` (often HTTP 200 with an error payload)
             if payload.get("error"):
                 failure = self._query_failure(
                     query, "provider_error",

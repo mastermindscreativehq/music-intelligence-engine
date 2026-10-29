@@ -111,16 +111,24 @@ def run_radio_discovery_job(repository, config: dict, *,
     enriched = enrichment.enrich_records(qualified + needs_review)
 
     ingest = ingest_station_discovery(repository, enriched.records)
+    provider_failures = len(getattr(discovery, "failures", None) or [])
     return {
         "provider": _provider_label(provider),
         "queries_run": len(discovery.queries),
+        "searches_succeeded": max(0, len(discovery.queries) - provider_failures),
+        "searches_failed": provider_failures,
         "candidates_found": len(discovery.records),
         "candidates_qualified": len(qualified),
         "needs_review_stored": len(needs_review),
         "quarantined": len(rejected),
         "records_ingested": int(ingest.get("records_accepted") or 0),
+        "duplicates_skipped": int(ingest.get("duplicates_removed") or 0)
+                              + int(ingest.get("merged") or 0),
         "duplicates": int(ingest.get("duplicates_removed") or 0)
                       + int(ingest.get("merged") or 0),
-        "failures": len(discovery.failures) + enriched.failure_count
+        "failures": provider_failures + enriched.failure_count
                     + len(ingest.get("failures") or []),
+        "failure_categories": {"provider": provider_failures,
+                               "enrichment": enriched.failure_count,
+                               "ingest": len(ingest.get("failures") or [])},
     }
