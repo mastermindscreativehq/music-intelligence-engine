@@ -522,13 +522,20 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                       format: str | None = None,
                       country: str | None = None,
                       min_confidence: float | None = Query(None, ge=0.0,
-                                                           le=1.0)):
+                                                           le=1.0),
+                      station_type: str | None = None,
+                      category: str | None = None,
+                      qualification_status: str | None = None,
+                      review_status: str | None = None):
         if status is None:
             rows, total, dev_excluded, quarantined_excluded = storage.list_stations(
                 limit=limit, offset=offset, q=q, status=None, genre=genre,
                 format_filter=format, country=country,
                 min_confidence=min_confidence, exclude_dev=True,
-                exclude_quarantined=True)
+                exclude_quarantined=True,
+                station_type=station_type, category=category,
+                qualification_status=qualification_status,
+                review_status=review_status)
         else:
             # A status filter refines the SAME normal listing and must never
             # re-admit dev fixtures or quarantined rows.
@@ -536,7 +543,10 @@ def create_app(storage, *, track_store=None, link_fetcher=None,
                 limit=limit, offset=offset, q=q, status=status, genre=genre,
                 format_filter=format, country=country,
                 min_confidence=min_confidence, exclude_dev=True,
-                exclude_quarantined=True)
+                exclude_quarantined=True,
+                station_type=station_type, category=category,
+                qualification_status=qualification_status,
+                review_status=review_status)
         return success_body({
             "stations": [station_summary(r) for r in rows],
             "total": total, "limit": limit, "offset": offset,

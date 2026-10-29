@@ -618,7 +618,11 @@ class PostgresStorage(AuthStoreMixin):
                       country: str | None = None,
                       min_confidence: float | None = None,
                       exclude_dev: bool = False,
-                      exclude_quarantined: bool = False
+                      exclude_quarantined: bool = False,
+                      station_type: str | None = None,
+                      category: str | None = None,
+                      qualification_status: str | None = None,
+                      review_status: str | None = None
                       ) -> tuple[list[dict], int] | tuple[list[dict], int, int] \
                             | tuple[list[dict], int, int, int]:
         clauses, params = [], []
@@ -628,6 +632,11 @@ class PostgresStorage(AuthStoreMixin):
         if status:
             clauses.append("status = %s")
             params.append(status)
+        if station_type or category:
+            st = (station_type or category)
+            clauses.append("(LOWER(COALESCE(station_type,'')) = LOWER(%s) OR LOWER(COALESCE(station_type,'')) ILIKE %s)")
+            params.append(st)
+            params.append(f"%{st}%")
         if genre:
             clauses.append("genres::text ILIKE %s")
             params.append(f"%{genre}%")
@@ -635,11 +644,33 @@ class PostgresStorage(AuthStoreMixin):
             clauses.append("formats::text ILIKE %s")
             params.append(f"%{format_filter}%")
         if country:
-            clauses.append("country = %s")
+            clauses.append("LOWER(COALESCE(country,'')) = LOWER(%s)")
             params.append(country)
         if min_confidence is not None:
             clauses.append("confidence_score >= %s")
             params.append(float(min_confidence))
+        if qualification_status:
+            qs = str(qualification_status).strip().lower()
+            if qs in ('qualified', 'qual'):
+                clauses.append("COALESCE(raw_metadata::jsonb->'qualification'->>'verdict','') = 'qualified'")
+            elif qs in ('needs_review', 'review', 'needs-review'):
+                clauses.append("COALESCE(raw_metadata::jsonb->'qualification'->>'verdict','') = 'needs_review'")
+            elif qs in ('rejected', 'reject'):
+                clauses.append("COALESCE(raw_metadata::jsonb->'qualification'->>'verdict','') = 'rejected'")
+            else:
+                clauses.append("COALESCE(raw_metadata::jsonb->'qualification'->>'verdict','') ILIKE %s")
+                params.append(f"%{qs}%")
+        if review_status:
+            rs = str(review_status).strip().lower()
+            if rs in ('needs_review', 'review'):
+                clauses.append("COALESCE(raw_metadata::jsonb->'qualification'->>'verdict','') = 'needs_review'")
+            elif rs in ('reviewed', 'done'):
+                clauses.append("COALESCE(raw_metadata::jsonb->'qualification'->>'verdict','') <> 'needs_review'")
+            elif rs in ('excluded',):
+                clauses.append("COALESCE(raw_metadata::jsonb->'exclusion'->>'active','false') IN ('true','1')")
+            else:
+                clauses.append("(COALESCE(raw_metadata::jsonb->'qualification'->>'verdict','') ILIKE %s OR COALESCE(raw_metadata::jsonb->'exclusion'->>'active','false') ILIKE %s)")
+                params.extend([f"%{rs}%", f"%{rs}%"])
         base_where = " AND ".join(clauses)
         where = f"WHERE {base_where}" if base_where else ""
 

@@ -39,11 +39,25 @@ function filterForm(current, onApply) {
     return node;
   };
 
+  const select = (name, choices, value) => {
+    const node = el(
+      "select",
+      { name },
+      el("option", { value: "", selected: !value }, "All"),
+      choices.map((choice) =>
+        el("option", {
+          value: choice.value,
+          selected: value === choice.value,
+        }, choice.label)),
+    );
+    return node;
+  };
+
   const limitSelect = el(
     "select", { name: "limit" },
     LIMIT_CHOICES.map((value) =>
       el("option", { value, selected: Number(current.limit || 50) === value },
-        `${value} / page`)),
+        ${value} / page)),
   );
 
   const form = el(
@@ -54,8 +68,21 @@ function filterForm(current, onApply) {
       onApply(Object.fromEntries(data.entries()));
     } },
     field("search station", text("q", "e.g. KEXP", current.q)),
+    field("category/type", text("station_type", "e.g. college, community, commercial", current.station_type || current.category)),
+    field("qualification", select("qualification_status", [
+      { value: "qualified", label: "Qualified" },
+      { value: "needs_review", label: "Needs review" },
+      { value: "rejected", label: "Rejected" },
+    ], current.qualification_status)),
+    field("review status", select("review_status", [
+      { value: "needs_review", label: "Needs review" },
+      { value: "reviewed", label: "Reviewed/other" },
+      { value: "excluded", label: "Excluded" },
+    ], current.review_status)),
     field("genre", text("genre", "e.g. rock", current.genre)),
+    field("format", text("format", "e.g. news, jazz", current.format)),
     field("country", text("country", "e.g. US", current.country)),
+    field("min confidence", text("min_confidence", "e.g. 0.5", current.min_confidence)),
     field("page size", limitSelect),
     el("button", { class: "primary", type: "submit" }, "Search"),
     el("button", {
@@ -135,8 +162,8 @@ export function renderListView(root) {
       "for the people who decide about music."),
     filterForm(state, (applied) => {
       state = { ...state, offset: 0 };
-      for (const key of ["q", "genre", "country"]) {
-        if (applied[key]) state[key] = applied[key];
+      for (const key of ["q", "genre", "country", "format", "station_type", "category", "qualification_status", "review_status", "min_confidence", "status"]) {
+        if (applied[key] && applied[key] !== "") state[key] = applied[key];
         else delete state[key];
       }
       if (applied.limit) state.limit = Number(applied.limit);
