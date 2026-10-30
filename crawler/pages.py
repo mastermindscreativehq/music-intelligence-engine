@@ -6,6 +6,7 @@ Script/style content is ignored. Link hrefs are resolved against the page URL.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
@@ -28,6 +29,8 @@ class ParsedPage:
     mailtos: list[str] = field(default_factory=list)
     # <form> action URLs (absolute) — evidence of an on-page submission form.
     forms: list[str] = field(default_factory=list)
+    # Extracted JSON-LD structured data (best-effort, never invents facts).
+    json_ld: list[dict] = field(default_factory=list)
 
 
 class _PageParser(HTMLParser):
@@ -38,11 +41,15 @@ class _PageParser(HTMLParser):
         self.links: list[tuple[str, str]] = []       # (href, anchor text)
         self.mailtos: list[str] = []
         self.forms: list[str] = []                   # form action URLs
+        self.json_ld: list[dict] = []
         self._skip_depth = 0                          # inside script/style
         self._in_title = False
         self._anchor_href: str | None = None
         self._anchor_text: list[str] = []
         self._page_url: str = ""
+        self._in_jsonld = False
+        self._jsonld_type: str | None = None
+        self._jsonld_parts: list[str] = []
 
     # Block-level tags that implicitly terminate an unterminated <title>
     # (mirrors browser recovery for malformed documents).
@@ -52,10 +59,19 @@ class _PageParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
-        if tag in ("script", "style"):
+        attrs_dict = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "script":
+            stype = (attrs_dict.get("type") or "").strip().lower()
+            if "ld+json" in stype:
+                self._in_jsonld = True
+                self._jsonld_type = "ld+json"
+                self._jsonld_parts = []
+                return
             self._skip_depth += 1
             return
-        attrs_dict = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "style":
+            self._skip_depth += 1
+            return
         if tag == "title":
             self._in_title = True
         else:
@@ -90,6 +106,28 @@ class _PageParser(HTMLParser):
             self._skip_depth -= 1
         elif tag == "title" and self._in_title:
             self._in_title = False
+        elif tag == "script" and self._in_jsonld:
+            raw = "".join(self._jsonld_parts)
+            self._in_jsonld = False
+            try:
+                parsed = json.loads(raw)
+                # Could be array or object
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            self.json_ld.append(item)
+                elif isinstance(parsed, dict):
+                    # Handle @graph
+                    if isinstance(parsed.get("@graph"), list):
+                        for item in parsed["@graph"]:
+                            if isinstance(item, dict):
+                                self.json_ld.append(item)
+                    else:
+                        self.json_ld.append(parsed)
+            except Exception:
+                pass
+            self._jsonld_parts = []
+            self._jsonld_type = None
         elif tag == "a" and self._anchor_href is not None:
             anchor = " ".join("".join(self._anchor_text).split())
             self.links.append((self._anchor_href, anchor))
@@ -97,6 +135,9 @@ class _PageParser(HTMLParser):
             self._anchor_text = []
 
     def handle_data(self, data):
+        if self._in_jsonld:
+            self._jsonld_parts.append(data)
+            return
         if self._skip_depth > 0:
             return
         if self._in_title:
@@ -143,4 +184,5 @@ def parse_html(page_url: str, html: str) -> ParsedPage:
         if address:
             parsed.mailtos.append(address)
     parsed.forms = list(parser.forms)
+    parsed.json_ld = list(parser.json_ld)
     return parsed

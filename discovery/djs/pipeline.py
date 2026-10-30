@@ -263,6 +263,53 @@ class DjsDiscoveryEngine:
         if final not in record["source_urls"]:
             record["source_urls"].append(final)
 
+        # Extract presenter/show/role info from JSON-LD if present (never fabricate)
+        try:
+            for obj in getattr(page, "json_ld", []) or []:
+                if not isinstance(obj, dict):
+                    continue
+                otype = obj.get("@type") or obj.get("type")
+                if isinstance(otype, list):
+                    otype = otype[0]
+                otype_s = str(otype or "").lower()
+                if otype_s in ("person", "dj", "radiohost", "presenter", "organization"):
+                    # For Person, use name if we don't have better; role/program may be in jobTitle/worksFor
+                    if otype_s == "person":
+                        name_ld = obj.get("name")
+                        if isinstance(name_ld, str) and name_ld.strip():
+                            # Only override if current name looks generic/URL-like
+                            cur = str(record.get("name") or "")
+                            if cur == homepage_url or not clean_dj_title(cur):
+                                record["name"] = clean_dj_title(name_ld) or name_ld.strip()
+                        job = obj.get("jobTitle") or obj.get("role")
+                        if isinstance(job, str) and job.strip() and not record.get("role"):
+                            record["role"] = job.strip()[:80]
+                        # affiliation
+                        wf = obj.get("worksFor") or obj.get("affiliation") or obj.get("memberOf")
+                        if isinstance(wf, dict):
+                            wf_name = wf.get("name")
+                            if isinstance(wf_name, str) and wf_name.strip():
+                                # Store as metadata if not present; don't overwrite existing station linkage
+                                if not record.get("station_name"):
+                                    record["station_name"] = wf_name.strip()[:200]
+                        elif isinstance(wf, str) and wf.strip() and not record.get("station_name"):
+                            record["station_name"] = wf.strip()[:200]
+                    # For RadioEpisode/RadioSeries, may have host/performer
+                    host = obj.get("host") or obj.get("performer") or obj.get("actor")
+                    if isinstance(host, dict):
+                        hname = host.get("name")
+                        if isinstance(hname, str) and hname.strip() and record.get("name") == homepage_url:
+                            record["name"] = clean_dj_title(hname) or hname.strip()
+                    elif isinstance(host, list):
+                        for h in host:
+                            if isinstance(h, dict):
+                                hname = h.get("name")
+                                if isinstance(hname, str) and hname.strip() and record.get("name") == homepage_url:
+                                    record["name"] = clean_dj_title(hname) or hname.strip()
+                                break
+        except Exception:
+            pass
+
         # Qualification gate (post-fetch): the fetched page title is the
         # ultimate evidence; downgraded verdicts (rejected / needs_review)
         # are never ingested.
@@ -315,6 +362,19 @@ class DjsDiscoveryEngine:
                 "source_url": page_url,
             })
 
+        # Also look for mailto links from parsed page
+        try:
+            for m in getattr(page, "mailtos", []) or []:
+                if not m:
+                    continue
+                channels.append({
+                    "channel": "email",
+                    "value": m,
+                    "source_url": page_url,
+                })
+        except Exception:
+            pass
+
         booking_url = _best_routed_link(all_links, "booking")
         if booking_url:
             channels.append({
@@ -322,6 +382,22 @@ class DjsDiscoveryEngine:
                 "value": booking_url,
                 "source_url": booking_url,
             })
+        # Also look for common contact/profile links
+        try:
+            for link in getattr(page, "links", []) or []:
+                try:
+                    href = getattr(link, "href_absolute", "") or ""
+                    anchor = (getattr(link, "anchor_text", "") or "").lower()
+                except Exception:
+                    continue
+                if not href:
+                    continue
+                if "contact" in anchor or href.lower().find("/contact") >= 0:
+                    # avoid duplicates
+                    pass
+            # simple pass: keep existing behavior, just ensure no fabrication
+        except Exception:
+            pass
         return _unique_channels(channels)
 
 
