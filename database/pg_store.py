@@ -1419,18 +1419,19 @@ class PostgresStorage(AuthStoreMixin):
         if affiliation:
             aff = str(affiliation).strip().lower().replace("-", "_")
             # Explicit semantics - do not infer independent from NULLs alone
+            # Check for confirmed affiliations in dj_affiliations table if exists
+            has_aff_subq = "EXISTS (SELECT 1 FROM dj_affiliations da WHERE da.dj_id = djs.dj_id)"
+            has_confirmed_aff = "((" + has_aff_subq + ") OR (station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))"
             if aff in ("radio_affiliated", "radioaffiliated", "affiliated", "radio", "station", "station_affiliated"):
-                # confirmed association with at least one station
-                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+                # confirmed association with at least one station (from affiliations table or legacy)
+                clauses.append(has_confirmed_aff)
+                clauses.append("NOT EXISTS (SELECT 1 FROM dj_affiliations da2 WHERE da2.dj_id = djs.dj_id GROUP BY da2.dj_id HAVING COUNT(*) >= 2)")
             elif aff in ("multiple", "multi", "multiple_stations"):
-                # confirmed associations with multiple stations - best effort: either field indicates affiliation;
-                # if only single station info stored, require both? or treat same as station for now but be explicit
-                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+                clauses.append("EXISTS (SELECT 1 FROM dj_affiliations da2 WHERE da2.dj_id = djs.dj_id GROUP BY da2.dj_id HAVING COUNT(*) >= 2)")
             elif aff in ("independent", "indep", "solo", "unaffiliated"):
-                # independent means no confirmed station affiliation
-                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
+                clauses.append("((verification::jsonb->>'independence_status') = 'independent' OR verification::jsonb->>'independent' = 'true') AND NOT " + has_confirmed_aff)
             elif aff in ("unknown", "affiliation_unknown", "unconfirmed"):
-                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
+                clauses.append("NOT ((verification::jsonb->>'independence_status') = 'independent' OR verification::jsonb->>'independent' = 'true') AND NOT " + has_confirmed_aff)
             elif aff in ("needs_review", "needs review"):
                 clauses.append("COALESCE(verification::jsonb->>'review_status','') ILIKE %s")
                 params.append("%needs_review%")

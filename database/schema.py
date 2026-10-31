@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -564,6 +564,22 @@ CREATE TABLE IF NOT EXISTS outreach_messages (
 ALTER TABLE outreach_messages ADD COLUMN owner_user_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_outreach_owner
     ON outreach_messages(owner_user_id);
+"""),
+    (16, """
+CREATE TABLE IF NOT EXISTS dj_affiliations (
+    aff_id TEXT PRIMARY KEY,
+    dj_id TEXT NOT NULL REFERENCES djs(dj_id) ON DELETE CASCADE,
+    station_key TEXT,
+    station_name TEXT,
+    role TEXT,
+    source_url TEXT,
+    verification_status TEXT NOT NULL DEFAULT 'unverified',
+    evidence TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dj_affil_dj ON dj_affiliations(dj_id);
+CREATE INDEX IF NOT EXISTS idx_dj_affil_station ON dj_affiliations(station_key);
 """),
 ]
 

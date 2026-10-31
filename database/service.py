@@ -1793,14 +1793,18 @@ class PersistenceService(AuthStoreMixin):
             params.append("%" + _like_escape(platform) + "%")
         if affiliation:
             aff = str(affiliation).strip().lower().replace("-", "_")
+            has_aff_subq = "EXISTS (SELECT 1 FROM dj_affiliations da WHERE da.dj_id = djs.dj_id)"
+            has_confirmed_aff = "((" + has_aff_subq + ") OR (station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))"
             if aff in ("radio_affiliated", "radioaffiliated", "affiliated", "radio", "station", "station_affiliated"):
-                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+                clauses.append(has_confirmed_aff)
+                clauses.append("NOT EXISTS (SELECT 1 FROM dj_affiliations da2 WHERE da2.dj_id = djs.dj_id GROUP BY da2.dj_id HAVING COUNT(*) >= 2)")
             elif aff in ("multiple", "multi", "multiple_stations"):
-                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+                clauses.append("EXISTS (SELECT 1 FROM dj_affiliations da2 WHERE da2.dj_id = djs.dj_id GROUP BY da2.dj_id HAVING COUNT(*) >= 2)")
             elif aff in ("independent", "indep", "solo", "unaffiliated"):
-                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
+                # affirmative evidence only
+                clauses.append("((LOWER(COALESCE(verification,'')) LIKE '%\"independence_status\":\"independent\"%') OR (LOWER(COALESCE(verification,'')) LIKE '%\"independent\":true%') OR (LOWER(COALESCE(verification,'')) LIKE '%affiliation\":\"independent\"%')) AND NOT " + has_confirmed_aff)
             elif aff in ("unknown", "affiliation_unknown", "unconfirmed"):
-                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
+                clauses.append("NOT ((LOWER(COALESCE(verification,'')) LIKE '%\"independence_status\":\"independent\"%') OR (LOWER(COALESCE(verification,'')) LIKE '%\"independent\":true%') OR (LOWER(COALESCE(verification,'')) LIKE '%affiliation\":\"independent\"%')) AND NOT " + has_confirmed_aff)
             elif aff in ("needs_review", "needs review"):
                 clauses.append("(LOWER(COALESCE(verification,'')) LIKE '%needs_review%')")
             else:
