@@ -1747,6 +1747,10 @@ class PersistenceService(AuthStoreMixin):
                  dj_type: str | None = None,
                  platform: str | None = None,
                  has_contact: bool | None = None,
+                 affiliation: str | None = None,
+                 verification_status: str | None = None,
+                 review_status: str | None = None,
+                 source: str | None = None,
                  sort: str | None = None,
                  order: str | None = None,
                  exclude_dev: bool = False,
@@ -1787,6 +1791,43 @@ class PersistenceService(AuthStoreMixin):
         if platform:
             clauses.append("platform LIKE ? ESCAPE '\\'")
             params.append("%" + _like_escape(platform) + "%")
+        if affiliation:
+            aff = str(affiliation).strip().lower().replace("-", "_")
+            if aff in ("radio_affiliated", "radioaffiliated", "affiliated", "radio", "station", "station_affiliated"):
+                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+            elif aff in ("multiple", "multi", "multiple_stations"):
+                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+            elif aff in ("independent", "indep", "solo", "unaffiliated"):
+                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
+            elif aff in ("unknown", "affiliation_unknown", "unconfirmed"):
+                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
+            elif aff in ("needs_review", "needs review"):
+                clauses.append("(LOWER(COALESCE(verification,'')) LIKE '%needs_review%')")
+            else:
+                raise ValueError(f"Invalid affiliation filter: {affiliation}")
+        if verification_status:
+            vs = str(verification_status).strip().lower()
+            if vs in ("verified", "verified_status"):
+                clauses.append("(LOWER(COALESCE(verification,'')) LIKE '%\"verdict\"%' AND LOWER(COALESCE(verification,'')) LIKE '%qualified%')")
+            elif vs in ("needs_verification", "needs verification", "unverified"):
+                clauses.append("(LOWER(COALESCE(verification,'')) NOT LIKE '%qualified%')")
+            elif vs in ("not_qualified", "rejected"):
+                clauses.append("(LOWER(COALESCE(verification,'')) LIKE '%rejected%')")
+            else:
+                clauses.append("(LOWER(COALESCE(verification,'')) LIKE ?)")
+                params.append("%" + _like_escape(verification_status) + "%")
+        if review_status:
+            rs = str(review_status).strip().lower()
+            if rs in ("needs_review", "needs review", "review_required"):
+                clauses.append("(LOWER(COALESCE(verification,'')) LIKE '%review_status%' AND LOWER(COALESCE(verification,'')) LIKE '%needs_review%')")
+            elif rs in ("reviewed", "done", "complete"):
+                clauses.append("(LOWER(COALESCE(verification,'')) LIKE '%review_status%' AND LOWER(COALESCE(verification,'')) LIKE '%reviewed%')")
+            else:
+                clauses.append("(LOWER(COALESCE(verification,'')) LIKE ?)")
+                params.append("%" + _like_escape(review_status) + "%")
+        if source:
+            clauses.append("(LOWER(COALESCE(verification,'')) LIKE '%discovered_from%' AND LOWER(COALESCE(verification,'')) LIKE ?)")
+            params.append("%" + _like_escape(source) + "%")
         has_contact_sql = (
             "EXISTS (SELECT 1 FROM dj_channels c WHERE c.dj_id = djs.dj_id)")
         if has_contact is True:

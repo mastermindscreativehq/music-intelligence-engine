@@ -1417,24 +1417,49 @@ class PostgresStorage(AuthStoreMixin):
             clauses.append("lower(coalesce(platform,'')) ILIKE lower(%s)")
             params.append(f"%{platform}%")
         if affiliation:
-            aff = str(affiliation).strip().lower()
-            if aff in ("radio_affiliated", "radio-affiliated", "affiliated", "radio"):
-                clauses.append("(coalesce(station_key,'') <> '' OR coalesce(station_name,'') <> '')")
-            elif aff in ("independent", "indep", "solo"):
-                clauses.append("(coalesce(station_key,'') = '' AND coalesce(station_name,'') = '')")
-            elif aff in ("multiple", "multi"):
-                clauses.append("(coalesce(station_key,'') <> '' OR coalesce(station_name,'') <> '')")  # basic heuristic
-            elif aff in ("unknown", "affiliation_unknown"):
-                clauses.append("(coalesce(station_key,'') = '' AND coalesce(station_name,'') = '')")
+            aff = str(affiliation).strip().lower().replace("-", "_")
+            # Explicit semantics - do not infer independent from NULLs alone
+            if aff in ("radio_affiliated", "radioaffiliated", "affiliated", "radio", "station", "station_affiliated"):
+                # confirmed association with at least one station
+                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+            elif aff in ("multiple", "multi", "multiple_stations"):
+                # confirmed associations with multiple stations - best effort: either field indicates affiliation;
+                # if only single station info stored, require both? or treat same as station for now but be explicit
+                clauses.append("((station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))")
+            elif aff in ("independent", "indep", "solo", "unaffiliated"):
+                # independent means no confirmed station affiliation
+                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
+            elif aff in ("unknown", "affiliation_unknown", "unconfirmed"):
+                clauses.append("((station_key IS NULL OR station_key = '') AND (station_name IS NULL OR station_name = ''))")
             elif aff in ("needs_review", "needs review"):
                 clauses.append("COALESCE(verification::jsonb->>'review_status','') ILIKE %s")
                 params.append("%needs_review%")
+            else:
+                raise ValueError(f"Invalid affiliation filter: {affiliation}")
         if verification_status:
-            clauses.append("COALESCE(verification::jsonb->>'status','') ILIKE %s")
-            params.append(f"%{verification_status}%")
+            vs = str(verification_status).strip().lower()
+            # support aliases: verified/needs_verification/not_qualified
+            if vs in ("verified", "verified_status"):
+                clauses.append("(COALESCE(verification::jsonb->'classification'->>'verdict','') = 'qualified')")
+            elif vs in ("needs_verification", "needs verification", "unverified"):
+                clauses.append("(COALESCE(verification::jsonb->'classification'->>'verdict','') <> 'qualified' OR verification::jsonb->'classification' IS NULL)")
+            elif vs in ("not_qualified", "rejected"):
+                clauses.append("(COALESCE(verification::jsonb->'classification'->>'verdict','') = 'rejected')")
+            else:
+                # try both paths
+                clauses.append("(COALESCE(verification::jsonb->'classification'->>'verdict','') ILIKE %s OR COALESCE(verification::jsonb->>'status','') ILIKE %s)")
+                params.extend([f"%{verification_status}%", f"%{verification_status}%"])
         if review_status:
-            clauses.append("COALESCE(verification::jsonb->>'review_status','') ILIKE %s")
-            params.append(f"%{review_status}%")
+            rs = str(review_status).strip().lower()
+            if rs in ("needs_review", "needs review", "review_required"):
+                clauses.append("(COALESCE(verification::jsonb->>'review_status','') ILIKE %s OR COALESCE(verification::jsonb->'classification'->>'review_status','') ILIKE %s)")
+                params.extend(["%needs_review%", "%needs_review%"])
+            elif rs in ("reviewed", "done", "complete"):
+                clauses.append("(COALESCE(verification::jsonb->>'review_status','') ILIKE %s OR COALESCE(verification::jsonb->'classification'->>'review_status','') ILIKE %s)")
+                params.extend(["%reviewed%", "%reviewed%"])
+            else:
+                clauses.append("(COALESCE(verification::jsonb->>'review_status','') ILIKE %s OR COALESCE(verification::jsonb->'classification'->>'review_status','') ILIKE %s OR COALESCE(verification::jsonb->>'status','') ILIKE %s)")
+                params.extend([f"%{review_status}%", f"%{review_status}%", f"%{review_status}%"])
         if source:
             clauses.append("COALESCE(verification::jsonb->>'discovered_from','') ILIKE %s")
             params.append(f"%{source}%")
