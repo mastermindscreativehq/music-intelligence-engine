@@ -1419,19 +1419,18 @@ class PostgresStorage(AuthStoreMixin):
         if affiliation:
             aff = str(affiliation).strip().lower().replace("-", "_")
             # Explicit semantics - do not infer independent from NULLs alone
-            # Check for confirmed affiliations in dj_affiliations table if exists
             has_aff_subq = "EXISTS (SELECT 1 FROM dj_affiliations da WHERE da.dj_id = djs.dj_id)"
             has_confirmed_aff = "((" + has_aff_subq + ") OR (station_key IS NOT NULL AND station_key <> '') OR (station_name IS NOT NULL AND station_name <> ''))"
+            v = "COALESCE(verification::jsonb, '{}'::jsonb)"
             if aff in ("radio_affiliated", "radioaffiliated", "affiliated", "radio", "station", "station_affiliated"):
-                # confirmed association with at least one station (from affiliations table or legacy)
                 clauses.append(has_confirmed_aff)
                 clauses.append("NOT EXISTS (SELECT 1 FROM dj_affiliations da2 WHERE da2.dj_id = djs.dj_id GROUP BY da2.dj_id HAVING COUNT(*) >= 2)")
             elif aff in ("multiple", "multi", "multiple_stations"):
                 clauses.append("EXISTS (SELECT 1 FROM dj_affiliations da2 WHERE da2.dj_id = djs.dj_id GROUP BY da2.dj_id HAVING COUNT(*) >= 2)")
             elif aff in ("independent", "indep", "solo", "unaffiliated"):
-                clauses.append("((verification::jsonb->>'independence_status') = 'independent' OR verification::jsonb->>'independent' = 'true') AND NOT " + has_confirmed_aff)
+                clauses.append("((" + v + "->>'independence_status') = 'independent' OR (" + v + "->>'independent') = 'true' OR (" + v + "->>'affiliation') = 'independent') AND NOT " + has_confirmed_aff)
             elif aff in ("unknown", "affiliation_unknown", "unconfirmed"):
-                clauses.append("NOT ((verification::jsonb->>'independence_status') = 'independent' OR verification::jsonb->>'independent' = 'true') AND NOT " + has_confirmed_aff)
+                clauses.append("NOT ((" + v + "->>'independence_status') = 'independent' OR (" + v + "->>'independent') = 'true' OR (" + v + "->>'affiliation') = 'independent') AND NOT " + has_confirmed_aff)
             elif aff in ("needs_review", "needs review"):
                 clauses.append("COALESCE(verification::jsonb->>'review_status','') ILIKE %s")
                 params.append("%needs_review%")
